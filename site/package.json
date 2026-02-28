@@ -1,0 +1,20 @@
+{
+  "name": "graphql-sui-block-explorer-site",
+  "description": "Single-file Sui GraphQL block explorer site",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build-single-file.mjs",
+    "build:check": "node scripts/build-single-file.mjs --check",
+    "baseline": "node scripts/report-baseline.mjs",
+    "gql:surface": "node scripts/report-gql-surface.mjs",
+    "perf:budgets": "node scripts/report-perf-budgets.mjs",
+    "schema:refresh": "node scripts/refresh-schema-root-fields.mjs",
+    "schema:coverage": "node scripts/report-schema-coverage.mjs",
+    "schema:check": "node scripts/report-schema-coverage.mjs --check",
+    "validate": "npm run build:check && node scripts/check-syntax.mjs && node scripts/check-quality.mjs && npm run schema:check"
+  }
+}

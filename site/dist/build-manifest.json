@@ -1,0 +1,13 @@
+{
+  "source": "src/index.html",
+  "buildMode": "templated-inline",
+  "sourceDescriptor": "src/index.template.html + src/styles.css + src/app.js",
+  "outputs": [
+    "index.html",
+    "dist/index.html"
+  ],
+  "hashSha256": "f61245226d5f1f5a4d25ffc4197f7bc5846de93bd09bf6dc3c421eea31e681c8",
+  "lines": 12280,
+  "bytes": 584827,
+  "builtAt": "2026-02-28T21:24:25.519Z"
+}

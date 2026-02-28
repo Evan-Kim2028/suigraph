@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sui Block Explorer</title>
+  <style>
+/* @build-inline styles.css */
+{{INLINE_CSS}}
+  </style>
+</head>
+<body>
+
+<div class="topbar">
+  <a class="logo" href="#/">Sui Explorer <span>// GraphQL</span></a>
+  <form class="search-wrap" id="searchForm">
+    <span class="search-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+    <input id="searchInput" type="search" placeholder="Address / Tx Digest / Checkpoint / Package" enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+    <button type="submit" class="search-btn" title="Search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16" y2="16"/></svg></button>
+  </form>
+  <nav>
+    <a href="#/" data-page="home">Overview</a>
+    <div class="nav-dropdown" data-group="network">
+      <button type="button" class="nav-trigger" data-action="nav-toggle-dropdown">Network</button>
+      <div class="dropdown-menu">
+        <a href="#/transfers" data-page="transfers" data-action="nav-close-dropdowns">Transfers</a>
+        <a href="#/congestion" data-page="congestion" data-action="nav-close-dropdowns">Congestion</a>
+        <a href="#/events" data-page="events" data-action="nav-close-dropdowns">Events</a>
+        <a href="#/protocol" data-page="protocol" data-action="nav-close-dropdowns">Protocol Config</a>
+        <a href="#/packages" data-page="packages" data-action="nav-close-dropdowns">Packages</a>
+      </div>
+    </div>
+    <div class="nav-dropdown" data-group="defi">
+      <button type="button" class="nav-trigger" data-action="nav-toggle-dropdown">DeFi</button>
+      <div class="dropdown-menu">
+        <a href="#/defi-overview" data-page="defi-overview" data-action="nav-close-dropdowns">Overview</a>
+        <a href="#/defi-rates" data-page="defi-rates" data-action="nav-close-dropdowns">Lending Rates</a>
+        <a href="#/defi-dex" data-page="defi-dex" data-action="nav-close-dropdowns">DEX</a>
+        <a href="#/defi-stablecoins" data-page="defi-stablecoins" data-action="nav-close-dropdowns">Stablecoins</a>
+        <a href="#/defi-flows" data-page="defi-flows" data-action="nav-close-dropdowns">Flows</a>
+        <a href="#/defi-risk" data-page="defi-risk" data-action="nav-close-dropdowns">Risk Monitor</a>
+      </div>
+    </div>
+    <div class="nav-dropdown" data-group="devtools">
+      <button type="button" class="nav-trigger" data-action="nav-toggle-dropdown">Dev Tools</button>
+      <div class="dropdown-menu">
+        <a href="#/graphql" data-page="graphql" data-action="nav-close-dropdowns">GraphQL Playground</a>
+        <a href="#/simulate" data-page="simulate" data-action="nav-close-dropdowns">TX Simulator</a>
+      </div>
+    </div>
+    <a href="#/validators" data-page="validators">Validators</a>
+    <a href="#/docs" data-page="docs">Docs</a>
+  </nav>
+  <button id="theme-toggle" class="theme-toggle" type="button" data-action="toggle-theme">Midnight</button>
+  <button id="view-mode-toggle" class="mode-toggle" type="button" data-action="toggle-view-mode">Simple</button>
+  <span id="perf-badge" class="perf-badge" title="Page perf stats">Idle</span>
+  <span class="net-badge">Mainnet</span>
+</div>
+
+<div class="main" id="app">
+  <div class="loading"><div class="spinner"></div><br>Loading...</div>
+</div>
+
+<script>
+/* @build-inline app.js */
+{{INLINE_JS}}
+  </script>
+</body>
+</html>
