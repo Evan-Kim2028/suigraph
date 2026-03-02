@@ -28,7 +28,7 @@ This repo is designed to be deployable on [Walrus Sites](https://docs.wal.app/) 
   - events, congestion, transfers
 - DeFi-focused pages:
   - overview
-  - lending rates
+  - lending markets (rates + USD supply/borrow depth per protocol)
   - DEX activity
   - stablecoins
   - flows
@@ -161,3 +161,5 @@ The site object ID is also tracked in `site/dist/ws-resources.json` under the `o
 - `site/docs/ARCHITECTURE.md`: architectural notes
 - `site/docs/BUILD.md`: build/validate details
 - `site/docs/CONTRIBUTING.md`: contribution expectations
+- `docs/defi-portfolio/on-chain-pricing.md`: pool oracle pricing methodology
+- `docs/defi-portfolio/`: per-protocol position querying guides
