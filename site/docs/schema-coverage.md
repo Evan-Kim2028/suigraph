@@ -9,12 +9,12 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 
 | Metric | Value |
 |---|---:|
-| Total gql call sites | 82 |
-| Static template query call sites | 77 |
+| Total gql call sites | 89 |
+| Static template query call sites | 84 |
 | Dynamic/non-literal call sites | 5 |
 | Query root fields in schema snapshot | 32 |
-| Query root fields used (static scan) | 21 |
-| Query root coverage | 65.6% |
+| Query root fields used (static scan) | 22 |
+| Query root coverage | 68.8% |
 | Mutation root fields used | 0 |
 | Subscription root fields used | 0 |
 | Unknown root tokens in static scan | 0 |
@@ -23,9 +23,9 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 
 | Root field | Static call sites |
 |---|---:|
-| `address` | 25 |
-| `object` | 12 |
-| `checkpoint` | 8 |
+| `address` | 26 |
+| `object` | 13 |
+| `checkpoint` | 10 |
 | `transactions` | 8 |
 | `checkpoints` | 4 |
 | `epoch` | 3 |
@@ -40,6 +40,7 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 | `epochs` | 1 |
 | `events` | 1 |
 | `nameRecord` | 1 |
+| `objects` | 1 |
 | `protocolConfigs` | 1 |
 | `simulateTransaction` | 1 |
 | `transaction` | 1 |
@@ -53,7 +54,6 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 - `multiGetTransactions`
 - `multiGetTypes`
 - `node`
-- `objects`
 - `package`
 - `packages`
 - `type`

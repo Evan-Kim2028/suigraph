@@ -796,12 +796,12 @@ const ALPHA_POSITIONS_TABLE = "0x9923cec7b613e58cc3feec1e8651096ad7970c0b4ef28b8
 const ALPHA_CAP_TYPE = `${ALPHA_PKG}::position::PositionCap`;
 const ALPHA_MARKETS = {
   1:"SUI", 2:"stSUI", 3:"BTC", 4:"LBTC", 5:"USDT", 6:"USDC",
-  7:"WAL", 8:"DEEP", 9:"BLUE", 10:"ETH",
+  7:"WAL", 8:"DEEP", 9:"BLUE", 10:"ETH", 11:"DEEP",
   12:"ALPHA", 13:"DMC", 14:"TBTC", 15:"IKA",
   16:"XBTC", 17:"ALKIMI", 18:"XAUM", 19:"UP",
   20:"EBTC", 21:"ESUI", 22:"EGUSDC", 23:"ETHIRD",
   24:"EXBTC", 25:"SDEUSD", 26:"EWAL", 27:"RCUSDP",
-  28:"COIN", 29:"WBTC", 30:"BTCVC", 31:"SUI_USDE",
+  28:"COIN", 29:"WBTC", 30:"BTCVC", 31:"SUI_USDE", 32:"dbUSDC",
 };
 
 // Cetus CLMM
@@ -835,6 +835,30 @@ const AF_CLEARING_HOUSES = {
   "0x95969906ca735c9d44e8a44b5b7791b4dacaddf70fbdfbda40ccd3f8a9fd4920": "BTC/USD",
   "0xed358c545b4a6698f757d3840a6b7effd1b958dd31260931bef07691f255b1fa": "XAUT/USD",
 };
+const AF_USDC_COIN_TYPE = "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC";
+const AF_CLEARING_HOUSE_TYPE = `${AF_PERPS_PKG}::clearing_house::ClearingHouse<${AF_USDC_COIN_TYPE}>`;
+const AF_POSITION_KEY_TYPE = `${AF_PERPS_PKG}::keys::Position`;
+const AF_ORDERBOOK_KEY_TYPE = `${AF_PERPS_PKG}::keys::Orderbook`;
+const AF_ASKS_MAP_KEY_TYPE = `${AF_PERPS_PKG}::keys::AsksMap`;
+const AF_BIDS_MAP_KEY_TYPE = `${AF_PERPS_PKG}::keys::BidsMap`;
+const AF_IFIXED_SCALE_DECIMALS = 18;
+const AF_IFIXED_SIGN_BIT = 1n << 255n;
+const AF_IFIXED_FULL_RANGE = 1n << 256n;
+const AF_PERPS_EPS_RAW = 1000000n; // 1e-12 in IFixed(1e18) terms
+const AF_COLLATERAL_DUST_RAW = 1000000000000n; // 1e-6 in IFixed(1e18) terms
+const AF_ORDER_SIZE_DECIMALS = 9;
+const AF_ACCOUNT_CAP_PAGE_SIZE = 50;
+const AF_ACCOUNT_CAP_MAX_PAGES = 10;
+const AF_POSITION_QUERY_BATCH = 50;
+const AF_ORDERBOOK_PAGE_SIZE = 50;
+const AF_ORDERBOOK_MAX_PAGES = 24;
+const AF_ORDER_EVENT_TX_SCAN = 40;
+const AF_ORDER_EVENT_PER_TX = 20;
+const AF_CLEARING_HOUSE_DISCOVERY_TTL_MS = 5 * 60 * 1000;
+const AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES = 4;
+const AF_PERPS_SIZE_EPS = 1e-12;
+const AF_PERPS_COLLATERAL_DUST = 1e-6;
+let afClearingHouseDiscoveryCache = { at: 0, rows: [], partial: false };
 
 async function gql(query, variables = {}) {
   const payload = JSON.stringify({ query, variables });
@@ -989,11 +1013,45 @@ function u64Bcs(n) {
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }
+function parseIFixedRaw(val) {
+  const raw = parseBigIntSafe(val);
+  return raw >= AF_IFIXED_SIGN_BIT ? raw - AF_IFIXED_FULL_RANGE : raw;
+}
+function scaledBigIntToApprox(raw, decimals, maxFrac = 8) {
+  const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+  const neg = bi < 0n;
+  const abs = neg ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  let wholeNum = Number(whole);
+  if (!Number.isFinite(wholeNum)) wholeNum = Number.MAX_SAFE_INTEGER;
+  if (d <= 0) return neg ? -wholeNum : wholeNum;
+  const fracStr = frac.toString().padStart(d, "0").slice(0, Math.max(0, maxFrac));
+  const fracNum = fracStr ? Number(`0.${fracStr}`) : 0;
+  const mag = wholeNum + (Number.isFinite(fracNum) ? fracNum : 0);
+  return neg ? -mag : mag;
+}
+function scaledBigIntAbsToApprox(raw, decimals, maxFrac = 8) {
+  const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+  return scaledBigIntToApprox(bi < 0n ? -bi : bi, decimals, maxFrac);
+}
+function scaledBigIntToText(raw, decimals, maxFrac = 8) {
+  const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+  const neg = bi < 0n;
+  const abs = neg ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  if (d <= 0) return `${neg ? "-" : ""}${whole.toString()}`;
+  let fracStr = frac.toString().padStart(d, "0");
+  fracStr = fracStr.slice(0, Math.max(0, maxFrac)).replace(/0+$/, "");
+  return `${neg ? "-" : ""}${whole.toString()}${fracStr ? "." + fracStr : ""}`;
+}
 function parseIFixed(val) {
-  if (!val || val === "0") return 0;
-  const raw = BigInt(val);
-  const signed = raw >= (1n << 255n) ? raw - (1n << 256n) : raw;
-  return Number(signed) / 1e18;
+  return scaledBigIntToApprox(parseIFixedRaw(val), AF_IFIXED_SCALE_DECIMALS, 8);
 }
 
 const FIXED32_SCALE = 4294967296; // 2^32
@@ -1212,7 +1270,46 @@ function intentConfidenceClass(confidence) {
   return "intent-low";
 }
 
+// Event-type keyword → action label (first match wins, checked against lowercased event type repr)
+// Uses regex with word-boundary-like matching (split on :: and _) to avoid "restake" matching "stake"
+const EVENT_ACTION_TAGS = [
+  { re: /swap/,      label: "Swap" },
+  { re: /deposit/,   label: "Deposit" },
+  { re: /withdraw/,  label: "Withdraw" },
+  { re: /borrow/,    label: "Borrow" },
+  { re: /repay/,     label: "Repay" },
+  { re: /liquidat/,  label: "Liquidation" },
+  { re: /unstake/,   label: "Unstake" },
+  { re: /(?<![re])stake/, label: "Stake" },
+  { re: /claim/,     label: "Claim" },
+  { re: /\bmint/,    label: "Mint" },
+  { re: /\bburn/,    label: "Burn" },
+  { re: /flash/,     label: "Flash Loan" },
+  { re: /order/,     label: "Order" },
+  { re: /\bfill/,    label: "Fill" },
+];
+
+function classifyEventAction(events) {
+  if (!events?.length) return null;
+  for (const ev of events) {
+    const repr = (ev?.contents?.type?.repr || "").toLowerCase();
+    if (!repr) continue;
+    for (const tag of EVENT_ACTION_TAGS) {
+      if (tag.re.test(repr)) return { label: tag.label, eventType: ev.contents.type.repr };
+    }
+  }
+  return null;
+}
+
+const _intentCache = new Map();
 function analyzeTxIntent(tx) {
+  const digest = tx?.digest;
+  if (digest && _intentCache.has(digest)) return _intentCache.get(digest);
+  const result = _analyzeTxIntentInner(tx);
+  if (digest) { if (_intentCache.size >= 1024) _intentCache.clear(); _intentCache.set(digest, result); }
+  return result;
+}
+function _analyzeTxIntentInner(tx) {
   const kind = tx?.kind;
   if (!kind) {
     return { label: "Transaction", confidence: "low", protocol: "", evidence: ["Missing transaction kind metadata"] };
@@ -1261,11 +1358,19 @@ function analyzeTxIntent(tx) {
     : "";
   const protocol = inferProtocolTag(movePkg);
 
+  // Event-based action tagging (high confidence — protocol-authored events)
+  const events = tx?.effects?.events?.nodes || [];
+  const eventAction = classifyEventAction(events);
+
   let label = "Programmable Tx";
   let confidence = "low";
   const evidence = [];
 
-  if (counts.publish > 0) {
+  if (eventAction) {
+    label = eventAction.label;
+    confidence = "high";
+    evidence.push(`Event: ${eventAction.eventType}`);
+  } else if (counts.publish > 0) {
     label = counts.publish > 1 ? "Publish Batch" : "Publish";
     confidence = "high";
     evidence.push(`${counts.publish} publish command${counts.publish > 1 ? "s" : ""}`);
@@ -2048,6 +2153,7 @@ async function renderDashboard(app) {
         effects {
           status timestamp
           gasEffects { gasSummary { computationCost storageCost storageRebate } }
+          events(first: 3) { nodes { contents { type { repr } } } }
         }
       }
     }
@@ -2364,6 +2470,7 @@ async function renderDashboard(app) {
             effects {
               status timestamp
               gasEffects { gasSummary { computationCost storageCost storageRebate } }
+              events(first: 3) { nodes { contents { type { repr } } } }
             }
           }
         }
@@ -2596,73 +2703,552 @@ async function renderCheckpointDetail(app, seqNum) {
   app.addEventListener("click", app._checkpointDetailClickHandler);
 }
 
+const TX_LIST_PRESET_DAYS = { "7d": 7, "30d": 30 };
+const TX_LIST_LATEST_CHECKPOINT_TTL_MS = 30000;
+const TX_LIST_CHECKPOINT_PADDING = 2;
+const txListCheckpointTsCache = {};
+const txListCheckpointTsInFlight = {};
+const txListCheckpointHints = [];
+let txListLatestCheckpointCache = { seq: 0, tsMs: NaN, at: 0 };
+
+function txListNormalizeDateState(state = {}) {
+  const rawPreset = String(state.preset || "all");
+  const preset = (rawPreset === "7d" || rawPreset === "30d" || rawPreset === "custom") ? rawPreset : "all";
+  return {
+    preset,
+    fromDate: String(state.fromDate || ""),
+    toDate: String(state.toDate || ""),
+  };
+}
+
+function txListDateInputFromMs(ms) {
+  if (!Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function txListParseInputDateMs(value, endOfDay = false) {
+  const raw = String(value || "").trim();
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return NaN;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const ts = endOfDay
+    ? Date.UTC(y, mo, d, 23, 59, 59, 999)
+    : Date.UTC(y, mo, d, 0, 0, 0, 0);
+  return Number.isFinite(ts) ? ts : NaN;
+}
+
+function txListFormatTokenAmount(v) {
+  const raw = String(v ?? "").trim();
+  const n = Math.abs(Number(raw || 0));
+  if (!Number.isFinite(n)) {
+    const m = raw.match(/^[-+]?(\d+)(?:\.(\d+))?$/);
+    if (!m) return "0";
+    const intPart = (m[1] || "0").replace(/^0+/, "") || "0";
+    const fracPart = (m[2] || "").replace(/0+$/, "");
+    const len = intPart.length;
+    if (len > 12) return `${intPart.slice(0, len - 12)}.${intPart.slice(len - 12, len - 10)}T`;
+    if (len > 9) return `${intPart.slice(0, len - 9)}.${intPart.slice(len - 9, len - 7)}B`;
+    if (len > 6) return `${intPart.slice(0, len - 6)}.${intPart.slice(len - 6, len - 4)}M`;
+    if (len > 3) return `${intPart.slice(0, len - 3)}.${intPart.slice(len - 3, len - 2)}K`;
+    return fracPart ? `${intPart}.${fracPart.slice(0, 4)}` : intPart;
+  }
+  if (n >= 1000000) return fmtCompact(n);
+  if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+  if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  if (n >= 0.0001) return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  return n.toExponential(2);
+}
+
+function parseBigIntSafe(v) {
+  try {
+    return BigInt(String(v ?? 0));
+  } catch (e) {
+    return 0n;
+  }
+}
+
+function pow10BigInt(n) {
+  const d = Math.max(0, Math.floor(Number(n || 0)));
+  let out = 1n;
+  for (let i = 0; i < d; i += 1) out *= 10n;
+  return out;
+}
+
+function txListRawToApproxAbs(raw, decimals) {
+  const bi = parseBigIntSafe(raw);
+  const abs = bi < 0n ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  let wholeNum = Number(whole);
+  if (!Number.isFinite(wholeNum)) wholeNum = Number.MAX_SAFE_INTEGER;
+  if (d <= 0) return wholeNum;
+  const fracStr = frac.toString().padStart(d, "0").slice(0, 8);
+  const fracNum = fracStr ? Number(`0.${fracStr}`) : 0;
+  return wholeNum + (Number.isFinite(fracNum) ? fracNum : 0);
+}
+
+function txListRawToDecimalText(raw, decimals, maxFrac = 8) {
+  const bi = parseBigIntSafe(raw);
+  const neg = bi < 0n;
+  const abs = neg ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  if (d <= 0) return `${neg ? "-" : "+"}${whole.toString()}`;
+  let fracStr = frac.toString().padStart(d, "0").slice(0, Math.max(0, maxFrac));
+  fracStr = fracStr.replace(/0+$/, "");
+  return `${neg ? "-" : "+"}${whole.toString()}${fracStr ? `.${fracStr}` : ""}`;
+}
+
+function txListRememberCheckpointHint(tsMs, seq) {
+  if (!Number.isFinite(tsMs) || !Number.isFinite(seq)) return;
+  const s = Math.max(0, Math.floor(seq));
+  const existing = txListCheckpointHints.find((h) => h.seq === s);
+  if (existing) {
+    existing.tsMs = tsMs;
+  } else {
+    txListCheckpointHints.push({ tsMs, seq: s });
+  }
+  txListCheckpointHints.sort((a, b) => a.tsMs - b.tsMs);
+  if (txListCheckpointHints.length > 256) txListCheckpointHints.splice(0, txListCheckpointHints.length - 256);
+}
+
+function txListSearchBoundsFromHints(targetMs, latestSeq) {
+  if (!Number.isFinite(targetMs) || !Number.isFinite(latestSeq) || !txListCheckpointHints.length) {
+    return { lo: 0, hi: Math.max(0, Math.floor(Number(latestSeq || 0))) };
+  }
+  let lower = null;
+  let upper = null;
+  for (const h of txListCheckpointHints) {
+    if (h.tsMs <= targetMs) lower = h;
+    if (h.tsMs >= targetMs) { upper = h; break; }
+  }
+  const lo = lower ? Math.max(0, lower.seq) : 0;
+  const hiBase = upper ? upper.seq : Math.max(0, Math.floor(Number(latestSeq || 0)));
+  const hi = Math.min(Math.max(0, Math.floor(Number(latestSeq || 0))), Math.max(lo, hiBase));
+  return { lo, hi };
+}
+
+function txListBuildFlowSummary(balanceChanges, opts = {}) {
+  const maxItems = Number.isFinite(opts?.maxItems) ? Math.max(1, Math.floor(opts.maxItems)) : 4;
+  const senderScoped = Object.prototype.hasOwnProperty.call(opts || {}, "ownerAddress");
+  const ownerNorm = normalizeSuiAddress(opts?.ownerAddress || "");
+  const partial = !!opts?.partial;
+  const byCoin = {};
+  for (const bc of (balanceChanges || [])) {
+    if (senderScoped) {
+      const bcOwner = normalizeSuiAddress(bc?.owner?.address || "");
+      if (!ownerNorm || bcOwner !== ownerNorm) continue;
+    }
+    const coinType = String(bc?.coinType?.repr || "");
+    const raw = parseBigIntSafe(bc?.amount || 0);
+    if (!coinType || raw === 0n) continue;
+    const meta = resolveCoinType(coinType);
+    const decimals = Number(meta?.decimals || 9);
+    if (!byCoin[coinType]) {
+      byCoin[coinType] = {
+        coinType,
+        symbol: meta?.symbol || shortType(coinType),
+        decimals,
+        raw: 0n,
+      };
+    }
+    byCoin[coinType].raw += raw;
+  }
+
+  const rows = Object.values(byCoin)
+    .map((r) => ({
+      ...r,
+      absApprox: txListRawToApproxAbs(r.raw, r.decimals),
+    }))
+    .filter((r) => r.raw !== 0n)
+    .sort((a, b) => b.absApprox - a.absApprox);
+
+  if (!rows.length) {
+    return {
+      hasFlows: false,
+      text: senderScoped ? "No sender net token flows" : "No net token flows",
+      csv: "",
+      partial,
+    };
+  }
+
+  const partsAll = rows.map((r) => {
+    const signed = txListRawToDecimalText(r.raw, r.decimals, 8);
+    const sign = signed.startsWith("-") ? "-" : "+";
+    const absText = signed.replace(/^[-+]/, "");
+    return `${sign}${txListFormatTokenAmount(absText)} ${r.symbol}`;
+  });
+  const partsShown = partsAll.slice(0, Math.max(1, maxItems));
+  const more = partsAll.length > partsShown.length ? `, +${partsAll.length - partsShown.length} more` : "";
+  const partialSuffix = partial ? " (partial window)" : "";
+  return {
+    hasFlows: true,
+    text: partsShown.join(", ") + more + partialSuffix,
+    csv: partsAll.join(" | ") + (partial ? " | [partial_window]" : ""),
+    partial,
+  };
+}
+
+function txListCsvCell(value) {
+  const s = String(value ?? "");
+  return `"${s.replace(/"/g, "\"\"")}"`;
+}
+
+function txListBuildCsv(rows) {
+  const header = [
+    "timestamp",
+    "digest",
+    "checkpoint",
+    "sender",
+    "status",
+    "summary",
+    "token_amounts",
+    "partial_balance_window",
+  ];
+  const lines = [header.map(txListCsvCell).join(",")];
+  for (const row of (rows || [])) {
+    lines.push([
+      row.tx?.effects?.timestamp || "",
+      row.tx?.digest || "",
+      row.tx?.effects?.checkpoint?.sequenceNumber ?? "",
+      row.tx?.sender?.address || "",
+      row.tx?.effects?.status || "",
+      row.summary || "",
+      row.flow?.csv || "",
+      row.flow?.partial ? "true" : "false",
+    ].map(txListCsvCell).join(","));
+  }
+  return lines.join("\n") + "\n";
+}
+
+function txListDownloadCsv(filename, csvContent) {
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function txListFetchLatestCheckpointHead(force = false) {
+  const now = Date.now();
+  if (!force
+    && Number.isFinite(txListLatestCheckpointCache.seq)
+    && Number.isFinite(txListLatestCheckpointCache.tsMs)
+    && (now - txListLatestCheckpointCache.at) < TX_LIST_LATEST_CHECKPOINT_TTL_MS) {
+    return txListLatestCheckpointCache;
+  }
+  const data = await gql(`{ checkpoint { sequenceNumber timestamp } }`);
+  const seq = Number(data?.checkpoint?.sequenceNumber || 0);
+  const tsMs = parseTsMs(data?.checkpoint?.timestamp);
+  txListLatestCheckpointCache = {
+    seq: Number.isFinite(seq) ? seq : 0,
+    tsMs: Number.isFinite(tsMs) ? tsMs : NaN,
+    at: now,
+  };
+  txListRememberCheckpointHint(txListLatestCheckpointCache.tsMs, txListLatestCheckpointCache.seq);
+  return txListLatestCheckpointCache;
+}
+
+async function txListFetchCheckpointTimestampMs(sequenceNumber) {
+  const seq = Math.max(0, Math.floor(Number(sequenceNumber || 0)));
+  const key = String(seq);
+  if (Number.isFinite(txListCheckpointTsCache[key])) return txListCheckpointTsCache[key];
+  if (txListCheckpointTsInFlight[key]) return txListCheckpointTsInFlight[key];
+  txListCheckpointTsInFlight[key] = (async () => {
+    const data = await gql(`query($seq: UInt53) {
+      checkpoint(sequenceNumber: $seq) { sequenceNumber timestamp }
+    }`, { seq });
+    const tsMs = parseTsMs(data?.checkpoint?.timestamp);
+    const resolved = Number.isFinite(tsMs) ? tsMs : NaN;
+    // Cap cache at 512 entries to prevent unbounded growth during repeated date filter changes
+    const cacheKeys = Object.keys(txListCheckpointTsCache);
+    if (cacheKeys.length >= 512) { for (const k of cacheKeys.slice(0, 128)) delete txListCheckpointTsCache[k]; }
+    txListCheckpointTsCache[key] = resolved;
+    if (Number.isFinite(resolved)) txListRememberCheckpointHint(resolved, seq);
+    return resolved;
+  })().finally(() => {
+    delete txListCheckpointTsInFlight[key];
+  });
+  return txListCheckpointTsInFlight[key];
+}
+
+function txListBuildRows(txs) {
+  return (txs || []).map((tx) => {
+    const intent = analyzeTxIntent(tx);
+    const balanceConn = tx?.effects?.balanceChanges;
+    const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
+      ownerAddress: tx?.sender?.address || "",
+      partial: !!balanceConn?.pageInfo?.hasNextPage,
+    });
+    return {
+      tx,
+      intent,
+      flow,
+      summary: flow.hasFlows ? flow.text : intent.label,
+    };
+  });
+}
+
+async function txListFindCheckpointAtOrAfterMs(targetMs, latestSeq) {
+  const hinted = txListSearchBoundsFromHints(targetMs, latestSeq);
+  let lo = hinted.lo;
+  let hi = hinted.hi;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) {
+    lo = 0;
+    hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  }
+  let steps = 0;
+  while (lo < hi && steps < 32) {
+    steps += 1;
+    const mid = Math.floor((lo + hi) / 2);
+    const midTs = await txListFetchCheckpointTimestampMs(mid);
+    if (!Number.isFinite(midTs)) break;
+    if (midTs < targetMs) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+async function txListFindCheckpointAtOrBeforeMs(targetMs, latestSeq) {
+  const hinted = txListSearchBoundsFromHints(targetMs, latestSeq);
+  let lo = hinted.lo;
+  let hi = hinted.hi;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) {
+    lo = 0;
+    hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  }
+  let steps = 0;
+  while (lo < hi && steps < 32) {
+    steps += 1;
+    const mid = Math.floor((lo + hi + 1) / 2);
+    const midTs = await txListFetchCheckpointTimestampMs(mid);
+    if (!Number.isFinite(midTs)) break;
+    if (midTs <= targetMs) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+async function txListResolveDateFilter(state) {
+  const normalized = txListNormalizeDateState(state);
+  if (normalized.preset === "all") {
+    return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "" };
+  }
+
+  let fromMs = NaN;
+  let toMs = NaN;
+  if (normalized.preset === "custom") {
+    if (!normalized.fromDate || !normalized.toDate) {
+      return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "Select both start and end date." };
+    }
+    fromMs = txListParseInputDateMs(normalized.fromDate, false);
+    toMs = txListParseInputDateMs(normalized.toDate, true);
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
+      return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "Invalid custom date range." };
+    }
+  } else {
+    const days = Number(TX_LIST_PRESET_DAYS[normalized.preset] || 0);
+    const now = Date.now();
+    toMs = now;
+    fromMs = now - (days * 24 * 60 * 60 * 1000);
+  }
+
+  const latest = await txListFetchLatestCheckpointHead();
+  if (!Number.isFinite(latest.seq) || !Number.isFinite(latest.tsMs) || latest.seq < 0) {
+    return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "Could not resolve latest checkpoint for date filter." };
+  }
+
+  const clampedToMs = Math.min(toMs, latest.tsMs);
+  const clampedFromMs = Math.min(fromMs, clampedToMs);
+  const [startSeq, endSeq] = await Promise.all([
+    txListFindCheckpointAtOrAfterMs(clampedFromMs, latest.seq),
+    txListFindCheckpointAtOrBeforeMs(clampedToMs, latest.seq),
+  ]);
+  const lo = Math.max(0, Math.min(startSeq, endSeq) - TX_LIST_CHECKPOINT_PADDING);
+  const hi = Math.min(latest.seq, Math.max(startSeq, endSeq) + TX_LIST_CHECKPOINT_PADDING);
+  const note = `Timestamp range mapped to checkpoint bounds ~${fmtNumber(lo)} to ~${fmtNumber(hi)}.`;
+  return {
+    filter: { afterCheckpoint: lo, beforeCheckpoint: hi },
+    fromMs: clampedFromMs,
+    toMs: clampedToMs,
+    note,
+    error: "",
+  };
+}
+
+function txListWithinRange(tx, fromMs, toMs) {
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return true;
+  const ts = parseTsMs(tx?.effects?.timestamp);
+  if (!Number.isFinite(ts)) return false;
+  return ts >= fromMs && ts <= toMs;
+}
+
 // ── Transactions List ───────────────────────────────────────────────────
-async function renderTransactions(app, before = null) {
-  const data = await gql(`query($before: String) {
-    transactions(last: 25, before: $before) {
-      pageInfo { hasPreviousPage startCursor hasNextPage endCursor }
-      nodes {
-        digest
-        sender { address }
-        kind {
-          __typename
-          ... on ProgrammableTransaction {
-            commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
+async function renderTransactions(app, before = null, dateState = null) {
+  const state = txListNormalizeDateState(dateState || {});
+  const dateFilter = await txListResolveDateFilter(state);
+
+  let txs = [];
+  let txLoadError = dateFilter.error || "";
+  let pi = { hasPreviousPage: false, startCursor: "", hasNextPage: false, endCursor: "" };
+  if (!txLoadError) {
+    try {
+      const data = await gql(`query($before: String, $filter: TransactionFilter) {
+        transactions(last: 25, before: $before, filter: $filter) {
+          pageInfo { hasPreviousPage startCursor hasNextPage endCursor }
+          nodes {
+            digest
+            sender { address }
+            kind {
+              __typename
+              ... on ProgrammableTransaction {
+                commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
+              }
+            }
+            effects {
+              status timestamp
+              checkpoint { sequenceNumber }
+              gasEffects { gasSummary { computationCost storageCost storageRebate } }
+              balanceChanges(first: 50) {
+                pageInfo { hasNextPage }
+                nodes { owner { address } amount coinType { repr } }
+              }
+              events(first: 3) { nodes { contents { type { repr } } } }
+            }
           }
         }
-        effects {
-          status timestamp
-          checkpoint { sequenceNumber }
-          gasEffects { gasSummary { computationCost storageCost storageRebate } }
-        }
-      }
+      }`, { before, filter: dateFilter.filter });
+      txs = (data?.transactions?.nodes || []).reverse().filter((t) => txListWithinRange(t, dateFilter.fromMs, dateFilter.toMs));
+      pi = data?.transactions?.pageInfo || pi;
+    } catch (e) {
+      txLoadError = e?.message || "Failed to load transactions.";
     }
-  }`, { before });
+  }
 
-  const txs = data.transactions.nodes.reverse();
-  const pi = data.transactions.pageInfo;
+  const txRows = txListBuildRows(txs);
+
+  const emptyMsg = state.preset === "all"
+    ? "No transactions found."
+    : "No transactions matched this timestamp range.";
+  const tableContent = txLoadError
+    ? renderEmpty(`Failed to load transactions: ${escapeHtml(txLoadError)}`)
+    : (!txRows.length
+      ? renderEmpty(emptyMsg)
+      : `<table>
+          <thead><tr>
+            <th>Digest</th><th>Summary</th><th>Sender</th><th>Checkpoint</th><th>Status</th><th>Time</th>
+          </tr></thead>
+          <tbody>
+            ${txRows.map((row) => `<tr>
+              <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
+              <td class="tx-flow-cell">
+                <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
+                <div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>
+              </td>
+              <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
+              <td><a class="hash-link" href="#/checkpoint/${row.tx.effects?.checkpoint?.sequenceNumber}">${fmtNumber(row.tx.effects?.checkpoint?.sequenceNumber)}</a></td>
+              <td>${statusBadge(row.tx.effects?.status)}</td>
+              <td>${timeTag(row.tx.effects?.timestamp)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>`);
 
   app.innerHTML = `
     <div class="page-title">Transactions</div>
     <div class="card">
+      <div class="tx-list-toolbar">
+        <div class="tx-list-toolbar-left">
+          <span class="u-fs12-dim">Timestamp filter</span>
+          <select id="tx-list-date-preset" class="ui-control">
+            <option value="all" ${state.preset === "all" ? "selected" : ""}>All time</option>
+            <option value="7d" ${state.preset === "7d" ? "selected" : ""}>Last 7 days</option>
+            <option value="30d" ${state.preset === "30d" ? "selected" : ""}>Last 30 days</option>
+            <option value="custom" ${state.preset === "custom" ? "selected" : ""}>Custom</option>
+          </select>
+          ${state.preset === "custom" ? `<div class="tx-date-custom">
+            <input type="date" id="tx-list-date-from" class="ui-control" value="${escapeAttr(state.fromDate)}">
+            <span class="u-c-dim">to</span>
+            <input type="date" id="tx-list-date-to" class="ui-control" value="${escapeAttr(state.toDate)}">
+            <button data-action="tx-list-date-apply" class="btn-surface-sm">Apply</button>
+          </div>` : ""}
+        </div>
+        <div class="tx-list-toolbar-right">
+          <button data-action="tx-list-export-csv" class="btn-surface-sm" ${txRows.length ? "" : "disabled"}>Download CSV</button>
+        </div>
+      </div>
+      ${dateFilter.note ? `<div class="tx-filter-note">${escapeHtml(dateFilter.note)}</div>` : ""}
       <div class="card-body">
-        <table>
-          <thead><tr>
-            <th>Digest</th><th>Intent</th><th>Sender</th><th>Checkpoint</th><th>Status</th><th>Time</th>
-          </tr></thead>
-          <tbody>
-            ${txs.map(t => {
-              const intent = analyzeTxIntent(t);
-              return `<tr>
-              <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
-              <td class="u-fs12">${renderIntentChip(intent)}</td>
-              <td>${t.sender ? hashLink(t.sender.address, '/address/' + t.sender.address) : "—"}</td>
-              <td><a class="hash-link" href="#/checkpoint/${t.effects?.checkpoint?.sequenceNumber}">${fmtNumber(t.effects?.checkpoint?.sequenceNumber)}</a></td>
-              <td>${statusBadge(t.effects?.status)}</td>
-              <td>${timeTag(t.effects?.timestamp)}</td>
-            </tr>`;
-            }).join("")}
-          </tbody>
-        </table>
-        <div class="pagination">
+        ${tableContent}
+        ${txLoadError ? "" : `<div class="pagination">
           <button data-action="txs-newer" data-cursor="${escapeAttr(pi.endCursor || "")}"
             ${!pi.hasNextPage ? "disabled" : ""}>Newer</button>
           <button data-action="txs-older" data-cursor="${escapeAttr(pi.startCursor || "")}"
             ${!pi.hasPreviousPage ? "disabled" : ""}>Older</button>
-        </div>
+        </div>`}
       </div>
     </div>
   `;
+
+  const presetEl = document.getElementById("tx-list-date-preset");
+  if (presetEl) {
+    presetEl.onchange = async () => {
+      const next = txListNormalizeDateState({
+        preset: presetEl.value,
+        fromDate: document.getElementById("tx-list-date-from")?.value || state.fromDate,
+        toDate: document.getElementById("tx-list-date-to")?.value || state.toDate,
+      });
+      if (next.preset !== "custom") {
+        next.fromDate = "";
+        next.toDate = "";
+      } else if (!next.fromDate && !next.toDate) {
+        const now = Date.now();
+        next.toDate = txListDateInputFromMs(now);
+        next.fromDate = txListDateInputFromMs(now - 7 * 24 * 60 * 60 * 1000);
+      }
+      await renderTransactions(app, null, next);
+    };
+  }
+
   if (app._txsClickHandler) app.removeEventListener("click", app._txsClickHandler);
   app._txsClickHandler = async (ev) => {
     const trigger = ev.target?.closest?.("[data-action]");
     if (!trigger || !app.contains(trigger)) return;
     const action = trigger.getAttribute("data-action");
-    if (action !== "txs-newer" && action !== "txs-older") return;
+    if (!action) return;
     ev.preventDefault();
+    if (action === "tx-list-export-csv") {
+      if (!txRows.length) return;
+      const stamp = new Date().toISOString().slice(0, 10);
+      txListDownloadCsv(`suigraph-transactions-${stamp}.csv`, txListBuildCsv(txRows));
+      return;
+    }
+    if (action === "tx-list-date-apply") {
+      const next = txListNormalizeDateState({
+        preset: "custom",
+        fromDate: document.getElementById("tx-list-date-from")?.value || "",
+        toDate: document.getElementById("tx-list-date-to")?.value || "",
+      });
+      await renderTransactions(app, null, next);
+      return;
+    }
+    if (action !== "txs-newer" && action !== "txs-older") return;
     if (trigger.hasAttribute("disabled")) return;
     const cursor = trigger.getAttribute("data-cursor") || "";
-    await renderTransactions(app, cursor || null);
+    await renderTransactions(app, cursor || null, state);
   };
   app.addEventListener("click", app._txsClickHandler);
 }
@@ -3750,38 +4336,25 @@ async function fetchSuiPriceFromDeepBook() {
 }
 
 // ── Pool Oracle: on-chain pricing via Cetus + Bluefin CLMM pools ──────
-async function discoverPoolAddresses(coinTypes) {
-  const now = Date.now();
-  const needed = coinTypes.filter(ct => {
-    const c = poolAddressCache[ct];
-    return !c || (now - c.ts > POOL_ORACLE_DISCOVERY_TTL_MS);
-  });
-  if (!needed.length) return;
-
-  // Optimized: Cetus-only (most liquidity), SUI-quote-only (convert via SUI price)
-  // 2 aliases per token (both orderings) instead of 8
+async function _discoverPoolsForDex(needed, prefix, dex, suiType, usdcType) {
   const aliases = [];
   const aliasMeta = [];
-  const suiType = QUOTE_COINS.SUI.type;
   for (const ct of needed) {
-    if (ct === suiType) continue;
+    if (ct === suiType || ct === usdcType) continue;
     // TOKEN/SUI
-    const ab = `${CETUS_POOL_TYPE_PREFIX}<${ct}, ${suiType}>`;
-    const aliasAB = `a${aliases.length}`;
-    aliases.push(`${aliasAB}: objects(filter: { type: "${ab}" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
-    aliasMeta.push({ coinType: ct, dex: "cetus", quoteSymbol: "SUI", isTokenA: true });
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${suiType}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "SUI", isTokenA: true });
     // SUI/TOKEN
-    const ba = `${CETUS_POOL_TYPE_PREFIX}<${suiType}, ${ct}>`;
-    const aliasBA = `a${aliases.length}`;
-    aliases.push(`${aliasBA}: objects(filter: { type: "${ba}" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
-    aliasMeta.push({ coinType: ct, dex: "cetus", quoteSymbol: "SUI", isTokenA: false });
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${suiType}, ${ct}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "SUI", isTokenA: false });
+    // TOKEN/USDC
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${usdcType}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "USDC", isTokenA: true });
+    // USDC/TOKEN
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${usdcType}, ${ct}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "USDC", isTokenA: false });
   }
   if (!aliases.length) return;
-
-  // Reset stale entries before re-populating to prevent duplicate accumulation
-  for (const ct of needed) poolAddressCache[ct] = { pools: [], ts: 0 };
-
-  // 6 aliases per chunk, all chunks in parallel
   const chunks = chunkArray(aliases.map((a, i) => ({ alias: a, meta: aliasMeta[i] })), 6);
   const CONCURRENCY = 10;
   for (let start = 0; start < chunks.length; start += CONCURRENCY) {
@@ -3798,19 +4371,45 @@ async function discoverPoolAddresses(coinTypes) {
           for (const node of poolNodes) {
             const json = node.asMoveObject?.contents?.json;
             const liq = Number(json?.liquidity || 0);
-            if (liq <= 0) continue; // skip dead pools
+            if (liq <= 0) continue;
             poolAddressCache[meta.coinType].pools.push({
-              address: node.address,
-              dex: meta.dex,
-              quoteSymbol: meta.quoteSymbol,
-              isTokenA: meta.isTokenA,
+              address: node.address, dex: meta.dex,
+              quoteSymbol: meta.quoteSymbol, isTokenA: meta.isTokenA,
               typeRepr: node.asMoveObject?.contents?.type?.repr || "",
             });
           }
         }
-      } catch (e) { console.warn("[pool-oracle] discovery chunk error:", e?.message || e); }
+      } catch (e) { console.warn(`[pool-oracle] ${dex} discovery error:`, e?.message || e); }
     }));
   }
+}
+
+async function discoverPoolAddresses(coinTypes) {
+  const now = Date.now();
+  const needed = coinTypes.filter(ct => {
+    const c = poolAddressCache[ct];
+    return !c || (now - c.ts > POOL_ORACLE_DISCOVERY_TTL_MS);
+  });
+  if (!needed.length) return;
+
+  const suiType = QUOTE_COINS.SUI.type;
+  const usdcType = QUOTE_COINS.USDC.type;
+
+  // Reset stale entries before re-populating
+  for (const ct of needed) poolAddressCache[ct] = { pools: [], ts: 0 };
+
+  // Pass 1: Cetus pools (primary — most tokens have Cetus liquidity)
+  await _discoverPoolsForDex(needed, CETUS_POOL_TYPE_PREFIX, "cetus", suiType, usdcType);
+
+  // Pass 2: Bluefin pools (fallback — only for tokens with no Cetus pools)
+  const needBluefin = needed.filter(ct => {
+    const cached = poolAddressCache[ct];
+    return !cached || !cached.pools.length;
+  });
+  if (needBluefin.length) {
+    await _discoverPoolsForDex(needBluefin, BLUEFIN_POOL_TYPE_PREFIX, "bluefin", suiType, usdcType);
+  }
+
   // Update timestamps
   for (const ct of needed) poolAddressCache[ct].ts = now;
 }
@@ -6287,64 +6886,554 @@ async function fetchBluefinProPositions(addr) {
   } catch (e) { return { positions: [], collateral: 0 }; }
 }
 
+function afNormalizeAccountId(v) {
+  const raw = String(v ?? "").trim();
+  if (!raw || !/^\d+$/.test(raw)) return "";
+  return raw.replace(/^0+(?=\d)/, "") || "0";
+}
+function afMarketAccountKey(chId, accountId) {
+  return `${chId}::${accountId}`;
+}
+function afMarketLabel(chId) {
+  return AF_CLEARING_HOUSES[chId] || `Market ${truncHash(chId, 6)}`;
+}
+async function fetchAftermathAccountCaps(addr) {
+  const out = [];
+  const seen = new Set();
+  let after = null;
+  let partial = false;
+  for (let page = 0; page < AF_ACCOUNT_CAP_MAX_PAGES; page += 1) {
+    const data = await gql(`query($addr: SuiAddress!, $after: String, $first: Int!) {
+      address(address: $addr) {
+        objects(filter: { type: "${AF_ACCOUNT_CAP_TYPE}" }, first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            address
+            contents { json }
+          }
+        }
+      }
+    }`, {
+      addr,
+      after,
+      first: AF_ACCOUNT_CAP_PAGE_SIZE,
+    });
+    const conn = data?.address?.objects;
+    const rows = conn?.nodes || [];
+    for (const row of rows) {
+      const info = row?.contents?.json || {};
+      const accountId = afNormalizeAccountId(info.account_id);
+      if (!accountId || seen.has(accountId)) continue;
+      seen.add(accountId);
+      out.push({
+        accountId,
+        capObjectId: normalizeSuiAddress(row?.address || ""),
+        accountObjectId: normalizeSuiAddress(info.account_obj_id || ""),
+      });
+    }
+    if (!conn?.pageInfo?.hasNextPage) {
+      after = null;
+      break;
+    }
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+    if (page === AF_ACCOUNT_CAP_MAX_PAGES - 1) partial = true;
+  }
+  return { caps: out, partial };
+}
+async function fetchAftermathClearingHouses(force = false) {
+  const now = Date.now();
+  if (!force
+    && afClearingHouseDiscoveryCache.rows?.length
+    && (now - afClearingHouseDiscoveryCache.at) < AF_CLEARING_HOUSE_DISCOVERY_TTL_MS) {
+    return {
+      rows: afClearingHouseDiscoveryCache.rows,
+      partial: !!afClearingHouseDiscoveryCache.partial,
+      warnings: [],
+    };
+  }
+  const byId = {};
+  for (const [id, label] of Object.entries(AF_CLEARING_HOUSES)) {
+    const norm = normalizeSuiAddress(id) || id;
+    byId[norm] = { id: norm, label, known: true };
+  }
+  let partial = false;
+  const warnings = [];
+  let after = null;
+  for (let page = 0; page < AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES; page += 1) {
+    const data = await gql(`query($type: String!, $after: String, $first: Int!) {
+      objects(filter: { type: $type }, first: $first, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { address }
+      }
+    }`, {
+      type: AF_CLEARING_HOUSE_TYPE,
+      after,
+      first: AF_ORDERBOOK_PAGE_SIZE,
+    });
+    const conn = data?.objects;
+    for (const row of (conn?.nodes || [])) {
+      const id = normalizeSuiAddress(row?.address || "");
+      if (!id) continue;
+      if (!byId[id]) byId[id] = { id, label: afMarketLabel(id), known: false };
+    }
+    if (!conn?.pageInfo?.hasNextPage) {
+      after = null;
+      break;
+    }
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+    if (page === AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES - 1) {
+      partial = true;
+      warnings.push("Aftermath market discovery reached pagination cap; discovered market list may be partial.");
+    }
+  }
+  const rows = Object.values(byId).sort((a, b) => {
+    const ak = a.known ? 0 : 1;
+    const bk = b.known ? 0 : 1;
+    if (ak !== bk) return ak - bk;
+    return String(a.label || "").localeCompare(String(b.label || ""));
+  });
+  afClearingHouseDiscoveryCache = { at: now, rows, partial };
+  return { rows, partial, warnings };
+}
+async function fetchAftermathPositionStates(accountCaps, markets) {
+  const combos = [];
+  let aliasIndex = 0;
+  for (const cap of (accountCaps || [])) {
+    for (const m of (markets || [])) {
+      combos.push({
+        alias: `afp${aliasIndex += 1}`,
+        accountId: cap.accountId,
+        chId: m.id,
+        market: m.label,
+      });
+    }
+  }
+  if (!combos.length) return { states: [], totalCollateral: 0 };
+  const states = [];
+  let totalCollateral = 0;
+  for (const batch of chunkArray(combos, AF_POSITION_QUERY_BATCH)) {
+    const fields = batch.map((row) => `${row.alias}: object(address: "${row.chId}") {
+      dynamicField(name: { type: "${AF_POSITION_KEY_TYPE}", bcs: "${u64Bcs(row.accountId)}" }) {
+        value { ... on MoveValue { json } }
+      }
+    }`).join("\n");
+    const data = await gql(`{ ${fields} }`);
+    for (const row of batch) {
+      const pos = data?.[row.alias]?.dynamicField?.value?.json;
+      if (!pos) continue;
+      const baseRaw = parseIFixedRaw(pos.base_asset_amount);
+      const notionalRaw = parseIFixedRaw(pos.quote_asset_notional_amount);
+      const collateralRaw = parseIFixedRaw(pos.collateral);
+      const askRawAbs = parseIFixedRaw(pos.asks_quantity);
+      const bidRawAbs = parseIFixedRaw(pos.bids_quantity);
+      const askAbs = askRawAbs < 0n ? -askRawAbs : askRawAbs;
+      const bidAbs = bidRawAbs < 0n ? -bidRawAbs : bidRawAbs;
+      const collAbs = collateralRaw < 0n ? -collateralRaw : collateralRaw;
+      const pendingRaw = Number(pos.pending_orders || 0);
+      const pendingOrders = Number.isFinite(pendingRaw) ? Math.max(0, Math.floor(pendingRaw)) : 0;
+
+      const hasOpenPosition = (baseRaw > AF_PERPS_EPS_RAW || baseRaw < -AF_PERPS_EPS_RAW)
+        || (notionalRaw > AF_PERPS_EPS_RAW || notionalRaw < -AF_PERPS_EPS_RAW);
+      const hasOpenOrders = pendingOrders > 0 || askAbs > AF_PERPS_EPS_RAW || bidAbs > AF_PERPS_EPS_RAW;
+      if (!hasOpenPosition && !hasOpenOrders && collAbs < AF_COLLATERAL_DUST_RAW) continue;
+
+      const baseSize = scaledBigIntAbsToApprox(baseRaw, AF_IFIXED_SCALE_DECIMALS, 8);
+      const notionalAbs = scaledBigIntAbsToApprox(notionalRaw, AF_IFIXED_SCALE_DECIMALS, 8);
+      const entryPrice = baseSize > AF_PERPS_SIZE_EPS ? notionalAbs / baseSize : NaN;
+      let side = "flat";
+      if (baseRaw > AF_PERPS_EPS_RAW) side = "long";
+      else if (baseRaw < -AF_PERPS_EPS_RAW) side = "short";
+      else if (bidAbs > askAbs) side = "long";
+      else if (askAbs > bidAbs) side = "short";
+      const collateral = scaledBigIntToApprox(collateralRaw, AF_IFIXED_SCALE_DECIMALS, 8);
+      if (collateral > AF_PERPS_COLLATERAL_DUST) totalCollateral += collateral;
+      states.push({
+        key: afMarketAccountKey(row.chId, row.accountId),
+        chId: row.chId,
+        market: row.market || afMarketLabel(row.chId),
+        accountId: row.accountId,
+        side,
+        hasOpenPosition,
+        hasOpenOrders,
+        pendingOrders,
+        baseRaw,
+        notionalRaw,
+        collateralRaw,
+        askRawAbs: askAbs,
+        bidRawAbs: bidAbs,
+        size: baseSize,
+        entryPrice,
+        notionalAbs,
+        collateral,
+      });
+    }
+  }
+  return { states, totalCollateral };
+}
+async function fetchAftermathOrderbookRefs(markets) {
+  const refs = {};
+  const warnings = [];
+  let partial = false;
+  const validMarkets = (markets || []).filter(m => m?.id);
+  if (!validMarkets.length) return { refs, partial, warnings };
+
+  // Pass 1: batch-fetch clearing house dynamic fields for all markets in parallel
+  const chAliases = validMarkets.map((m, i) => `ch${i}: object(address: "${m.id}") { dynamicFields(first: 50) { pageInfo { hasNextPage } nodes { name { type { repr } } value { ... on MoveObject { address } } } } }`);
+  let chData;
+  try { chData = await gql(`{ ${chAliases.join("\n")} }`); } catch (e) { return { refs, partial: true, warnings: [`Orderbook batch lookup failed: ${e?.message || "unknown"}`] }; }
+
+  // Extract orderbook IDs from clearing house results
+  const obLookups = []; // { market, orderbookId, idx }
+  for (let i = 0; i < validMarkets.length; i++) {
+    const market = validMarkets[i];
+    const chConn = chData?.[`ch${i}`]?.dynamicFields;
+    if (chConn?.pageInfo?.hasNextPage) { partial = true; warnings.push(`Orderbook reference scan for ${market.label} was truncated.`); }
+    const obNode = (chConn?.nodes || []).find(n => n?.name?.type?.repr === AF_ORDERBOOK_KEY_TYPE);
+    const orderbookId = normalizeSuiAddress(obNode?.value?.address || "");
+    if (!orderbookId) { partial = true; warnings.push(`Missing orderbook reference for ${market.label}.`); continue; }
+    obLookups.push({ market, orderbookId, idx: obLookups.length });
+  }
+  if (!obLookups.length) return { refs, partial, warnings };
+
+  // Pass 2: batch-fetch orderbook dynamic fields (asks/bids map IDs)
+  const obAliases = obLookups.map((o, i) => `ob${i}: object(address: "${o.orderbookId}") { dynamicFields(first: 10) { pageInfo { hasNextPage } nodes { name { type { repr } } value { ... on MoveObject { address } } } } }`);
+  let obData;
+  try { obData = await gql(`{ ${obAliases.join("\n")} }`); } catch (e) { return { refs, partial: true, warnings: [...warnings, `Orderbook map batch lookup failed: ${e?.message || "unknown"}`] }; }
+
+  for (let i = 0; i < obLookups.length; i++) {
+    const { market, orderbookId } = obLookups[i];
+    const obConn = obData?.[`ob${i}`]?.dynamicFields;
+    if (obConn?.pageInfo?.hasNextPage) { partial = true; warnings.push(`Orderbook map scan for ${market.label} was truncated.`); }
+    const asksMapId = normalizeSuiAddress((obConn?.nodes || []).find(n => n?.name?.type?.repr === AF_ASKS_MAP_KEY_TYPE)?.value?.address || "");
+    const bidsMapId = normalizeSuiAddress((obConn?.nodes || []).find(n => n?.name?.type?.repr === AF_BIDS_MAP_KEY_TYPE)?.value?.address || "");
+    if (!asksMapId || !bidsMapId) { partial = true; warnings.push(`Could not resolve asks/bids maps for ${market.label}.`); continue; }
+    refs[market.id] = { orderbookId, asksMapId, bidsMapId };
+  }
+  return { refs, partial, warnings };
+}
+async function fetchAftermathOrdersFromMap(mapId, side, market, accountSet) {
+  const orders = [];
+  const seen = new Set();
+  let after = null;
+  let partial = false;
+  for (let page = 0; page < AF_ORDERBOOK_MAX_PAGES; page += 1) {
+    const data = await gql(`query($id: SuiAddress!, $after: String, $first: Int!) {
+      object(address: $id) {
+        dynamicFields(first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            value {
+              ... on MoveValue {
+                type { repr }
+                json
+              }
+            }
+          }
+        }
+      }
+    }`, {
+      id: mapId,
+      after,
+      first: AF_ORDERBOOK_PAGE_SIZE,
+    });
+    const conn = data?.object?.dynamicFields;
+    for (const node of (conn?.nodes || [])) {
+      const leaf = node?.value?.json;
+      const entries = Array.isArray(leaf?.keys_vals) ? leaf.keys_vals : [];
+      for (const kv of entries) {
+        const accountId = afNormalizeAccountId(kv?.val?.account_id);
+        if (!accountId) continue;
+        if (accountSet && !accountSet.has(accountId)) continue;
+        const orderId = String(kv?.key || "").trim();
+        if (!orderId) continue;
+        const seenKey = `${side}:${orderId}:${accountId}`;
+        if (seen.has(seenKey)) continue;
+        seen.add(seenKey);
+        const sizeRaw = parseBigIntSafe(kv?.val?.size || 0);
+        if (sizeRaw <= 0n) continue;
+        const expirationRaw = kv?.val?.expiration_timestamp_ms;
+        const expirationNum = Number(expirationRaw);
+        const expirationMs = Number.isFinite(expirationNum) && expirationNum > 0 ? expirationNum : NaN;
+        // ordered_map key encodes (price << 64 | sequence); price in 1e9 fixed-point
+        const orderKeyBig = parseBigIntSafe(kv?.key || 0);
+        const priceTicks = orderKeyBig >> 64n;
+        const price = Number(priceTicks) / 1e9;
+        orders.push({
+          market: market?.label || afMarketLabel(market?.id || ""),
+          chId: market?.id || "",
+          accountId,
+          side,
+          orderId,
+          price: Number.isFinite(price) && price > 0 ? price : NaN,
+          sizeRaw,
+          size: scaledBigIntToApprox(sizeRaw, AF_ORDER_SIZE_DECIMALS, 8),
+          sizeText: scaledBigIntToText(sizeRaw, AF_ORDER_SIZE_DECIMALS, 8),
+          reduceOnly: kv?.val?.reduce_only === true || kv?.val?.reduce_only === "true",
+          expirationMs,
+          kind: `Maker Limit (${Number.isFinite(expirationMs) ? "GTD" : "GTC"})`,
+          synthetic: false,
+        });
+      }
+    }
+    if (!conn?.pageInfo?.hasNextPage) {
+      after = null;
+      break;
+    }
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+    if (page === AF_ORDERBOOK_MAX_PAGES - 1) partial = true;
+  }
+  return { orders, partial };
+}
+async function fetchAftermathRecentOrderEvents(addr, accountSet) {
+  const out = {};
+  const data = await gql(`query($addr: SuiAddress!) {
+    address(address: $addr) {
+      transactions(last: ${AF_ORDER_EVENT_TX_SCAN}) {
+        nodes {
+          digest
+          effects {
+            timestamp
+            events(first: ${AF_ORDER_EVENT_PER_TX}) {
+              nodes {
+                contents {
+                  type { repr }
+                  json
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }`, { addr });
+  const txs = data?.address?.transactions?.nodes || [];
+  for (const tx of txs) {
+    const tsMs = parseTsMs(tx?.effects?.timestamp);
+    for (const ev of (tx?.effects?.events?.nodes || [])) {
+      const type = ev?.contents?.type?.repr || "";
+      if (!type.startsWith(`${AF_PERPS_PKG}::events::`)) continue;
+      const tail = type.split("::").pop() || "";
+      if (tail !== "PostedOrder" && tail !== "CanceledOrder") continue;
+      const json = ev?.contents?.json || {};
+      const accountId = afNormalizeAccountId(json.account_id);
+      if (!accountId) continue;
+      if (accountSet?.size && !accountSet.has(accountId)) continue;
+      const orderId = String(json.order_id || "").trim();
+      if (!orderId) continue;
+      const prev = out[orderId];
+      if (!prev || (Number.isFinite(tsMs) && (!Number.isFinite(prev.tsMs) || tsMs >= prev.tsMs))) {
+        out[orderId] = {
+          action: tail === "PostedOrder" ? "posted" : "canceled",
+          tsMs,
+          digest: String(tx?.digest || ""),
+        };
+      }
+    }
+  }
+  return out;
+}
 // ── Aftermath Perpetuals Fetcher ────────────────────────────────────────
 async function fetchAftermathPerpsPositions(addr) {
   try {
-    // Step 1: Find AccountCap(s) owned by this address to get account_id(s)
-    const capData = await gql(`{
-      address(address: "${addr}") {
-        objects(filter: { type: "${AF_ACCOUNT_CAP_TYPE}" }, first: 5) {
-          nodes { contents { json } }
+    const warnings = [];
+    let partial = false;
+
+    const capsMeta = await fetchAftermathAccountCaps(addr);
+    const caps = capsMeta.caps || [];
+    if (capsMeta.partial) {
+      partial = true;
+      warnings.push("AccountCap scan reached pagination cap; account coverage may be partial.");
+    }
+    if (!caps.length) {
+      return { accounts: [], markets: [], positions: [], orders: [], collateral: 0, partial, warnings };
+    }
+
+    let marketRows = [];
+    try {
+      const marketMeta = await fetchAftermathClearingHouses();
+      marketRows = marketMeta.rows || [];
+      if (marketMeta.partial) partial = true;
+      for (const w of (marketMeta.warnings || [])) warnings.push(w);
+    } catch (e) {
+      partial = true;
+      warnings.push(`Market discovery failed: ${e?.message || "unknown error"}. Falling back to configured market list.`);
+    }
+    if (!marketRows.length) {
+      marketRows = Object.keys(AF_CLEARING_HOUSES).map((id) => ({
+        id: normalizeSuiAddress(id) || id,
+        label: afMarketLabel(id),
+        known: true,
+      }));
+    }
+
+    const posMeta = await fetchAftermathPositionStates(caps, marketRows);
+    const states = posMeta.states || [];
+    const stateByKey = {};
+    for (const s of states) stateByKey[s.key] = s;
+    const totalCollateral = Number.isFinite(posMeta.totalCollateral) ? posMeta.totalCollateral : 0;
+
+    const positions = states
+      .filter((s) => s.hasOpenPosition)
+      .map((s) => ({
+        market: s.market,
+        chId: s.chId,
+        accountId: s.accountId,
+        side: s.side,
+        isLong: s.side === "long",
+        size: s.size,
+        entryPrice: s.entryPrice,
+        notional: s.notionalAbs,
+        collateral: s.collateral,
+        pendingOrders: s.pendingOrders,
+        hasOpenOrders: s.hasOpenOrders,
+      }));
+
+    const expectedByKey = {};
+    const accountSetByMarket = {};
+    const allAccountIds = new Set(caps.map((c) => c.accountId));
+    for (const s of states) {
+      if (!s.hasOpenOrders) continue;
+      const expected = s.pendingOrders > 0 ? s.pendingOrders : 1;
+      expectedByKey[s.key] = Math.max(expectedByKey[s.key] || 0, expected);
+      if (!accountSetByMarket[s.chId]) accountSetByMarket[s.chId] = new Set();
+      accountSetByMarket[s.chId].add(s.accountId);
+    }
+
+    const orders = [];
+    const marketsWithOpenOrders = marketRows.filter((m) => accountSetByMarket[m.id]?.size);
+    if (marketsWithOpenOrders.length) {
+      const refMeta = await fetchAftermathOrderbookRefs(marketsWithOpenOrders);
+      if (refMeta.partial) partial = true;
+      for (const w of (refMeta.warnings || [])) warnings.push(w);
+
+      for (const market of marketsWithOpenOrders) {
+        const refs = refMeta.refs?.[market.id];
+        const accountSet = accountSetByMarket[market.id];
+        if (!refs || !accountSet?.size) continue;
+        const [asks, bids] = await Promise.all([
+          fetchAftermathOrdersFromMap(refs.asksMapId, "short", market, accountSet),
+          fetchAftermathOrdersFromMap(refs.bidsMapId, "long", market, accountSet),
+        ]);
+        orders.push(...asks.orders, ...bids.orders);
+        if (asks.partial || bids.partial) {
+          partial = true;
+          warnings.push(`Orderbook scan for ${market.label} reached pagination cap; open-order detail may be partial.`);
         }
       }
-    }`);
-    const caps = (capData?.address?.objects?.nodes || [])
-      .map(n => n.contents?.json)
-      .filter(Boolean);
-    if (!caps.length) return { positions: [], collateral: 0 };
-    // Step 2: For each account_id, batch-query all ClearingHouses for positions + market state
-    const chIds = Object.keys(AF_CLEARING_HOUSES);
-    const parts = [];
-    const keyType = `${AF_PERPS_PKG}::keys::Position`;
-    for (const cap of caps) {
-      const bcs = u64Bcs(cap.account_id);
-      chIds.forEach((chId, j) => {
-        const idx = `a${cap.account_id}_ch${j}`;
-        parts.push(`${idx}: object(address: "${chId}") {
-          dynamicField(name: { type: "${keyType}", bcs: "${bcs}" }) {
-            value { ... on MoveValue { json } }
-          }
-        }`);
-      });
     }
-    const data = await gql(`{ ${parts.join("\n")} }`);
-    // Parse positions
-    const positions = [];
-    let totalCollateral = 0;
-    for (const cap of caps) {
-      chIds.forEach((chId, j) => {
-        const idx = `a${cap.account_id}_ch${j}`;
-        const pos = data[idx]?.dynamicField?.value?.json;
-        if (!pos) return;
-        const baseAmount = parseIFixed(pos.base_asset_amount);
-        const notional = parseIFixed(pos.quote_asset_notional_amount);
-        const collateral = parseIFixed(pos.collateral); // IFixed already in USDC units (1 USDC = 1.0)
-        if (baseAmount === 0 && collateral === 0) return;
-        const isLong = baseAmount > 0;
-        const size = Math.abs(baseAmount);
-        const entryPrice = size > 0 ? Math.abs(notional) / size : 0;
-        totalCollateral += collateral;
-        positions.push({
-          market: AF_CLEARING_HOUSES[chId],
-          size, entryPrice, collateral, isLong,
-          notional: Math.abs(notional),
-          accountId: cap.account_id,
-          pendingOrders: Number(pos.pending_orders || 0),
+
+    const foundByKey = {};
+    for (const o of orders) {
+      const key = afMarketAccountKey(o.chId, o.accountId);
+      foundByKey[key] = (foundByKey[key] || 0) + 1;
+    }
+
+    for (const [key, expected] of Object.entries(expectedByKey)) {
+      const found = foundByKey[key] || 0;
+      if (found >= expected) continue;
+      partial = true;
+      const [chId, accountId] = key.split("::");
+      warnings.push(`Order coverage mismatch for ${afMarketLabel(chId)} account ${accountId}: found ${found}/${expected}.`);
+      const st = stateByKey[key];
+      if (!st || found > 0) continue;
+      if (st.askRawAbs > AF_PERPS_EPS_RAW) {
+        orders.push({
+          market: st.market,
+          chId: st.chId,
+          accountId: st.accountId,
+          side: "short",
+          orderId: "",
+          sizeRaw: st.askRawAbs,
+          size: scaledBigIntAbsToApprox(st.askRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          sizeText: scaledBigIntToText(st.askRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          reduceOnly: false,
+          expirationMs: NaN,
+          kind: "Inferred Aggregate",
+          synthetic: true,
         });
-      });
+      }
+      if (st.bidRawAbs > AF_PERPS_EPS_RAW) {
+        orders.push({
+          market: st.market,
+          chId: st.chId,
+          accountId: st.accountId,
+          side: "long",
+          orderId: "",
+          sizeRaw: st.bidRawAbs,
+          size: scaledBigIntAbsToApprox(st.bidRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          sizeText: scaledBigIntToText(st.bidRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          reduceOnly: false,
+          expirationMs: NaN,
+          kind: "Inferred Aggregate",
+          synthetic: true,
+        });
+      }
+      if (st.askRawAbs <= AF_PERPS_EPS_RAW && st.bidRawAbs <= AF_PERPS_EPS_RAW && st.pendingOrders > 0) {
+        orders.push({
+          market: st.market,
+          chId: st.chId,
+          accountId: st.accountId,
+          side: "flat",
+          orderId: "",
+          sizeRaw: 0n,
+          size: NaN,
+          sizeText: "",
+          reduceOnly: false,
+          expirationMs: NaN,
+          kind: "Inferred Pending Orders",
+          synthetic: true,
+        });
+      }
     }
-    return { positions, collateral: totalCollateral };
-  } catch (e) { return { positions: [], collateral: 0 }; }
+
+    const hasConcreteOrders = orders.some((o) => !o.synthetic && o.orderId);
+    if (hasConcreteOrders) {
+      try {
+        const recent = await fetchAftermathRecentOrderEvents(addr, allAccountIds);
+        for (const o of orders) {
+          if (o.synthetic || !o.orderId) continue;
+          const ev = recent[o.orderId];
+          if (!ev) continue;
+          o.lastEventAction = ev.action;
+          o.lastEventTsMs = ev.tsMs;
+          o.lastEventDigest = ev.digest;
+        }
+      } catch (e) {
+        partial = true;
+        warnings.push(`Recent order-event enrichment failed: ${e?.message || "unknown error"}`);
+      }
+    }
+
+    positions.sort((a, b) => (b.notional || 0) - (a.notional || 0) || (b.size || 0) - (a.size || 0));
+    orders.sort((a, b) =>
+      String(a.market || "").localeCompare(String(b.market || ""))
+      || String(a.accountId || "").localeCompare(String(b.accountId || ""))
+      || (a.side === b.side ? 0 : (a.side === "long" ? -1 : 1))
+      || (b.size || 0) - (a.size || 0));
+
+    return {
+      accounts: caps,
+      markets: marketRows,
+      positions,
+      orders,
+      collateral: totalCollateral,
+      partial,
+      warnings: [...new Set(warnings)].slice(0, 12),
+    };
+  } catch (e) {
+    return {
+      accounts: [],
+      markets: [],
+      positions: [],
+      orders: [],
+      collateral: 0,
+      partial: true,
+      warnings: [e?.message || "Aftermath fetch failed."],
+    };
+  }
 }
 
 // ── Address View ────────────────────────────────────────────────────────
@@ -6357,23 +7446,6 @@ async function renderAddress(app, addr) {
         nodes {
           coinType { repr }
           totalBalance
-        }
-      }
-      transactions(last: 20) {
-        pageInfo { hasPreviousPage startCursor }
-        nodes {
-          digest
-          sender { address }
-          kind {
-            __typename
-            ... on ProgrammableTransaction {
-              commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
-            }
-          }
-          effects {
-            status timestamp
-            checkpoint { sequenceNumber }
-          }
         }
       }
       objects(first: 20) {
@@ -6392,8 +7464,12 @@ async function renderAddress(app, addr) {
   }
 
   const a = data.address;
-  let allTxs = (a.transactions?.nodes || []).reverse();
-  let txPageInfo = a.transactions?.pageInfo || {};
+  let allTxs = [];
+  let txPageInfo = { hasPreviousPage: false, startCursor: "" };
+  let txFilterState = txListNormalizeDateState({ preset: "all" });
+  let txFilterMeta = { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "" };
+  let txLoading = false;
+  let txLoadError = "";
   const balances = a.balances?.nodes || [];
   let allObjects = a.objects?.nodes || [];
   let objPageInfo = a.objects?.pageInfo || {};
@@ -6406,23 +7482,108 @@ async function renderAddress(app, addr) {
   let defiLoaded = false;
   let defiHtml = "";
 
+  async function loadAddressTransactions(before = null, append = false) {
+    txLoadError = "";
+    txFilterMeta = await txListResolveDateFilter(txFilterState);
+    if (txFilterMeta.error) {
+      allTxs = [];
+      txPageInfo = { hasPreviousPage: false, startCursor: "" };
+      txLoadError = txFilterMeta.error;
+      return;
+    }
+
+    try {
+      const more = await gql(`query($addr: SuiAddress!, $before: String, $filter: TransactionFilter) {
+        address(address: $addr) {
+          transactions(last: 20, before: $before, filter: $filter) {
+            pageInfo { hasPreviousPage startCursor }
+            nodes {
+              digest
+              sender { address }
+              kind {
+                __typename
+                ... on ProgrammableTransaction {
+                  commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
+                }
+              }
+              effects {
+                status timestamp
+                checkpoint { sequenceNumber }
+                balanceChanges(first: 50) {
+                  pageInfo { hasNextPage }
+                  nodes { owner { address } amount coinType { repr } }
+                }
+                events(first: 3) { nodes { contents { type { repr } } } }
+              }
+            }
+          }
+        }
+      }`, { addr, before, filter: txFilterMeta.filter });
+      const rows = (more?.address?.transactions?.nodes || [])
+        .reverse()
+        .filter((t) => txListWithinRange(t, txFilterMeta.fromMs, txFilterMeta.toMs));
+      allTxs = append ? [...allTxs, ...rows] : rows;
+      txPageInfo = more?.address?.transactions?.pageInfo || { hasPreviousPage: false, startCursor: "" };
+    } catch (e) {
+      allTxs = append ? allTxs : [];
+      txPageInfo = { hasPreviousPage: false, startCursor: "" };
+      txLoadError = e?.message || "Failed to load transactions.";
+    }
+  }
+
+  txLoading = true;
+  await loadAddressTransactions(null, false);
+  txLoading = false;
+
   const tabContent = {
     txs: () => {
-      if (!allTxs.length) return renderEmpty("No transactions found.");
-      return `<table>
-        <thead><tr><th>Digest</th><th>Intent</th><th>Sender</th><th>Status</th><th>Time</th></tr></thead>
-        <tbody>${allTxs.map(t => {
-          const intent = analyzeTxIntent(t);
-          return `<tr>
-          <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
-          <td class="u-fs12">${renderIntentChip(intent)}</td>
-          <td>${t.sender ? hashLink(t.sender.address, '/address/' + t.sender.address) : "—"}</td>
-          <td>${statusBadge(t.effects?.status)}</td>
-          <td>${timeTag(t.effects?.timestamp)}</td>
-        </tr>`;
-        }).join("")}</tbody>
-      </table>
-      ${txPageInfo.hasPreviousPage ? `<div class="pagination"><button id="load-more-txs">Load older transactions</button></div>` : ""}`;
+      const txRows = txListBuildRows(allTxs);
+      const txBody = txLoading
+        ? renderLoading()
+        : (txLoadError
+          ? renderEmpty(`Failed to load transactions: ${escapeHtml(txLoadError)}`)
+          : (!txRows.length
+            ? renderEmpty(txFilterState.preset === "all"
+              ? "No transactions found."
+              : "No transactions matched this timestamp range.")
+            : `<table>
+              <thead><tr><th>Digest</th><th>Summary</th><th>Sender</th><th>Status</th><th>Time</th></tr></thead>
+              <tbody>${txRows.map((row) => `<tr>
+                <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
+                <td class="tx-flow-cell">
+                  <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
+                  <div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>
+                </td>
+                <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
+                <td>${statusBadge(row.tx.effects?.status)}</td>
+                <td>${timeTag(row.tx.effects?.timestamp)}</td>
+              </tr>`).join("")}</tbody>
+            </table>`));
+      return `
+        <div class="tx-list-toolbar">
+          <div class="tx-list-toolbar-left">
+            <span class="u-fs12-dim">Timestamp filter</span>
+            <select id="addr-tx-date-preset" class="ui-control">
+              <option value="all" ${txFilterState.preset === "all" ? "selected" : ""}>All time</option>
+              <option value="7d" ${txFilterState.preset === "7d" ? "selected" : ""}>Last 7 days</option>
+              <option value="30d" ${txFilterState.preset === "30d" ? "selected" : ""}>Last 30 days</option>
+              <option value="custom" ${txFilterState.preset === "custom" ? "selected" : ""}>Custom</option>
+            </select>
+            ${txFilterState.preset === "custom" ? `<div class="tx-date-custom">
+              <input type="date" id="addr-tx-date-from" class="ui-control" value="${escapeAttr(txFilterState.fromDate)}">
+              <span class="u-c-dim">to</span>
+              <input type="date" id="addr-tx-date-to" class="ui-control" value="${escapeAttr(txFilterState.toDate)}">
+              <button data-action="addr-tx-date-apply" class="btn-surface-sm">Apply</button>
+            </div>` : ""}
+          </div>
+          <div class="tx-list-toolbar-right">
+            <button data-action="addr-tx-export-csv" class="btn-surface-sm" ${txRows.length ? "" : "disabled"}>Download CSV</button>
+          </div>
+        </div>
+        ${txFilterMeta.note ? `<div class="tx-filter-note">${escapeHtml(txFilterMeta.note)}</div>` : ""}
+        ${txBody}
+        ${!txLoading && !txLoadError && txPageInfo.hasPreviousPage ? `<div class="pagination"><button data-action="addr-load-more-txs">Load older transactions</button></div>` : ""}
+      `;
     },
     objects: () => {
       if (!allObjects.length) return renderEmpty("No owned objects.");
@@ -6472,7 +7633,21 @@ async function renderAddress(app, addr) {
     const db = deepbook.status === "fulfilled" ? deepbook.value : { positions: [], pools: {}, riskConfigs: {} };
     const bluefinSpotPos = bluefinSpot.status === "fulfilled" ? bluefinSpot.value : [];
     const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
-    const afPerpsData = aftermathPerps.status === "fulfilled" ? aftermathPerps.value : { positions: [], collateral: 0 };
+    const afPerpsData = aftermathPerps.status === "fulfilled"
+      ? aftermathPerps.value
+      : { accounts: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
+
+    // Derive XAUM (gold) price from Aftermath XAUT/USD order prices if no DEX liquidity
+    if (!defiPrices.XAUM || defiPrices.XAUM <= 0) {
+      const goldOrders = afPerpsData.orders.filter(o => (o.market || "").includes("XAUT") && Number.isFinite(o.price) && o.price > 0);
+      if (goldOrders.length) {
+        const mid = goldOrders.reduce((s, o) => s + o.price, 0) / goldOrders.length;
+        if (mid > 0) defiPrices.XAUM = mid;
+      } else {
+        const goldPos = afPerpsData.positions.filter(p => (p.market || "").includes("XAUT") && Number.isFinite(p.entryPrice) && p.entryPrice > 0);
+        if (goldPos.length) defiPrices.XAUM = goldPos[0].entryPrice;
+      }
+    }
 
     // Second pricing pass: price any tokens discovered by fetchers but missing from defiPrices
     const allCoinTypes = new Set();
@@ -6524,7 +7699,14 @@ async function renderAddress(app, addr) {
     totalSupplied += afPerpsData.collateral * (defiPrices["USDC"] || 1);
     const netWorth = totalWallet + totalLst + totalSupplied - totalBorrowed + totalDexLp;
 
-    const hasAnything = allLending.length || allDexLp.length || walletBals.length || db.positions.length || bluefinProData.positions.length || afPerpsData.positions.length;
+    const hasAnything = allLending.length
+      || allDexLp.length
+      || walletBals.length
+      || db.positions.length
+      || bluefinProData.positions.length
+      || afPerpsData.positions.length
+      || afPerpsData.orders.length
+      || afPerpsData.collateral > 0;
     if (!hasAnything) {
       const errors = [];
       if (suilend.status === "rejected") errors.push("Suilend");
@@ -6547,12 +7729,16 @@ async function renderAddress(app, addr) {
     html += `<div class="stat-box"><div class="stat-label">Net Worth</div><div class="stat-value" style="color:${netWorth >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsdFromFloat(Math.abs(netWorth))}</div></div>`;
     if (totalWallet > 0) html += `<div class="stat-box"><div class="stat-label">Wallet</div><div class="stat-value u-c-purple">${fmtUsdFromFloat(totalWallet)}</div><div class="stat-sub">${regularBals.length} tokens</div></div>`;
     if (totalLst > 0) html += `<div class="stat-box"><div class="stat-label">Liquid Staking</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalLst)}</div><div class="stat-sub">${lstBals.length} LSTs</div></div>`;
-    if (totalSupplied > 0) html += `<div class="stat-box"><div class="stat-label">Supplied / Collateral</div><div class="stat-value u-c-green">${fmtUsdFromFloat(totalSupplied)}</div></div>`;
-    if (totalBorrowed > 0) html += `<div class="stat-box"><div class="stat-label">Borrowed</div><div class="stat-value u-c-yellow">${fmtUsdFromFloat(totalBorrowed)}</div></div>`;
+    if (totalSupplied > 0 || totalBorrowed > 0) {
+      const netSupply = totalSupplied - totalBorrowed;
+      html += `<div class="stat-box"><div class="stat-label">Net Supply</div><div class="stat-value" style="color:${netSupply >= 0 ? 'var(--green)' : 'var(--red)'}">${netSupply >= 0 ? '' : '-'}${fmtUsdFromFloat(Math.abs(netSupply))}</div><div class="stat-sub">${fmtUsdFromFloat(totalSupplied)} supplied · ${fmtUsdFromFloat(totalBorrowed)} borrowed</div></div>`;
+    }
     if (totalDexLp > 0) html += `<div class="stat-box"><div class="stat-label">DEX LP</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalDexLp)}</div><div class="stat-sub">${allDexLp.length} positions</div></div>`;
     if (db.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">DeepBook Margin</div><div class="stat-value u-c-accent">${db.positions.length}</div><div class="stat-sub">positions</div></div>`;
     if (bluefinProData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Bluefin Perps</div><div class="stat-value u-c-blue">${bluefinProData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(bluefinProData.collateral)} collateral</div></div>`;
-    if (afPerpsData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
+    if (afPerpsData.positions.length > 0 || afPerpsData.orders.length > 0 || afPerpsData.collateral > 0) {
+      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length + afPerpsData.orders.length}</div><div class="stat-sub">${afPerpsData.positions.length} pos · ${afPerpsData.orders.length} orders · ${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
+    }
     html += `</div>`;
 
     // ─── Wallet Holdings ────────────────────
@@ -6600,18 +7786,20 @@ async function renderAddress(app, addr) {
         if (pos.deposits?.length) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Supply</div>`;
           for (const d of pos.deposits) {
+            const liveUsd = d.amountUsd > 0 ? d.amountUsd : (d.amount > 0 && defiPrices[d.symbol] > 0 ? d.amount * defiPrices[d.symbol] : 0);
             const fmtAmt = d.amount > 0 ? (d.amount >= 1000 ? fmtCompact(d.amount) : d.amount >= 1 ? d.amount.toFixed(1) : d.amount >= 0.01 ? d.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : d.amount.toFixed(8)) : "";
             const amtCell = fmtAmt ? fmtAmt + " " + d.symbol : '<span class="trunc-note">inc_data</span>';
-            const usdCell = d.amountUsd > 0 ? fmtUsdFromFloat(d.amountUsd) : '<span class="trunc-note">inc_data</span>';
+            const usdCell = liveUsd > 0 ? fmtUsdFromFloat(liveUsd) : '<span class="trunc-note">inc_data</span>';
             html += `<div style="display:grid;grid-template-columns:90px 1fr auto;gap:6px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${d.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${amtCell}</span><span class="u-c-green" style="font-family:var(--mono);font-size:12px;text-align:right">${usdCell}</span></div>`;
           }
         }
         if (pos.borrows?.length) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Borrow</div>`;
           for (const b of pos.borrows) {
+            const liveUsd = b.amountUsd > 0 ? b.amountUsd : (b.amount > 0 && defiPrices[b.symbol] > 0 ? b.amount * defiPrices[b.symbol] : 0);
             const fmtAmt = b.amount > 0 ? (b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)) : "";
             const amtCell = fmtAmt ? fmtAmt + " " + b.symbol : '<span class="trunc-note">inc_data</span>';
-            const usdCell = b.amountUsd > 0 ? fmtUsdFromFloat(b.amountUsd) : '<span class="trunc-note">inc_data</span>';
+            const usdCell = liveUsd > 0 ? fmtUsdFromFloat(liveUsd) : '<span class="trunc-note">inc_data</span>';
             html += `<div style="display:grid;grid-template-columns:90px 1fr auto;gap:6px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${b.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${amtCell}</span><span class="u-c-red" style="font-family:var(--mono);font-size:12px;text-align:right">${usdCell}</span></div>`;
           }
         }
@@ -6727,26 +7915,81 @@ async function renderAddress(app, addr) {
     }
 
     // ─── Aftermath Perps ─────────────────────
-    if (afPerpsData.positions.length) {
+    if (afPerpsData.positions.length || afPerpsData.orders.length || afPerpsData.collateral > 0 || afPerpsData.warnings?.length) {
       html += `<h3 class="u-section-h3">Aftermath Perpetuals</h3>`;
       html += `<div class="u-bg-panel-12">`;
       if (afPerpsData.collateral > 0) {
         html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
       }
-      html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Orders</th></tr></thead><tbody>`;
-      for (const p of afPerpsData.positions) {
-        const sideColor = p.isLong ? "var(--green)" : "var(--red)";
-        const sideLabel = p.isLong ? "LONG" : "SHORT";
-        html += `<tr>
-          <td style="font-weight:500">${p.market}</td>
-          <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
-          <td class="u-mono">${p.size.toLocaleString(undefined, {maximumFractionDigits:6})}</td>
-          <td class="u-mono">$${p.entryPrice.toLocaleString(undefined, {maximumFractionDigits:2})}</td>
-          <td class="u-ta-right-mono">${fmtUsdFromFloat(p.notional)}</td>
-          <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.pendingOrders || "—"}</td>
-        </tr>`;
+      if (afPerpsData.partial || afPerpsData.warnings?.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin:0 0 8px 0;padding:6px 8px;background:var(--panel);border:1px dashed var(--border);border-radius:8px">`;
+        if (afPerpsData.partial) html += `<div>Open-order coverage is partial; incomplete rows are explicitly tagged.</div>`;
+        const warnRows = (afPerpsData.warnings || []).slice(0, 4);
+        for (const w of warnRows) html += `<div>${escapeHtml(w)}</div>`;
+        if ((afPerpsData.warnings || []).length > warnRows.length) html += `<div>+${(afPerpsData.warnings || []).length - warnRows.length} more note(s)</div>`;
+        html += `</div>`;
       }
-      html += `</tbody></table></div>`;
+      if (afPerpsData.positions.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Open Positions</div>`;
+        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Orders</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
+        for (const p of afPerpsData.positions) {
+          const sideLabel = p.side === "long" ? "LONG" : p.side === "short" ? "SHORT" : "FLAT";
+          const sideColor = p.side === "long" ? "var(--green)" : p.side === "short" ? "var(--red)" : "var(--text-dim)";
+          const entryText = Number.isFinite(p.entryPrice) && p.entryPrice > 0
+            ? `$${p.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+            : "—";
+          const notionalText = Number.isFinite(p.notional) && p.notional > 0
+            ? fmtUsdFromFloat(p.notional)
+            : "—";
+          html += `<tr>
+            <td style="font-weight:500">${escapeHtml(p.market || "Unknown")}</td>
+            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
+            <td class="u-mono">${Number.isFinite(p.size) ? p.size.toLocaleString(undefined, {maximumFractionDigits:6}) : "—"}</td>
+            <td class="u-mono">${entryText}</td>
+            <td class="u-ta-right-mono">${notionalText}</td>
+            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.pendingOrders || "—"}</td>
+            <td class="u-ta-right-mono">${escapeHtml(String(p.accountId || "—"))}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+      } else if (afPerpsData.orders.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No open positions; showing live resting orders.</div>`;
+      }
+      if (afPerpsData.orders.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.positions.length ? "8px" : "0"} 0 6px">Open Orders (Resting/Maker)</div>`;
+        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th class="u-ta-right">Limit Price</th><th>Type</th><th class="u-ta-right">Reduce Only</th><th class="u-ta-right">Expires</th><th class="u-ta-right">Last Activity</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
+        for (const o of afPerpsData.orders) {
+          const sideLabel = o.side === "long" ? "BID" : o.side === "short" ? "ASK" : "FLAT";
+          const sideColor = o.side === "long" ? "var(--green)" : o.side === "short" ? "var(--red)" : "var(--text-dim)";
+          const sizeText = Number.isFinite(o.size) && o.size > 0
+            ? o.size.toLocaleString(undefined, { maximumFractionDigits: 6 })
+            : (o.sizeText ? txListFormatTokenAmount(o.sizeText) : "—");
+          const expExpired = Number.isFinite(o.expirationMs) && o.expirationMs <= Date.now();
+          const expText = Number.isFinite(o.expirationMs)
+            ? `${timeTag(o.expirationMs)}${expExpired ? ' <span class="badge badge-fail">expired</span>' : ''}`
+            : `<span class="u-c-dim">GTC</span>`;
+          const activityText = o.lastEventAction
+            ? `${o.lastEventAction === "posted" ? "Posted" : "Canceled"} ${timeTag(o.lastEventTsMs)}`
+            : '<span class="u-c-dim">—</span>';
+          const kindLabel = `${escapeHtml(o.kind || "Maker Limit")}${o.synthetic ? ' <span class="badge badge-fail">inferred</span>' : ""}`;
+          const priceText = Number.isFinite(o.price) && o.price > 0
+            ? `$${o.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
+            : '<span class="u-c-dim">—</span>';
+          html += `<tr>
+            <td style="font-weight:500">${escapeHtml(o.market || "Unknown")}</td>
+            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
+            <td class="u-mono">${sizeText}</td>
+            <td class="u-ta-right-mono">${priceText}</td>
+            <td>${kindLabel}</td>
+            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${o.reduceOnly ? "Yes" : "No"}</td>
+            <td style="text-align:right">${expText}</td>
+            <td style="text-align:right">${activityText}</td>
+            <td class="u-ta-right-mono">${escapeHtml(String(o.accountId || "—"))}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+      }
+      html += `</div>`;
     }
 
     // ─── Errors ─────────────────────────────
@@ -6782,30 +8025,31 @@ async function renderAddress(app, addr) {
 
     // Bind load-more buttons
     if (active === "txs") {
-      const btn = document.getElementById("load-more-txs");
-      if (btn) btn.onclick = async () => {
-        btn.textContent = "Loading..."; btn.disabled = true;
-        const more = await gql(`query($addr: SuiAddress!, $before: String) {
-          address(address: $addr) { transactions(last: 20, before: $before) {
-            pageInfo { hasPreviousPage startCursor }
-            nodes {
-              digest
-              sender { address }
-              kind {
-                __typename
-                ... on ProgrammableTransaction {
-                  commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
-                }
-              }
-              effects { status timestamp checkpoint { sequenceNumber } }
-            }
-          } }
-        }`, { addr, before: txPageInfo.startCursor });
-        const newTxs = (more.address.transactions.nodes || []).reverse();
-        allTxs = [...allTxs, ...newTxs];
-        txPageInfo = more.address.transactions.pageInfo;
-        renderTabs("txs");
-      };
+      const presetEl = document.getElementById("addr-tx-date-preset");
+      if (presetEl) {
+        presetEl.onchange = async () => {
+          if (txLoading) return;
+          const next = txListNormalizeDateState({
+            preset: presetEl.value,
+            fromDate: document.getElementById("addr-tx-date-from")?.value || txFilterState.fromDate,
+            toDate: document.getElementById("addr-tx-date-to")?.value || txFilterState.toDate,
+          });
+          if (next.preset !== "custom") {
+            next.fromDate = "";
+            next.toDate = "";
+          } else if (!next.fromDate && !next.toDate) {
+            const now = Date.now();
+            next.toDate = txListDateInputFromMs(now);
+            next.fromDate = txListDateInputFromMs(now - 7 * 24 * 60 * 60 * 1000);
+          }
+          txFilterState = next;
+          txLoading = true;
+          renderTabs("txs");
+          await loadAddressTransactions(null, false);
+          txLoading = false;
+          renderTabs("txs");
+        };
+      }
     }
     if (active === "objects") {
       const btn = document.getElementById("load-more-objs");
@@ -6848,12 +8092,48 @@ async function renderAddress(app, addr) {
     </div>
   `;
   if (app._addressClickHandler) app.removeEventListener("click", app._addressClickHandler);
-  app._addressClickHandler = (ev) => {
+  app._addressClickHandler = async (ev) => {
     const trigger = ev.target?.closest?.("[data-action]");
     if (!trigger || !app.contains(trigger)) return;
-    if (trigger.getAttribute("data-action") !== "addr-switch-tab") return;
+    const action = trigger.getAttribute("data-action");
+    if (!action) return;
     ev.preventDefault();
-    renderTabs(trigger.getAttribute("data-tab") || "defi");
+    if (action === "addr-switch-tab") {
+      renderTabs(trigger.getAttribute("data-tab") || "defi");
+      return;
+    }
+    if (action === "addr-tx-date-apply") {
+      if (txLoading) return;
+      txFilterState = txListNormalizeDateState({
+        preset: "custom",
+        fromDate: document.getElementById("addr-tx-date-from")?.value || "",
+        toDate: document.getElementById("addr-tx-date-to")?.value || "",
+      });
+      txLoading = true;
+      renderTabs("txs");
+      await loadAddressTransactions(null, false);
+      txLoading = false;
+      renderTabs("txs");
+      return;
+    }
+    if (action === "addr-load-more-txs") {
+      if (txLoading || !txPageInfo.hasPreviousPage || !txPageInfo.startCursor) return;
+      txLoading = true;
+      renderTabs("txs");
+      await loadAddressTransactions(txPageInfo.startCursor, true);
+      txLoading = false;
+      renderTabs("txs");
+      return;
+    }
+    if (action === "addr-tx-export-csv") {
+      if (trigger.hasAttribute("disabled")) return;
+      const txRows = txListBuildRows(allTxs);
+      if (!txRows.length) return;
+      const stamp = new Date().toISOString().slice(0, 10);
+      const idPart = normalizeSuiAddress(addr).slice(2, 10) || "address";
+      txListDownloadCsv(`suigraph-address-${idPart}-${stamp}.csv`, txListBuildCsv(txRows));
+      return;
+    }
   };
   app.addEventListener("click", app._addressClickHandler);
   renderTabs("defi");
