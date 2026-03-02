@@ -7718,7 +7718,7 @@ async function renderAddress(app, addr) {
     if (db.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">DeepBook Margin</div><div class="stat-value u-c-accent">${db.positions.length}</div><div class="stat-sub">positions</div></div>`;
     if (bluefinProData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Bluefin Perps</div><div class="stat-value u-c-blue">${bluefinProData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(bluefinProData.collateral)} collateral</div></div>`;
     if (afPerpsData.positions.length > 0 || afPerpsData.orders.length > 0 || afPerpsData.collateral > 0) {
-      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length}</div><div class="stat-sub">${afPerpsData.positions.length} pos · ${afPerpsData.orders.length} orders · ${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
+      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length + afPerpsData.orders.length}</div><div class="stat-sub">${afPerpsData.positions.length} pos · ${afPerpsData.orders.length} orders · ${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
     }
     html += `</div>`;
 
