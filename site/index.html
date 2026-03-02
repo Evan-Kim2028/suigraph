@@ -7267,8 +7267,8 @@ async function renderAddress(app, addr) {
       for (const b of regularBals.slice(0, 15)) {
         const meta = coinMetaCache[b.coinType];
         const supplyRaw = meta?.supply != null ? Number(meta.supply) : null;
-        const supplyFmt = supplyRaw != null ? fmtCompact(supplyRaw / Math.pow(10, meta?.decimals || 9)) : "—";
-        html += `<tr><td class="u-mono-12">${b.symbol}</td><td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td><td style="font-family:var(--mono);font-size:12px;color:var(--green)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : "—"}</td><td class="u-mono-11-dim">${supplyFmt}</td></tr>`;
+        const supplyFmt = supplyRaw != null ? fmtCompact(supplyRaw / Math.pow(10, meta?.decimals || 9)) : '<span class="trunc-note">inc_data</span>';
+        html += `<tr><td class="u-mono-12">${b.symbol}</td><td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td><td style="font-family:var(--mono);font-size:12px;color:var(--green)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}</td><td class="u-mono-11-dim">${supplyFmt}</td></tr>`;
       }
       if (regularBals.length > 15) html += `<tr><td colspan="3" style="color:var(--text-dim);font-size:12px">... and ${regularBals.length - 15} more tokens</td></tr>`;
       html += `</tbody></table>`;
@@ -7286,8 +7286,8 @@ async function renderAddress(app, addr) {
           <td class="u-mono-12">${b.symbol}</td>
           <td class="u-fs12-dim">${lstInfo.protocol || "—"}</td>
           <td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td>
-          <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${b.suiEquiv > 0 ? (b.suiEquiv >= 1000 ? fmtCompact(b.suiEquiv) : b.suiEquiv >= 1 ? b.suiEquiv.toFixed(1) : b.suiEquiv.toLocaleString(undefined, {maximumFractionDigits:4})) + " SUI" : "—"}<span class="u-fs10-dim">${rateLabel}</span></td>
-          <td style="font-family:var(--mono);font-size:12px;color:var(--accent)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : "—"}</td>
+          <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${b.suiEquiv > 0 ? (b.suiEquiv >= 1000 ? fmtCompact(b.suiEquiv) : b.suiEquiv >= 1 ? b.suiEquiv.toFixed(1) : b.suiEquiv.toLocaleString(undefined, {maximumFractionDigits:4})) + " SUI" : '<span class="trunc-note">inc_data</span>'}<span class="u-fs10-dim">${rateLabel}</span></td>
+          <td style="font-family:var(--mono);font-size:12px;color:var(--accent)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}</td>
         </tr>`;
       }
       html += `</tbody></table>`;
@@ -7331,7 +7331,7 @@ async function renderAddress(app, addr) {
       for (const pos of allDexLp) {
         html += `<div class="u-bg-panel-12">`;
         html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span class="u-fw-600">${pos.pair}</span><div style="display:flex;gap:6px;align-items:center"><span class="badge" style="background:var(--accent)20;color:var(--accent)">${pos.protocol}</span><span class="badge ${pos.inRange ? 'badge-success' : 'badge-fail'}">${pos.inRange ? "In Range" : "Out of Range"}</span></div></div>`;
-        html += `<div style="display:flex;gap:20px;font-size:13px"><span>${pos.amountA >= 1000 ? fmtCompact(pos.amountA) : pos.amountA >= 1 ? pos.amountA.toFixed(1) : pos.amountA.toFixed(4)} ${pos.symbolA} <span class="u-c-dim">${pos.usdA > 0 ? fmtUsdFromFloat(pos.usdA) : ""}</span></span><span>${pos.amountB >= 1000 ? fmtCompact(pos.amountB) : pos.amountB >= 1 ? pos.amountB.toFixed(1) : pos.amountB.toFixed(4)} ${pos.symbolB} <span class="u-c-dim">${pos.usdB > 0 ? fmtUsdFromFloat(pos.usdB) : ""}</span></span></div>`;
+        html += `<div style="display:flex;gap:20px;font-size:13px"><span>${pos.amountA >= 1000 ? fmtCompact(pos.amountA) : pos.amountA >= 1 ? pos.amountA.toFixed(1) : pos.amountA.toFixed(4)} ${pos.symbolA} <span class="u-c-dim">${pos.usdA > 0 ? fmtUsdFromFloat(pos.usdA) : '<span class="trunc-note">inc_data</span>'}</span></span><span>${pos.amountB >= 1000 ? fmtCompact(pos.amountB) : pos.amountB >= 1 ? pos.amountB.toFixed(1) : pos.amountB.toFixed(4)} ${pos.symbolB} <span class="u-c-dim">${pos.usdB > 0 ? fmtUsdFromFloat(pos.usdB) : '<span class="trunc-note">inc_data</span>'}</span></span></div>`;
         html += `<div style="font-size:12px;margin-top:4px;color:var(--text-dim)">Total: <span style="color:var(--text);font-weight:600">${fmtUsdFromFloat(pos.totalUsd)}</span> ${hashLink(pos.posId, '/object/' + pos.posId)}</div>`;
         html += `</div>`;
       }
@@ -7371,7 +7371,7 @@ async function renderAddress(app, addr) {
           const human = c.amount / Math.pow(10, dec);
           const usd = human * (defiPrices[c.symbol] || 0);
           totalCollUsd += usd;
-          html += `<div class="u-row-between-sm"><span>${c.symbol}</span><span class="u-c-green">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : ""}</span></div>`;
+          html += `<div class="u-row-between-sm"><span>${c.symbol}</span><span class="u-c-green">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
         }
         let totalDebtUsd = 0;
         if (baseBorrowed > 0 || quoteBorrowed > 0) {
@@ -7382,7 +7382,7 @@ async function renderAddress(app, addr) {
             const human = baseDebt / Math.pow(10, dec);
             const usd = human * (defiPrices[sym] || 0);
             totalDebtUsd += usd;
-            html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : ""}</span></div>`;
+            html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
           }
           if (quoteBorrowed > 0) {
             const sym = pairParts[1] || "QUOTE";
@@ -7390,7 +7390,7 @@ async function renderAddress(app, addr) {
             const human = quoteDebt / Math.pow(10, dec);
             const usd = human * (defiPrices[sym] || 0);
             totalDebtUsd += usd;
-            html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : ""}</span></div>`;
+            html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
           }
         }
         const netUsd = totalCollUsd - totalDebtUsd;
