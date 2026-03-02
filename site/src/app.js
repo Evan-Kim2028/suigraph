@@ -446,14 +446,29 @@ const STABLECOINS_PROTOCOL = [
   { objAddr: BUCK_PROTOCOL_OBJ, supplyPath: "buck_treasury_cap.total_supply.value", symbol: "BUCK", decimals: 9, color: "#F5A623" },
 ];
 
+// Normalize a full coin type by stripping leading zeros from the address portion.
+// On-chain type.repr uses padded 64-char hex (0x0000...0002::sui::SUI) but
+// KNOWN_COIN_TYPES uses short form (0x2::sui::SUI). This ensures lookups match.
+function normalizeCoinType(coinType) {
+  if (!coinType) return coinType;
+  const sep = coinType.indexOf("::");
+  if (sep <= 2) return coinType;
+  const addr = coinType.slice(0, sep);
+  const rest = coinType.slice(sep);
+  const hex = addr.startsWith("0x") ? addr.slice(2) : addr;
+  const short = "0x" + (hex.replace(/^0+/, "") || "0");
+  return short + rest;
+}
+
 // Resolve a full coin type string to { symbol, decimals } (sync, fast path)
 function resolveCoinType(coinType) {
   if (!coinType) return { symbol: "?", decimals: 9 };
-  const known = KNOWN_COIN_TYPES[coinType];
+  const known = KNOWN_COIN_TYPES[coinType] || KNOWN_COIN_TYPES[normalizeCoinType(coinType)];
   if (known) return known;
   // Check if coinMetaCache has it (populated by prefetchCoinMeta or getCoinMeta)
-  if (typeof coinMetaCache !== "undefined" && coinMetaCache[coinType]) {
-    const m = coinMetaCache[coinType];
+  const normalized = normalizeCoinType(coinType);
+  if (typeof coinMetaCache !== "undefined" && (coinMetaCache[coinType] || coinMetaCache[normalized])) {
+    const m = coinMetaCache[coinType] || coinMetaCache[normalized];
     return { symbol: m.symbol, decimals: m.decimals };
   }
   const sym = coinType.split("::").pop() || "?";
@@ -3793,8 +3808,9 @@ async function readPoolPrices(coinTypesBySymbol) {
   for (const addr of addresses) {
     const obj = poolById[addr];
     if (!obj) continue;
-    const json = obj.json;
-    const typeRepr = obj.type?.repr || addrToMeta[addr].typeRepr;
+    const contents = obj.asMoveObject?.contents;
+    const json = contents?.json;
+    const typeRepr = contents?.type?.repr || addrToMeta[addr].typeRepr;
     if (!json || !typeRepr) continue;
 
     const sqrtPrice = json.current_sqrt_price;
