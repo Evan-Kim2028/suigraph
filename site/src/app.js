@@ -2596,73 +2596,409 @@ async function renderCheckpointDetail(app, seqNum) {
   app.addEventListener("click", app._checkpointDetailClickHandler);
 }
 
+const TX_LIST_PRESET_DAYS = { "7d": 7, "30d": 30 };
+const TX_LIST_LATEST_CHECKPOINT_TTL_MS = 30000;
+const TX_LIST_CHECKPOINT_PADDING = 2;
+const txListCheckpointTsCache = {};
+let txListLatestCheckpointCache = { seq: 0, tsMs: NaN, at: 0 };
+
+function txListNormalizeDateState(state = {}) {
+  const rawPreset = String(state.preset || "all");
+  const preset = (rawPreset === "7d" || rawPreset === "30d" || rawPreset === "custom") ? rawPreset : "all";
+  return {
+    preset,
+    fromDate: String(state.fromDate || ""),
+    toDate: String(state.toDate || ""),
+  };
+}
+
+function txListDateInputFromMs(ms) {
+  if (!Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function txListParseInputDateMs(value, endOfDay = false) {
+  const raw = String(value || "").trim();
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return NaN;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const dt = endOfDay
+    ? new Date(y, mo, d, 23, 59, 59, 999)
+    : new Date(y, mo, d, 0, 0, 0, 0);
+  const ts = dt.getTime();
+  return Number.isFinite(ts) ? ts : NaN;
+}
+
+function txListFormatTokenAmount(v) {
+  const n = Math.abs(Number(v || 0));
+  if (!Number.isFinite(n)) return "0";
+  if (n >= 1000000) return fmtCompact(n);
+  if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+  if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  if (n >= 0.0001) return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  return n.toExponential(2);
+}
+
+function txListBuildFlowSummary(balanceChanges, maxItems = 4) {
+  const byCoin = {};
+  for (const bc of (balanceChanges || [])) {
+    const coinType = String(bc?.coinType?.repr || "");
+    const raw = Number(bc?.amount || 0);
+    if (!coinType || !Number.isFinite(raw) || raw === 0) continue;
+    const meta = resolveCoinType(coinType);
+    const decimals = Number(meta?.decimals || 9);
+    const human = raw / Math.pow(10, decimals);
+    if (!Number.isFinite(human) || human === 0) continue;
+    if (!byCoin[coinType]) {
+      byCoin[coinType] = {
+        coinType,
+        symbol: meta?.symbol || shortType(coinType),
+        amount: 0,
+      };
+    }
+    byCoin[coinType].amount += human;
+  }
+
+  const rows = Object.values(byCoin)
+    .filter((r) => Number.isFinite(r.amount) && r.amount !== 0)
+    .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+
+  if (!rows.length) {
+    return {
+      hasFlows: false,
+      text: "No net token flows",
+      csv: "",
+    };
+  }
+
+  const partsAll = rows.map((r) => `${r.amount >= 0 ? "+" : "-"}${txListFormatTokenAmount(r.amount)} ${r.symbol}`);
+  const partsShown = partsAll.slice(0, Math.max(1, maxItems));
+  const more = partsAll.length > partsShown.length ? `, +${partsAll.length - partsShown.length} more` : "";
+  return {
+    hasFlows: true,
+    text: partsShown.join(", ") + more,
+    csv: partsAll.join(" | "),
+  };
+}
+
+function txListCsvCell(value) {
+  const s = String(value ?? "");
+  return `"${s.replace(/"/g, "\"\"")}"`;
+}
+
+function txListBuildCsv(rows) {
+  const header = [
+    "timestamp",
+    "digest",
+    "checkpoint",
+    "sender",
+    "status",
+    "summary",
+    "token_amounts",
+  ];
+  const lines = [header.map(txListCsvCell).join(",")];
+  for (const row of (rows || [])) {
+    lines.push([
+      row.tx?.effects?.timestamp || "",
+      row.tx?.digest || "",
+      row.tx?.effects?.checkpoint?.sequenceNumber ?? "",
+      row.tx?.sender?.address || "",
+      row.tx?.effects?.status || "",
+      row.summary || "",
+      row.flow?.csv || "",
+    ].map(txListCsvCell).join(","));
+  }
+  return lines.join("\n") + "\n";
+}
+
+function txListDownloadCsv(filename, csvContent) {
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function txListFetchLatestCheckpointHead(force = false) {
+  const now = Date.now();
+  if (!force
+    && Number.isFinite(txListLatestCheckpointCache.seq)
+    && Number.isFinite(txListLatestCheckpointCache.tsMs)
+    && (now - txListLatestCheckpointCache.at) < TX_LIST_LATEST_CHECKPOINT_TTL_MS) {
+    return txListLatestCheckpointCache;
+  }
+  const data = await gql(`{ checkpoint { sequenceNumber timestamp } }`);
+  const seq = Number(data?.checkpoint?.sequenceNumber || 0);
+  const tsMs = parseTsMs(data?.checkpoint?.timestamp);
+  txListLatestCheckpointCache = {
+    seq: Number.isFinite(seq) ? seq : 0,
+    tsMs: Number.isFinite(tsMs) ? tsMs : NaN,
+    at: now,
+  };
+  return txListLatestCheckpointCache;
+}
+
+async function txListFetchCheckpointTimestampMs(sequenceNumber) {
+  const seq = Math.max(0, Math.floor(Number(sequenceNumber || 0)));
+  const key = String(seq);
+  if (Number.isFinite(txListCheckpointTsCache[key])) return txListCheckpointTsCache[key];
+  const data = await gql(`query($seq: UInt53) {
+    checkpoint(sequenceNumber: $seq) { sequenceNumber timestamp }
+  }`, { seq });
+  const tsMs = parseTsMs(data?.checkpoint?.timestamp);
+  txListCheckpointTsCache[key] = Number.isFinite(tsMs) ? tsMs : NaN;
+  return txListCheckpointTsCache[key];
+}
+
+async function txListFindCheckpointAtOrAfterMs(targetMs, latestSeq) {
+  let lo = 0;
+  let hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  let steps = 0;
+  while (lo < hi && steps < 40) {
+    steps += 1;
+    const mid = Math.floor((lo + hi) / 2);
+    const midTs = await txListFetchCheckpointTimestampMs(mid);
+    if (!Number.isFinite(midTs)) break;
+    if (midTs < targetMs) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+async function txListFindCheckpointAtOrBeforeMs(targetMs, latestSeq) {
+  let lo = 0;
+  let hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  let steps = 0;
+  while (lo < hi && steps < 40) {
+    steps += 1;
+    const mid = Math.floor((lo + hi + 1) / 2);
+    const midTs = await txListFetchCheckpointTimestampMs(mid);
+    if (!Number.isFinite(midTs)) break;
+    if (midTs <= targetMs) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+async function txListResolveDateFilter(state) {
+  const normalized = txListNormalizeDateState(state);
+  if (normalized.preset === "all") {
+    return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "" };
+  }
+
+  let fromMs = NaN;
+  let toMs = NaN;
+  if (normalized.preset === "custom") {
+    if (!normalized.fromDate || !normalized.toDate) {
+      return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "Select both start and end date." };
+    }
+    fromMs = txListParseInputDateMs(normalized.fromDate, false);
+    toMs = txListParseInputDateMs(normalized.toDate, true);
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
+      return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "Invalid custom date range." };
+    }
+  } else {
+    const days = Number(TX_LIST_PRESET_DAYS[normalized.preset] || 0);
+    const now = Date.now();
+    toMs = now;
+    fromMs = now - (days * 24 * 60 * 60 * 1000);
+  }
+
+  const latest = await txListFetchLatestCheckpointHead();
+  if (!Number.isFinite(latest.seq) || !Number.isFinite(latest.tsMs) || latest.seq < 0) {
+    return { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "Could not resolve latest checkpoint for date filter." };
+  }
+
+  const clampedToMs = Math.min(toMs, latest.tsMs);
+  const clampedFromMs = Math.min(fromMs, clampedToMs);
+  const startSeq = await txListFindCheckpointAtOrAfterMs(clampedFromMs, latest.seq);
+  const endSeq = await txListFindCheckpointAtOrBeforeMs(clampedToMs, latest.seq);
+  const lo = Math.max(0, Math.min(startSeq, endSeq) - TX_LIST_CHECKPOINT_PADDING);
+  const hi = Math.min(latest.seq, Math.max(startSeq, endSeq) + TX_LIST_CHECKPOINT_PADDING);
+  const note = `Timestamp range mapped to checkpoint bounds ~${fmtNumber(lo)} to ~${fmtNumber(hi)}.`;
+  return {
+    filter: { afterCheckpoint: lo, beforeCheckpoint: hi },
+    fromMs: clampedFromMs,
+    toMs: clampedToMs,
+    note,
+    error: "",
+  };
+}
+
+function txListWithinRange(tx, fromMs, toMs) {
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return true;
+  const ts = parseTsMs(tx?.effects?.timestamp);
+  if (!Number.isFinite(ts)) return false;
+  return ts >= fromMs && ts <= toMs;
+}
+
 // ── Transactions List ───────────────────────────────────────────────────
-async function renderTransactions(app, before = null) {
-  const data = await gql(`query($before: String) {
-    transactions(last: 25, before: $before) {
-      pageInfo { hasPreviousPage startCursor hasNextPage endCursor }
-      nodes {
-        digest
-        sender { address }
-        kind {
-          __typename
-          ... on ProgrammableTransaction {
-            commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
+async function renderTransactions(app, before = null, dateState = null) {
+  const state = txListNormalizeDateState(dateState || {});
+  const dateFilter = await txListResolveDateFilter(state);
+
+  let txs = [];
+  let txLoadError = dateFilter.error || "";
+  let pi = { hasPreviousPage: false, startCursor: "", hasNextPage: false, endCursor: "" };
+  if (!txLoadError) {
+    try {
+      const data = await gql(`query($before: String, $filter: TransactionFilter) {
+        transactions(last: 25, before: $before, filter: $filter) {
+          pageInfo { hasPreviousPage startCursor hasNextPage endCursor }
+          nodes {
+            digest
+            sender { address }
+            kind {
+              __typename
+              ... on ProgrammableTransaction {
+                commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
+              }
+            }
+            effects {
+              status timestamp
+              checkpoint { sequenceNumber }
+              gasEffects { gasSummary { computationCost storageCost storageRebate } }
+              balanceChanges(first: 16) { nodes { amount coinType { repr } } }
+            }
           }
         }
-        effects {
-          status timestamp
-          checkpoint { sequenceNumber }
-          gasEffects { gasSummary { computationCost storageCost storageRebate } }
-        }
-      }
+      }`, { before, filter: dateFilter.filter });
+      txs = (data?.transactions?.nodes || []).reverse().filter((t) => txListWithinRange(t, dateFilter.fromMs, dateFilter.toMs));
+      pi = data?.transactions?.pageInfo || pi;
+    } catch (e) {
+      txLoadError = e?.message || "Failed to load transactions.";
     }
-  }`, { before });
+  }
 
-  const txs = data.transactions.nodes.reverse();
-  const pi = data.transactions.pageInfo;
+  const txRows = txs.map((tx) => {
+    const intent = analyzeTxIntent(tx);
+    const flow = txListBuildFlowSummary(tx?.effects?.balanceChanges?.nodes || []);
+    return {
+      tx,
+      intent,
+      flow,
+      summary: flow.hasFlows ? flow.text : intent.label,
+    };
+  });
+
+  const emptyMsg = state.preset === "all"
+    ? "No transactions found."
+    : "No transactions matched this timestamp range.";
+  const tableContent = txLoadError
+    ? renderEmpty(`Failed to load transactions: ${escapeHtml(txLoadError)}`)
+    : (!txRows.length
+      ? renderEmpty(emptyMsg)
+      : `<table>
+          <thead><tr>
+            <th>Digest</th><th>Summary</th><th>Sender</th><th>Checkpoint</th><th>Status</th><th>Time</th>
+          </tr></thead>
+          <tbody>
+            ${txRows.map((row) => `<tr>
+              <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
+              <td class="tx-flow-cell">
+                <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
+                <div class="u-fs11-dim">${renderIntentChip(row.intent)}</div>
+              </td>
+              <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
+              <td><a class="hash-link" href="#/checkpoint/${row.tx.effects?.checkpoint?.sequenceNumber}">${fmtNumber(row.tx.effects?.checkpoint?.sequenceNumber)}</a></td>
+              <td>${statusBadge(row.tx.effects?.status)}</td>
+              <td>${timeTag(row.tx.effects?.timestamp)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>`);
 
   app.innerHTML = `
     <div class="page-title">Transactions</div>
     <div class="card">
+      <div class="tx-list-toolbar">
+        <div class="tx-list-toolbar-left">
+          <span class="u-fs12-dim">Timestamp filter</span>
+          <select id="tx-list-date-preset" class="ui-control">
+            <option value="all" ${state.preset === "all" ? "selected" : ""}>All time</option>
+            <option value="7d" ${state.preset === "7d" ? "selected" : ""}>Last 7 days</option>
+            <option value="30d" ${state.preset === "30d" ? "selected" : ""}>Last 30 days</option>
+            <option value="custom" ${state.preset === "custom" ? "selected" : ""}>Custom</option>
+          </select>
+          ${state.preset === "custom" ? `<div class="tx-date-custom">
+            <input type="date" id="tx-list-date-from" class="ui-control" value="${escapeAttr(state.fromDate)}">
+            <span class="u-c-dim">to</span>
+            <input type="date" id="tx-list-date-to" class="ui-control" value="${escapeAttr(state.toDate)}">
+            <button data-action="tx-list-date-apply" class="btn-surface-sm">Apply</button>
+          </div>` : ""}
+        </div>
+        <div class="tx-list-toolbar-right">
+          <button data-action="tx-list-export-csv" class="btn-surface-sm" ${txRows.length ? "" : "disabled"}>Download CSV</button>
+        </div>
+      </div>
+      ${dateFilter.note ? `<div class="tx-filter-note">${escapeHtml(dateFilter.note)}</div>` : ""}
       <div class="card-body">
-        <table>
-          <thead><tr>
-            <th>Digest</th><th>Intent</th><th>Sender</th><th>Checkpoint</th><th>Status</th><th>Time</th>
-          </tr></thead>
-          <tbody>
-            ${txs.map(t => {
-              const intent = analyzeTxIntent(t);
-              return `<tr>
-              <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
-              <td class="u-fs12">${renderIntentChip(intent)}</td>
-              <td>${t.sender ? hashLink(t.sender.address, '/address/' + t.sender.address) : "—"}</td>
-              <td><a class="hash-link" href="#/checkpoint/${t.effects?.checkpoint?.sequenceNumber}">${fmtNumber(t.effects?.checkpoint?.sequenceNumber)}</a></td>
-              <td>${statusBadge(t.effects?.status)}</td>
-              <td>${timeTag(t.effects?.timestamp)}</td>
-            </tr>`;
-            }).join("")}
-          </tbody>
-        </table>
-        <div class="pagination">
+        ${tableContent}
+        ${txLoadError ? "" : `<div class="pagination">
           <button data-action="txs-newer" data-cursor="${escapeAttr(pi.endCursor || "")}"
             ${!pi.hasNextPage ? "disabled" : ""}>Newer</button>
           <button data-action="txs-older" data-cursor="${escapeAttr(pi.startCursor || "")}"
             ${!pi.hasPreviousPage ? "disabled" : ""}>Older</button>
-        </div>
+        </div>`}
       </div>
     </div>
   `;
+
+  const presetEl = document.getElementById("tx-list-date-preset");
+  if (presetEl) {
+    presetEl.onchange = async () => {
+      const next = txListNormalizeDateState({
+        preset: presetEl.value,
+        fromDate: document.getElementById("tx-list-date-from")?.value || state.fromDate,
+        toDate: document.getElementById("tx-list-date-to")?.value || state.toDate,
+      });
+      if (next.preset !== "custom") {
+        next.fromDate = "";
+        next.toDate = "";
+      } else if (!next.fromDate && !next.toDate) {
+        const now = Date.now();
+        next.toDate = txListDateInputFromMs(now);
+        next.fromDate = txListDateInputFromMs(now - 7 * 24 * 60 * 60 * 1000);
+      }
+      await renderTransactions(app, null, next);
+    };
+  }
+
   if (app._txsClickHandler) app.removeEventListener("click", app._txsClickHandler);
   app._txsClickHandler = async (ev) => {
     const trigger = ev.target?.closest?.("[data-action]");
     if (!trigger || !app.contains(trigger)) return;
     const action = trigger.getAttribute("data-action");
-    if (action !== "txs-newer" && action !== "txs-older") return;
+    if (!action) return;
     ev.preventDefault();
+    if (action === "tx-list-export-csv") {
+      if (!txRows.length) return;
+      const stamp = new Date().toISOString().slice(0, 10);
+      txListDownloadCsv(`suigraph-transactions-${stamp}.csv`, txListBuildCsv(txRows));
+      return;
+    }
+    if (action === "tx-list-date-apply") {
+      const next = txListNormalizeDateState({
+        preset: "custom",
+        fromDate: document.getElementById("tx-list-date-from")?.value || "",
+        toDate: document.getElementById("tx-list-date-to")?.value || "",
+      });
+      await renderTransactions(app, null, next);
+      return;
+    }
+    if (action !== "txs-newer" && action !== "txs-older") return;
     if (trigger.hasAttribute("disabled")) return;
     const cursor = trigger.getAttribute("data-cursor") || "";
-    await renderTransactions(app, cursor || null);
+    await renderTransactions(app, cursor || null, state);
   };
   app.addEventListener("click", app._txsClickHandler);
 }
@@ -6359,23 +6695,6 @@ async function renderAddress(app, addr) {
           totalBalance
         }
       }
-      transactions(last: 20) {
-        pageInfo { hasPreviousPage startCursor }
-        nodes {
-          digest
-          sender { address }
-          kind {
-            __typename
-            ... on ProgrammableTransaction {
-              commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
-            }
-          }
-          effects {
-            status timestamp
-            checkpoint { sequenceNumber }
-          }
-        }
-      }
       objects(first: 20) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -6392,8 +6711,12 @@ async function renderAddress(app, addr) {
   }
 
   const a = data.address;
-  let allTxs = (a.transactions?.nodes || []).reverse();
-  let txPageInfo = a.transactions?.pageInfo || {};
+  let allTxs = [];
+  let txPageInfo = { hasPreviousPage: false, startCursor: "" };
+  let txFilterState = txListNormalizeDateState({ preset: "all" });
+  let txFilterMeta = { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "" };
+  let txLoading = false;
+  let txLoadError = "";
   const balances = a.balances?.nodes || [];
   let allObjects = a.objects?.nodes || [];
   let objPageInfo = a.objects?.pageInfo || {};
@@ -6406,23 +6729,113 @@ async function renderAddress(app, addr) {
   let defiLoaded = false;
   let defiHtml = "";
 
+  async function loadAddressTransactions(before = null, append = false) {
+    txLoadError = "";
+    txFilterMeta = await txListResolveDateFilter(txFilterState);
+    if (txFilterMeta.error) {
+      allTxs = [];
+      txPageInfo = { hasPreviousPage: false, startCursor: "" };
+      txLoadError = txFilterMeta.error;
+      return;
+    }
+
+    try {
+      const more = await gql(`query($addr: SuiAddress!, $before: String, $filter: TransactionFilter) {
+        address(address: $addr) {
+          transactions(last: 20, before: $before, filter: $filter) {
+            pageInfo { hasPreviousPage startCursor }
+            nodes {
+              digest
+              sender { address }
+              kind {
+                __typename
+                ... on ProgrammableTransaction {
+                  commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
+                }
+              }
+              effects {
+                status timestamp
+                checkpoint { sequenceNumber }
+                balanceChanges(first: 16) { nodes { amount coinType { repr } } }
+              }
+            }
+          }
+        }
+      }`, { addr, before, filter: txFilterMeta.filter });
+      const rows = (more?.address?.transactions?.nodes || [])
+        .reverse()
+        .filter((t) => txListWithinRange(t, txFilterMeta.fromMs, txFilterMeta.toMs));
+      allTxs = append ? [...allTxs, ...rows] : rows;
+      txPageInfo = more?.address?.transactions?.pageInfo || { hasPreviousPage: false, startCursor: "" };
+    } catch (e) {
+      allTxs = append ? allTxs : [];
+      txPageInfo = { hasPreviousPage: false, startCursor: "" };
+      txLoadError = e?.message || "Failed to load transactions.";
+    }
+  }
+
+  txLoading = true;
+  await loadAddressTransactions(null, false);
+  txLoading = false;
+
   const tabContent = {
     txs: () => {
-      if (!allTxs.length) return renderEmpty("No transactions found.");
-      return `<table>
-        <thead><tr><th>Digest</th><th>Intent</th><th>Sender</th><th>Status</th><th>Time</th></tr></thead>
-        <tbody>${allTxs.map(t => {
-          const intent = analyzeTxIntent(t);
-          return `<tr>
-          <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
-          <td class="u-fs12">${renderIntentChip(intent)}</td>
-          <td>${t.sender ? hashLink(t.sender.address, '/address/' + t.sender.address) : "—"}</td>
-          <td>${statusBadge(t.effects?.status)}</td>
-          <td>${timeTag(t.effects?.timestamp)}</td>
-        </tr>`;
-        }).join("")}</tbody>
-      </table>
-      ${txPageInfo.hasPreviousPage ? `<div class="pagination"><button id="load-more-txs">Load older transactions</button></div>` : ""}`;
+      const txRows = allTxs.map((tx) => {
+        const intent = analyzeTxIntent(tx);
+        const flow = txListBuildFlowSummary(tx?.effects?.balanceChanges?.nodes || []);
+        return {
+          tx,
+          intent,
+          flow,
+          summary: flow.hasFlows ? flow.text : intent.label,
+        };
+      });
+      const txBody = txLoading
+        ? renderLoading()
+        : (txLoadError
+          ? renderEmpty(`Failed to load transactions: ${escapeHtml(txLoadError)}`)
+          : (!txRows.length
+            ? renderEmpty(txFilterState.preset === "all"
+              ? "No transactions found."
+              : "No transactions matched this timestamp range.")
+            : `<table>
+              <thead><tr><th>Digest</th><th>Summary</th><th>Sender</th><th>Status</th><th>Time</th></tr></thead>
+              <tbody>${txRows.map((row) => `<tr>
+                <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
+                <td class="tx-flow-cell">
+                  <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
+                  <div class="u-fs11-dim">${renderIntentChip(row.intent)}</div>
+                </td>
+                <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
+                <td>${statusBadge(row.tx.effects?.status)}</td>
+                <td>${timeTag(row.tx.effects?.timestamp)}</td>
+              </tr>`).join("")}</tbody>
+            </table>`));
+      return `
+        <div class="tx-list-toolbar">
+          <div class="tx-list-toolbar-left">
+            <span class="u-fs12-dim">Timestamp filter</span>
+            <select id="addr-tx-date-preset" class="ui-control">
+              <option value="all" ${txFilterState.preset === "all" ? "selected" : ""}>All time</option>
+              <option value="7d" ${txFilterState.preset === "7d" ? "selected" : ""}>Last 7 days</option>
+              <option value="30d" ${txFilterState.preset === "30d" ? "selected" : ""}>Last 30 days</option>
+              <option value="custom" ${txFilterState.preset === "custom" ? "selected" : ""}>Custom</option>
+            </select>
+            ${txFilterState.preset === "custom" ? `<div class="tx-date-custom">
+              <input type="date" id="addr-tx-date-from" class="ui-control" value="${escapeAttr(txFilterState.fromDate)}">
+              <span class="u-c-dim">to</span>
+              <input type="date" id="addr-tx-date-to" class="ui-control" value="${escapeAttr(txFilterState.toDate)}">
+              <button data-action="addr-tx-date-apply" class="btn-surface-sm">Apply</button>
+            </div>` : ""}
+          </div>
+          <div class="tx-list-toolbar-right">
+            <button data-action="addr-tx-export-csv" class="btn-surface-sm" ${txRows.length ? "" : "disabled"}>Download CSV</button>
+          </div>
+        </div>
+        ${txFilterMeta.note ? `<div class="tx-filter-note">${escapeHtml(txFilterMeta.note)}</div>` : ""}
+        ${txBody}
+        ${!txLoading && !txLoadError && txPageInfo.hasPreviousPage ? `<div class="pagination"><button data-action="addr-load-more-txs">Load older transactions</button></div>` : ""}
+      `;
     },
     objects: () => {
       if (!allObjects.length) return renderEmpty("No owned objects.");
@@ -6782,30 +7195,30 @@ async function renderAddress(app, addr) {
 
     // Bind load-more buttons
     if (active === "txs") {
-      const btn = document.getElementById("load-more-txs");
-      if (btn) btn.onclick = async () => {
-        btn.textContent = "Loading..."; btn.disabled = true;
-        const more = await gql(`query($addr: SuiAddress!, $before: String) {
-          address(address: $addr) { transactions(last: 20, before: $before) {
-            pageInfo { hasPreviousPage startCursor }
-            nodes {
-              digest
-              sender { address }
-              kind {
-                __typename
-                ... on ProgrammableTransaction {
-                  commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
-                }
-              }
-              effects { status timestamp checkpoint { sequenceNumber } }
-            }
-          } }
-        }`, { addr, before: txPageInfo.startCursor });
-        const newTxs = (more.address.transactions.nodes || []).reverse();
-        allTxs = [...allTxs, ...newTxs];
-        txPageInfo = more.address.transactions.pageInfo;
-        renderTabs("txs");
-      };
+      const presetEl = document.getElementById("addr-tx-date-preset");
+      if (presetEl) {
+        presetEl.onchange = async () => {
+          const next = txListNormalizeDateState({
+            preset: presetEl.value,
+            fromDate: document.getElementById("addr-tx-date-from")?.value || txFilterState.fromDate,
+            toDate: document.getElementById("addr-tx-date-to")?.value || txFilterState.toDate,
+          });
+          if (next.preset !== "custom") {
+            next.fromDate = "";
+            next.toDate = "";
+          } else if (!next.fromDate && !next.toDate) {
+            const now = Date.now();
+            next.toDate = txListDateInputFromMs(now);
+            next.fromDate = txListDateInputFromMs(now - 7 * 24 * 60 * 60 * 1000);
+          }
+          txFilterState = next;
+          txLoading = true;
+          renderTabs("txs");
+          await loadAddressTransactions(null, false);
+          txLoading = false;
+          renderTabs("txs");
+        };
+      }
     }
     if (active === "objects") {
       const btn = document.getElementById("load-more-objs");
@@ -6848,12 +7261,56 @@ async function renderAddress(app, addr) {
     </div>
   `;
   if (app._addressClickHandler) app.removeEventListener("click", app._addressClickHandler);
-  app._addressClickHandler = (ev) => {
+  app._addressClickHandler = async (ev) => {
     const trigger = ev.target?.closest?.("[data-action]");
     if (!trigger || !app.contains(trigger)) return;
-    if (trigger.getAttribute("data-action") !== "addr-switch-tab") return;
+    const action = trigger.getAttribute("data-action");
+    if (!action) return;
     ev.preventDefault();
-    renderTabs(trigger.getAttribute("data-tab") || "defi");
+    if (action === "addr-switch-tab") {
+      renderTabs(trigger.getAttribute("data-tab") || "defi");
+      return;
+    }
+    if (action === "addr-tx-date-apply") {
+      txFilterState = txListNormalizeDateState({
+        preset: "custom",
+        fromDate: document.getElementById("addr-tx-date-from")?.value || "",
+        toDate: document.getElementById("addr-tx-date-to")?.value || "",
+      });
+      txLoading = true;
+      renderTabs("txs");
+      await loadAddressTransactions(null, false);
+      txLoading = false;
+      renderTabs("txs");
+      return;
+    }
+    if (action === "addr-load-more-txs") {
+      if (txLoading || !txPageInfo.hasPreviousPage || !txPageInfo.startCursor) return;
+      txLoading = true;
+      renderTabs("txs");
+      await loadAddressTransactions(txPageInfo.startCursor, true);
+      txLoading = false;
+      renderTabs("txs");
+      return;
+    }
+    if (action === "addr-tx-export-csv") {
+      if (trigger.hasAttribute("disabled")) return;
+      const txRows = allTxs.map((tx) => {
+        const intent = analyzeTxIntent(tx);
+        const flow = txListBuildFlowSummary(tx?.effects?.balanceChanges?.nodes || []);
+        return {
+          tx,
+          intent,
+          flow,
+          summary: flow.hasFlows ? flow.text : intent.label,
+        };
+      });
+      if (!txRows.length) return;
+      const stamp = new Date().toISOString().slice(0, 10);
+      const idPart = normalizeSuiAddress(addr).slice(2, 10) || "address";
+      txListDownloadCsv(`suigraph-address-${idPart}-${stamp}.csv`, txListBuildCsv(txRows));
+      return;
+    }
   };
   app.addEventListener("click", app._addressClickHandler);
   renderTabs("defi");
