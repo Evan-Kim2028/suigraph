@@ -3740,8 +3740,9 @@ async function discoverPoolAddresses(coinTypes) {
   }
   if (!aliases.length) return;
 
-  // Chunk into manageable GQL calls (6 aliases per call)
-  for (const chunk of chunkArray(aliases.map((a, i) => ({ alias: a, meta: aliasMeta[i] })), 6)) {
+  // Chunk into manageable GQL calls (20 aliases per call) and run ALL in parallel
+  const chunks = chunkArray(aliases.map((a, i) => ({ alias: a, meta: aliasMeta[i] })), 20);
+  const results = await Promise.all(chunks.map(async (chunk) => {
     try {
       const q = `{ ${chunk.map(c => c.alias).join("\n")} }`;
       const data = await gql(q);
@@ -3764,7 +3765,7 @@ async function discoverPoolAddresses(coinTypes) {
         }
       }
     } catch (e) { /* partial failure OK — pools just won't be priced */ }
-  }
+  }));
   // Update timestamps
   for (const ct of needed) {
     if (!poolAddressCache[ct]) poolAddressCache[ct] = { pools: [], ts: now };
@@ -3900,10 +3901,10 @@ async function ensurePrices(coinTypes) {
   await fetchPoolOraclePrices(needed);
 }
 
-async function fetchDefiPrices(force = false) {
+async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
   const now = Date.now();
   const needSui = force || !defiPrices.SUI || (now - deepbookSuiPriceTs > DEEPBOOK_SUI_PRICE_TTL_MS);
-  const needOracle = force || (now - oraclePricesTs > POOL_ORACLE_PRICE_TTL_MS);
+  const needOracle = !skipOracle && (force || (now - oraclePricesTs > POOL_ORACLE_PRICE_TTL_MS));
   if (!needSui && !needOracle) {
     notePerfCache(true);
     return;
@@ -5633,8 +5634,6 @@ async function fetchDefiWalletBalances(addr) {
   // Prefetch on-chain CoinMetadata for unknown coin types → accurate decimals & symbols
   const unknownTypes = nonZero.map(b => b.coinType).filter(ct => !KNOWN_COIN_TYPES[ct] && !coinMetaCache[ct]);
   if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
-  // Ensure prices for all non-zero balances
-  await ensurePrices(nonZero.map(b => b.coinType));
   return nonZero
     .map(b => {
       const resolved = resolveCoinType(b.coinType);
@@ -6350,15 +6349,24 @@ async function renderAddress(app, addr) {
 
   async function loadDefi() {
     if (defiLoaded) return;
-    await Promise.all([fetchDefiPrices(), fetchLstExchangeRates()]);
-    const results = await Promise.allSettled([
-      fetchSuilendPositions(addr), fetchNaviPositions(addr),
-      fetchAlphaPositions(addr), fetchScallopPositions(addr),
-      fetchCetusPositions(addr), fetchTurbosPositions(addr),
-      fetchDefiWalletBalances(addr), fetchDeepBookPositions(addr),
-      fetchBluefinSpotPositions(addr), fetchBluefinProPositions(addr),
-      fetchAftermathPerpsPositions(addr),
+    // Phase 1: Get SUI price + stablecoins + LSTs quickly (skip slow pool oracle)
+    await Promise.all([fetchDefiPrices(false, { skipOracle: true }), fetchLstExchangeRates()]);
+    // Phase 2: Run pool oracle concurrently with position fetchers
+    const [, results] = await Promise.all([
+      fetchPoolOraclePrices().catch(() => null),
+      Promise.allSettled([
+        fetchSuilendPositions(addr), fetchNaviPositions(addr),
+        fetchAlphaPositions(addr), fetchScallopPositions(addr),
+        fetchCetusPositions(addr), fetchTurbosPositions(addr),
+        fetchDefiWalletBalances(addr), fetchDeepBookPositions(addr),
+        fetchBluefinSpotPositions(addr), fetchBluefinProPositions(addr),
+        fetchAftermathPerpsPositions(addr),
+      ]),
     ]);
+    // Sync LSTs + stablecoins now that oracle is done
+    if (defiPrices.SUI) { for (const sym of SUI_PEGGED_SYMBOLS) defiPrices[sym] = defiPrices.SUI; }
+    defiPrices.USDC = 1; defiPrices.USDT = 1; defiPrices.wUSDC = 1;
+
     const [suilend, navi, alpha, scallop, cetus, turbos, wallet, deepbook, bluefinSpot, bluefinPro, aftermathPerps] = results;
     const suilendPos = suilend.status === "fulfilled" ? suilend.value : [];
     const naviPos = navi.status === "fulfilled" ? navi.value : [];
@@ -6375,16 +6383,27 @@ async function renderAddress(app, addr) {
     // Second pricing pass: price any tokens discovered by fetchers but missing from defiPrices
     const allCoinTypes = new Set();
     for (const b of walletBals) { if (b.coinType) allCoinTypes.add(b.coinType); }
-    for (const pos of [...suilendPos, ...naviPos, ...alphaPos, ...scallopPos]) {
-      if (pos.deposits) for (const d of pos.deposits) { if (d.coinType) allCoinTypes.add(d.coinType); }
-      if (pos.borrows) for (const b of pos.borrows) { if (b.coinType) allCoinTypes.add(b.coinType); }
-    }
     await ensurePrices([...allCoinTypes]);
     // Recompute wallet USD values with fresh prices
     for (const b of walletBals) {
       const lstRate = b.isLST ? (lstExchangeRates[b.symbol] || 1) : 1;
       b.price = b.isLST ? (defiPrices.SUI || 0) * lstRate : (defiPrices[b.symbol] || 0);
       b.usdValue = b.amount * b.price;
+    }
+    // Recompute lending position USD values now that prices are available
+    for (const pos of [...naviPos, ...alphaPos]) {
+      let depUsd = 0, borUsd = 0;
+      for (const d of (pos.deposits || [])) {
+        if (d.amountUsd <= 0 && d.amount > 0 && defiPrices[d.symbol] > 0) d.amountUsd = d.amount * defiPrices[d.symbol];
+        depUsd += d.amountUsd;
+      }
+      for (const b of (pos.borrows || [])) {
+        if (b.amountUsd <= 0 && b.amount > 0 && defiPrices[b.symbol] > 0) b.amountUsd = b.amount * defiPrices[b.symbol];
+        borUsd += b.amountUsd;
+      }
+      if (pos.depositedUsd <= 0 && depUsd > 0) pos.depositedUsd = depUsd;
+      if (pos.borrowedUsd <= 0 && borUsd > 0) pos.borrowedUsd = borUsd;
+      pos.netUsd = pos.depositedUsd - pos.borrowedUsd;
     }
 
     // Separate LSTs from regular wallet holdings
