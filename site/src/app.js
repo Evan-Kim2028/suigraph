@@ -1271,21 +1271,22 @@ function intentConfidenceClass(confidence) {
 }
 
 // Event-type keyword → action label (first match wins, checked against lowercased event type repr)
+// Uses regex with word-boundary-like matching (split on :: and _) to avoid "restake" matching "stake"
 const EVENT_ACTION_TAGS = [
-  { pattern: "swap",      label: "Swap" },
-  { pattern: "deposit",   label: "Deposit" },
-  { pattern: "withdraw",  label: "Withdraw" },
-  { pattern: "borrow",    label: "Borrow" },
-  { pattern: "repay",     label: "Repay" },
-  { pattern: "liquidat",  label: "Liquidation" },
-  { pattern: "unstake",   label: "Unstake" },
-  { pattern: "stake",     label: "Stake" },
-  { pattern: "claim",     label: "Claim" },
-  { pattern: "mint",      label: "Mint" },
-  { pattern: "burn",      label: "Burn" },
-  { pattern: "flash",     label: "Flash Loan" },
-  { pattern: "order",     label: "Order" },
-  { pattern: "fill",      label: "Fill" },
+  { re: /swap/,      label: "Swap" },
+  { re: /deposit/,   label: "Deposit" },
+  { re: /withdraw/,  label: "Withdraw" },
+  { re: /borrow/,    label: "Borrow" },
+  { re: /repay/,     label: "Repay" },
+  { re: /liquidat/,  label: "Liquidation" },
+  { re: /unstake/,   label: "Unstake" },
+  { re: /(?<![re])stake/, label: "Stake" },
+  { re: /claim/,     label: "Claim" },
+  { re: /\bmint/,    label: "Mint" },
+  { re: /\bburn/,    label: "Burn" },
+  { re: /flash/,     label: "Flash Loan" },
+  { re: /order/,     label: "Order" },
+  { re: /\bfill/,    label: "Fill" },
 ];
 
 function classifyEventAction(events) {
@@ -1294,13 +1295,21 @@ function classifyEventAction(events) {
     const repr = (ev?.contents?.type?.repr || "").toLowerCase();
     if (!repr) continue;
     for (const tag of EVENT_ACTION_TAGS) {
-      if (repr.includes(tag.pattern)) return { label: tag.label, eventType: ev.contents.type.repr };
+      if (tag.re.test(repr)) return { label: tag.label, eventType: ev.contents.type.repr };
     }
   }
   return null;
 }
 
+const _intentCache = new Map();
 function analyzeTxIntent(tx) {
+  const digest = tx?.digest;
+  if (digest && _intentCache.has(digest)) return _intentCache.get(digest);
+  const result = _analyzeTxIntentInner(tx);
+  if (digest) { if (_intentCache.size >= 1024) _intentCache.clear(); _intentCache.set(digest, result); }
+  return result;
+}
+function _analyzeTxIntentInner(tx) {
   const kind = tx?.kind;
   if (!kind) {
     return { label: "Transaction", confidence: "low", protocol: "", evidence: ["Missing transaction kind metadata"] };
@@ -2715,9 +2724,9 @@ function txListNormalizeDateState(state = {}) {
 function txListDateInputFromMs(ms) {
   if (!Number.isFinite(ms)) return "";
   const d = new Date(ms);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
 
@@ -2728,10 +2737,9 @@ function txListParseInputDateMs(value, endOfDay = false) {
   const y = Number(m[1]);
   const mo = Number(m[2]) - 1;
   const d = Number(m[3]);
-  const dt = endOfDay
-    ? new Date(y, mo, d, 23, 59, 59, 999)
-    : new Date(y, mo, d, 0, 0, 0, 0);
-  const ts = dt.getTime();
+  const ts = endOfDay
+    ? Date.UTC(y, mo, d, 23, 59, 59, 999)
+    : Date.UTC(y, mo, d, 0, 0, 0, 0);
   return Number.isFinite(ts) ? ts : NaN;
 }
 
@@ -2965,9 +2973,13 @@ async function txListFetchCheckpointTimestampMs(sequenceNumber) {
       checkpoint(sequenceNumber: $seq) { sequenceNumber timestamp }
     }`, { seq });
     const tsMs = parseTsMs(data?.checkpoint?.timestamp);
-    txListCheckpointTsCache[key] = Number.isFinite(tsMs) ? tsMs : NaN;
-    if (Number.isFinite(txListCheckpointTsCache[key])) txListRememberCheckpointHint(txListCheckpointTsCache[key], seq);
-    return txListCheckpointTsCache[key];
+    const resolved = Number.isFinite(tsMs) ? tsMs : NaN;
+    // Cap cache at 512 entries to prevent unbounded growth during repeated date filter changes
+    const cacheKeys = Object.keys(txListCheckpointTsCache);
+    if (cacheKeys.length >= 512) { for (const k of cacheKeys.slice(0, 128)) delete txListCheckpointTsCache[k]; }
+    txListCheckpointTsCache[key] = resolved;
+    if (Number.isFinite(resolved)) txListRememberCheckpointHint(resolved, seq);
+    return resolved;
   })().finally(() => {
     delete txListCheckpointTsInFlight[key];
   });
@@ -7064,65 +7076,40 @@ async function fetchAftermathOrderbookRefs(markets) {
   const refs = {};
   const warnings = [];
   let partial = false;
-  for (const market of (markets || [])) {
-    const chId = market?.id || "";
-    if (!chId) continue;
-    try {
-      const chData = await gql(`query($id: SuiAddress!) {
-        object(address: $id) {
-          dynamicFields(first: 50) {
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              name { type { repr } }
-              value {
-                ... on MoveObject { address }
-              }
-            }
-          }
-        }
-      }`, { id: chId });
-      const chConn = chData?.object?.dynamicFields;
-      if (chConn?.pageInfo?.hasNextPage) {
-        partial = true;
-        warnings.push(`Orderbook reference scan for ${market.label} was truncated; results may be partial.`);
-      }
-      const obNode = (chConn?.nodes || []).find((n) => n?.name?.type?.repr === AF_ORDERBOOK_KEY_TYPE);
-      const orderbookId = normalizeSuiAddress(obNode?.value?.address || "");
-      if (!orderbookId) {
-        partial = true;
-        warnings.push(`Missing orderbook reference for ${market.label}; falling back to position aggregates.`);
-        continue;
-      }
-      const obData = await gql(`query($id: SuiAddress!) {
-        object(address: $id) {
-          dynamicFields(first: 10) {
-            pageInfo { hasNextPage endCursor }
-            nodes {
-              name { type { repr } }
-              value {
-                ... on MoveObject { address }
-              }
-            }
-          }
-        }
-      }`, { id: orderbookId });
-      const obConn = obData?.object?.dynamicFields;
-      if (obConn?.pageInfo?.hasNextPage) {
-        partial = true;
-        warnings.push(`Orderbook map scan for ${market.label} was truncated; results may be partial.`);
-      }
-      const asksMapId = normalizeSuiAddress((obConn?.nodes || []).find((n) => n?.name?.type?.repr === AF_ASKS_MAP_KEY_TYPE)?.value?.address || "");
-      const bidsMapId = normalizeSuiAddress((obConn?.nodes || []).find((n) => n?.name?.type?.repr === AF_BIDS_MAP_KEY_TYPE)?.value?.address || "");
-      if (!asksMapId || !bidsMapId) {
-        partial = true;
-        warnings.push(`Could not resolve asks/bids maps for ${market.label}; falling back to position aggregates.`);
-        continue;
-      }
-      refs[chId] = { orderbookId, asksMapId, bidsMapId };
-    } catch (e) {
-      partial = true;
-      warnings.push(`Orderbook lookup failed for ${market.label}: ${e?.message || "unknown error"}`);
-    }
+  const validMarkets = (markets || []).filter(m => m?.id);
+  if (!validMarkets.length) return { refs, partial, warnings };
+
+  // Pass 1: batch-fetch clearing house dynamic fields for all markets in parallel
+  const chAliases = validMarkets.map((m, i) => `ch${i}: object(address: "${m.id}") { dynamicFields(first: 50) { pageInfo { hasNextPage } nodes { name { type { repr } } value { ... on MoveObject { address } } } } }`);
+  let chData;
+  try { chData = await gql(`{ ${chAliases.join("\n")} }`); } catch (e) { return { refs, partial: true, warnings: [`Orderbook batch lookup failed: ${e?.message || "unknown"}`] }; }
+
+  // Extract orderbook IDs from clearing house results
+  const obLookups = []; // { market, orderbookId, idx }
+  for (let i = 0; i < validMarkets.length; i++) {
+    const market = validMarkets[i];
+    const chConn = chData?.[`ch${i}`]?.dynamicFields;
+    if (chConn?.pageInfo?.hasNextPage) { partial = true; warnings.push(`Orderbook reference scan for ${market.label} was truncated.`); }
+    const obNode = (chConn?.nodes || []).find(n => n?.name?.type?.repr === AF_ORDERBOOK_KEY_TYPE);
+    const orderbookId = normalizeSuiAddress(obNode?.value?.address || "");
+    if (!orderbookId) { partial = true; warnings.push(`Missing orderbook reference for ${market.label}.`); continue; }
+    obLookups.push({ market, orderbookId, idx: obLookups.length });
+  }
+  if (!obLookups.length) return { refs, partial, warnings };
+
+  // Pass 2: batch-fetch orderbook dynamic fields (asks/bids map IDs)
+  const obAliases = obLookups.map((o, i) => `ob${i}: object(address: "${o.orderbookId}") { dynamicFields(first: 10) { pageInfo { hasNextPage } nodes { name { type { repr } } value { ... on MoveObject { address } } } } }`);
+  let obData;
+  try { obData = await gql(`{ ${obAliases.join("\n")} }`); } catch (e) { return { refs, partial: true, warnings: [...warnings, `Orderbook map batch lookup failed: ${e?.message || "unknown"}`] }; }
+
+  for (let i = 0; i < obLookups.length; i++) {
+    const { market, orderbookId } = obLookups[i];
+    const obConn = obData?.[`ob${i}`]?.dynamicFields;
+    if (obConn?.pageInfo?.hasNextPage) { partial = true; warnings.push(`Orderbook map scan for ${market.label} was truncated.`); }
+    const asksMapId = normalizeSuiAddress((obConn?.nodes || []).find(n => n?.name?.type?.repr === AF_ASKS_MAP_KEY_TYPE)?.value?.address || "");
+    const bidsMapId = normalizeSuiAddress((obConn?.nodes || []).find(n => n?.name?.type?.repr === AF_BIDS_MAP_KEY_TYPE)?.value?.address || "");
+    if (!asksMapId || !bidsMapId) { partial = true; warnings.push(`Could not resolve asks/bids maps for ${market.label}.`); continue; }
+    refs[market.id] = { orderbookId, asksMapId, bidsMapId };
   }
   return { refs, partial, warnings };
 }
@@ -7427,19 +7414,6 @@ async function fetchAftermathPerpsPositions(addr) {
       || (a.side === b.side ? 0 : (a.side === "long" ? -1 : 1))
       || (b.size || 0) - (a.size || 0));
 
-    // Derive XAUM (gold) price from XAUT/USD order prices if no DEX liquidity exists
-    if (!defiPrices.XAUM || defiPrices.XAUM <= 0) {
-      const goldOrders = orders.filter(o => (o.market || "").includes("XAUT") && Number.isFinite(o.price) && o.price > 0);
-      if (goldOrders.length) {
-        const mid = goldOrders.reduce((s, o) => s + o.price, 0) / goldOrders.length;
-        if (mid > 0) defiPrices.XAUM = mid;
-      } else {
-        // Fall back to position entry price
-        const goldPos = positions.filter(p => (p.market || "").includes("XAUT") && Number.isFinite(p.entryPrice) && p.entryPrice > 0);
-        if (goldPos.length) defiPrices.XAUM = goldPos[0].entryPrice;
-      }
-    }
-
     return {
       accounts: caps,
       markets: marketRows,
@@ -7662,6 +7636,18 @@ async function renderAddress(app, addr) {
     const afPerpsData = aftermathPerps.status === "fulfilled"
       ? aftermathPerps.value
       : { accounts: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
+
+    // Derive XAUM (gold) price from Aftermath XAUT/USD order prices if no DEX liquidity
+    if (!defiPrices.XAUM || defiPrices.XAUM <= 0) {
+      const goldOrders = afPerpsData.orders.filter(o => (o.market || "").includes("XAUT") && Number.isFinite(o.price) && o.price > 0);
+      if (goldOrders.length) {
+        const mid = goldOrders.reduce((s, o) => s + o.price, 0) / goldOrders.length;
+        if (mid > 0) defiPrices.XAUM = mid;
+      } else {
+        const goldPos = afPerpsData.positions.filter(p => (p.market || "").includes("XAUT") && Number.isFinite(p.entryPrice) && p.entryPrice > 0);
+        if (goldPos.length) defiPrices.XAUM = goldPos[0].entryPrice;
+      }
+    }
 
     // Second pricing pass: price any tokens discovered by fetchers but missing from defiPrices
     const allCoinTypes = new Set();
@@ -7985,9 +7971,6 @@ async function renderAddress(app, addr) {
           const activityText = o.lastEventAction
             ? `${o.lastEventAction === "posted" ? "Posted" : "Canceled"} ${timeTag(o.lastEventTsMs)}`
             : '<span class="u-c-dim">—</span>';
-          const orderIdLabel = o.orderId
-            ? `<span class="u-mono-11-dim" title="${escapeAttr(o.orderId)}">${escapeHtml(truncHash(o.orderId, 10))}</span>`
-            : '<span class="u-c-dim">—</span>';
           const kindLabel = `${escapeHtml(o.kind || "Maker Limit")}${o.synthetic ? ' <span class="badge badge-fail">inferred</span>' : ""}`;
           const priceText = Number.isFinite(o.price) && o.price > 0
             ? `$${o.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
@@ -8045,6 +8028,7 @@ async function renderAddress(app, addr) {
       const presetEl = document.getElementById("addr-tx-date-preset");
       if (presetEl) {
         presetEl.onchange = async () => {
+          if (txLoading) return;
           const next = txListNormalizeDateState({
             preset: presetEl.value,
             fromDate: document.getElementById("addr-tx-date-from")?.value || txFilterState.fromDate,
@@ -8119,6 +8103,7 @@ async function renderAddress(app, addr) {
       return;
     }
     if (action === "addr-tx-date-apply") {
+      if (txLoading) return;
       txFilterState = txListNormalizeDateState({
         preset: "custom",
         fromDate: document.getElementById("addr-tx-date-from")?.value || "",
