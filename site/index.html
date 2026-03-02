@@ -698,7 +698,7 @@
     .jtree-wrap { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px 14px; max-height:500px; overflow:auto; position:relative; }
     .jtree-wrap .jtree-copy { position:absolute; top:6px; right:8px; background:var(--surface2); border:1px solid var(--border); border-radius:4px; color:var(--text-dim); font-size:11px; padding:2px 8px; cursor:pointer; opacity:0; transition:opacity .15s; z-index:1; }
     .jtree-wrap:hover .jtree-copy { opacity:1; }
-    .jtree-copy:hover { color:var(--text); background:var(--card); }
+    .jtree-copy:hover { color:var(--text); background:var(--surface); }
     .jtree-k { color:var(--purple); }
     .jtree-s { color:var(--green); }
     .jtree-n { color:var(--blue); }
@@ -918,7 +918,7 @@
     .nav-dropdown > .nav-trigger { cursor:pointer; padding:6px 10px; font-size:13px; color:var(--text-dim); background:none; border:none; font-family:inherit; display:inline-flex; align-items:center; gap:4px; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
     .nav-dropdown > .nav-trigger:hover, .nav-dropdown > .nav-trigger.active { color:var(--text); }
     .nav-dropdown > .nav-trigger::after { content:"▾"; font-size:10px; }
-    .nav-dropdown .dropdown-menu { display:none; position:absolute; top:calc(100% + 4px); left:0; background:var(--card); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.4); min-width:170px; padding:4px 0; z-index:9999; }
+    .nav-dropdown .dropdown-menu { display:none; position:absolute; top:calc(100% + 4px); left:0; background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.4); min-width:170px; padding:4px 0; z-index:9999; }
     .nav-dropdown.open .dropdown-menu { display:block; }
     .dropdown-menu a { display:block; padding:10px 16px; font-size:14px; color:var(--text-dim); text-decoration:none; white-space:nowrap; -webkit-tap-highlight-color:transparent; }
     .dropdown-menu a:hover, .dropdown-menu a:active { background:var(--bg-light); color:var(--text); }
@@ -985,8 +985,8 @@
         <a href="#/defi-rates" data-page="defi-rates" data-action="nav-close-dropdowns">Lending Rates</a>
         <a href="#/defi-dex" data-page="defi-dex" data-action="nav-close-dropdowns">DEX</a>
         <a href="#/defi-stablecoins" data-page="defi-stablecoins" data-action="nav-close-dropdowns">Stablecoins</a>
-        <a href="#/defi-flows" data-page="defi-flows" data-action="nav-close-dropdowns">Flows</a>
-        <a href="#/defi-risk" data-page="defi-risk" data-action="nav-close-dropdowns">Risk Monitor</a>
+        <a href="#/defi-flows" data-page="defi-flows" data-action="nav-close-dropdowns">Volume</a>
+
       </div>
     </div>
     <div class="nav-dropdown" data-group="devtools">
@@ -1004,6 +1004,7 @@
   <button id="view-mode-toggle" class="mode-toggle" type="button" data-action="toggle-view-mode" aria-label="Toggle simple/expert view mode">Simple</button>
   <span id="perf-badge" class="perf-badge">Idle</span>
   <span class="net-badge">Mainnet</span>
+  <a href="https://github.com/Evan-Kim2028/suigraph" target="_blank" rel="noopener" class="net-badge" style="text-decoration:none;color:var(--text-dim)" aria-label="View source on GitHub">GitHub</a>
 </div>
 <div id="perf-tooltip" class="perf-tooltip" role="tooltip" aria-hidden="true"></div>
 
@@ -1217,7 +1218,6 @@ const PAGE_PERF_BUDGETS = Object.freeze({
   "defi-stablecoins": { gqlCalls: 20, renderMs: 2500 },
   "defi-lst": { gqlCalls: 20, renderMs: 2500 },
   "defi-flows": { gqlCalls: 18, renderMs: 2200 },
-  "defi-risk": { gqlCalls: 20, renderMs: 2500 },
   protocol: { gqlCalls: 2, renderMs: 1200 },
   packages: { gqlCalls: 14, renderMs: 2200 },
   simulate: { gqlCalls: 3, renderMs: 1300 },
@@ -1349,7 +1349,7 @@ const DEFI_DEX_TTL_MS = 30 * 1000;
 const DEFI_STABLECOINS_TTL_MS = 45 * 1000;
 const DEFI_LST_TTL_MS = 60 * 1000;
 const DEFI_FLOWS_TTL_MS = 25 * 1000;
-const DEFI_RISK_TTL_MS = 45 * 1000;
+
 const DEFI_HISTORY_TTL_MS = 10 * 60 * 1000;
 const GQL_SERVICE_CONFIG_TTL_MS = 30 * 60 * 1000;
 const PACKAGE_ACTIVITY_TTL_MS = 30 * 1000;
@@ -1389,7 +1389,6 @@ const defiOverviewCacheByWindow = {};
 const defiDexCacheByWindow = {};
 const defiStablecoinsCacheByWindow = {};
 const defiFlowsCacheByWindow = {};
-const defiRiskCacheByWindow = {};
 const packageActivityCacheByWindow = {};
 const defiWindowSampleCache = {};
 const defiWindowSharedCache = {};
@@ -1757,7 +1756,13 @@ const SUILEND_MARKET_TYPE = `${SUILEND_PKG}::suilend::MAIN_POOL`;
 const SUILEND_CAP_TYPE = `${SUILEND_PKG}::lending_market::ObligationOwnerCap<${SUILEND_MARKET_TYPE}>`;
 const SUILEND_MAIN_POOL_OBJECT = "0x84030d26d85eaa7035084a057f2f11f701b7e2e4eda87551becbc7c97505ece1";
 
-// NAVI
+// NAVI Protocol — Aave-style lending on Sui
+// On-chain state is stored in two shared tables:
+//   - USER_INFO_TABLE: Map<address, UserInfo> — holds per-user VecSet<u8> of collateral/loan asset IDs
+//   - RESERVES_TABLE:  Map<u8, Reserve>       — per-asset reserve with indexes, rates, coin_type, balance tables
+// All RAY-scaled values (indexes, rates, LTV) use 1e27 precision.
+// User balances are stored as "scaled balances" with 9-decimal precision regardless of the coin's native decimals.
+// Actual amount = scaled_balance * current_index / 1e9
 const NAVI_USER_INFO_TABLE = "0xabc6c3fbc89b96e3351fdbeb5730bcc5398648367260c6a4e201779e34694e04";
 const NAVI_RESERVES_TABLE = "0xe6d4c6610b86ce7735ea754596d71d72d10c7980b5052fc3c8cdf8d09fea9b4b";
 const NAVI_RAY = 1e27;
@@ -2376,22 +2381,19 @@ function parseSortableCellValue(text) {
   const lower = raw.toLowerCase();
   if (/^v\d+(\.\d+)?$/.test(lower)) return { type: "number", value: Number(lower.slice(1)) };
   if (!lower.startsWith("0x")) {
-    const dt = Date.parse(raw);
-    if (Number.isFinite(dt)) return { type: "number", value: dt };
-    const compactCandidate = lower
-      .replace(/[$,%]/g, "")
-      .replace(/,/g, "")
-      .match(/[-+]?\d+(?:\.\d+)?[kmbt]\b/i)?.[0];
+    // Check plain numbers and compact suffixes BEFORE Date.parse to avoid
+    // JS interpreting numbers like "52" or "1000" as calendar years.
+    const stripped = lower.replace(/[$,%]/g, "").replace(/,/g, "").trim();
+    const compactCandidate = stripped.match(/^[-+]?\d+(?:\.\d+)?[kmbt]$/i)?.[0];
     const compact = parseCompactNumericToken(compactCandidate);
     if (Number.isFinite(compact)) return { type: "number", value: compact };
-    const numeric = lower
-      .replace(/[$,%]/g, "")
-      .replace(/,/g, "")
-      .match(/[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?/i)?.[0];
-    if (numeric != null) {
-      const n = Number(numeric);
+    const pureNum = stripped.match(/^[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?$/i)?.[0];
+    if (pureNum != null) {
+      const n = Number(pureNum);
       if (Number.isFinite(n)) return { type: "number", value: n };
     }
+    const dt = Date.parse(raw);
+    if (Number.isFinite(dt)) return { type: "number", value: dt };
   }
   return { type: "text", value: lower };
 }
@@ -2655,7 +2657,7 @@ async function prefetchCoinMeta(coinTypes) {
   const toFetch = [...new Set(coinTypes.filter(ct => ct && !coinMetaCache[ct] && !KNOWN_COIN_TYPES[ct]))];
   if (!toFetch.length) return;
   // Keep query payloads bounded and survive partial failures by chunking + per-coin fallback.
-  for (const chunk of chunkArray(toFetch, 20)) {
+  for (const chunk of chunkArray(toFetch, 10)) {
     const aliases = chunk.map((ct, i) => `c${i}: coinMetadata(coinType: "${ct}") { decimals symbol name iconUrl supply }`);
     try {
       const data = await gql(`{ ${aliases.join("\n")} }`);
@@ -2809,7 +2811,6 @@ function parseRoute(route) {
   if (parts[0] === "defi-stablecoins") return { page: "defi-stablecoins" };
   if (parts[0] === "defi-lst") return { page: "defi-lst" };
   if (parts[0] === "defi-flows") return { page: "defi-flows" };
-  if (parts[0] === "defi-risk") return { page: "defi-risk" };
   if (parts[0] === "protocol") return { page: "protocol" };
   if (parts[0] === "packages") return { page: "packages" };
   if (parts[0] === "simulate") return { page: "simulate" };
@@ -2822,7 +2823,7 @@ async function routeTo(route) {
   startPagePerf(r.page);
   // Update active nav — handle flat links and dropdown items
   const networkPages = ["transfers","congestion","events","protocol","validators"];
-  const defiPages = ["defi-overview","defi-rates","defi-dex","defi-stablecoins","defi-lst","defi-flows","defi-risk"];
+  const defiPages = ["defi-overview","defi-rates","defi-dex","defi-stablecoins","defi-lst","defi-flows"];
   const devtoolsPages = ["graphql","simulate"];
   document.querySelectorAll(".topbar nav > a").forEach(a => {
     a.classList.toggle("active", a.dataset.page === r.page);
@@ -2865,7 +2866,6 @@ async function routeTo(route) {
       case "defi-stablecoins": await renderDefiStablecoins(app); break;
       case "defi-lst": await renderDefiLst(app); break;
       case "defi-flows": await renderDefiFlows(app); break;
-      case "defi-risk": await renderDefiRisk(app); break;
       case "protocol": await renderProtocolConfig(app); break;
       case "packages": await renderPackages(app); break;
       case "simulate": await renderSimulator(app); break;
@@ -3056,7 +3056,10 @@ async function renderDashboard(app) {
       const prev = cps[i + 1]; // older checkpoint
       const txCount = prev ? (Number(c.networkTotalTransactions) - Number(prev.networkTotalTransactions)) : null;
       const gs = c.rollingGasSummary;
-      const gasUsed = gs ? Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate) : 0;
+      const gasTotal = gs ? Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate) : 0;
+      const prevGs = prev?.rollingGasSummary;
+      const prevGasTotal = prevGs ? Number(prevGs.computationCost) + Number(prevGs.storageCost) - Number(prevGs.storageRebate) : 0;
+      const gasUsed = prev ? gasTotal - prevGasTotal : 0;
       return `<tr>
         <td><a class="hash-link" href="#/checkpoint/${c.sequenceNumber}">${fmtNumber(c.sequenceNumber)}</a></td>
         <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${txCount != null ? txCount + ' txns' : '—'}</td>
@@ -3110,8 +3113,8 @@ async function renderDashboard(app) {
       </a>
       <div class="stat-box">
         <div class="stat-label">Total Transactions</div>
-        <div class="stat-value" data-stat="total-txns">${fmtNumber(cp.networkTotalTransactions)}</div>
-        <div class="stat-sub">Epoch: ${fmtNumber(ep.totalTransactions)}</div>
+        <div class="stat-value" data-stat="total-txns">${fmtCompact(cp.networkTotalTransactions)}</div>
+        <div class="stat-sub">Epoch: ${fmtCompact(ep.totalTransactions)}</div>
         <div class="sparkline-wrap">${renderSparkline(checkpointTxDeltas, { prefix: "Δ ", suffix: " tx/checkpoint", color: "var(--blue)" })}</div>
       </div>
       <div class="stat-box">
@@ -3383,15 +3386,23 @@ async function renderCheckpoints(app, after = null) {
       <div class="card-body">
         <table>
           <thead><tr>
-            <th>Checkpoint</th><th>Digest</th><th>Timestamp</th><th>Gas (Computation)</th>
+            <th>Checkpoint</th><th>Digest</th><th>Timestamp</th><th>Gas (Per Checkpoint)</th>
           </tr></thead>
           <tbody>
-            ${cps.map(c => `<tr>
+            ${cps.map((c, i) => {
+              const prev = cps[i + 1];
+              const gs = c.rollingGasSummary;
+              const gasTotal = gs ? Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate) : 0;
+              const prevGs = prev?.rollingGasSummary;
+              const prevGasTotal = prevGs ? Number(prevGs.computationCost) + Number(prevGs.storageCost) - Number(prevGs.storageRebate) : 0;
+              const gasUsed = prev ? gasTotal - prevGasTotal : 0;
+              return `<tr>
               <td><a class="hash-link" href="#/checkpoint/${c.sequenceNumber}">${fmtNumber(c.sequenceNumber)}</a></td>
               <td>${hashLink(c.digest, '/checkpoint/' + c.sequenceNumber)}</td>
               <td>${fmtTime(c.timestamp)}</td>
-              <td>${fmtSui(c.rollingGasSummary?.computationCost)}</td>
-            </tr>`).join("")}
+              <td>${gasUsed > 0 ? fmtSui(gasUsed) : '—'}</td>
+            </tr>`;
+            }).slice(0, -1).join("")}
           </tbody>
         </table>
         <div class="pagination">
@@ -4548,8 +4559,8 @@ async function renderTxDetail(app, digest) {
       <button data-action="tx-toggle-sections">Expand / Collapse all</button>
     </div>
     ${isPTB ? section("sec-commands", "Commands", `${commands.length}${commandsTruncated ? "+" : ""}`, true, renderCommands(), { truncated: commandsTruncated }) : ""}
-    ${isPTB && inputs.length ? section("sec-inputs", "Inputs", `${inputs.length}${inputsTruncated ? "+" : ""}`, false, renderInputs(), { truncated: inputsTruncated }) : ""}
-    ${section("sec-balances", "Balance Changes", `${balances.length}${balancesTruncated ? "+" : ""}`, true, renderBalances(), { truncated: balancesTruncated })}
+    ${isPTB ? section("sec-inputs", "Inputs", `${inputs.length}${inputsTruncated ? "+" : ""}`, inputs.length > 0, renderInputs(), { truncated: inputsTruncated }) : ""}
+    ${section("sec-balances", "Balance Changes", `${balances.length}${balancesTruncated ? "+" : ""}`, balances.length > 0, renderBalances(), { truncated: balancesTruncated })}
     ${section("sec-objects", "Object Changes", `${objChanges.length}${objectsTruncated ? "+" : ""}`, true, renderObjects(), { truncated: objectsTruncated })}
     ${section("sec-events", "Events", `${events.length}${eventsTruncated ? "+" : ""}`, false, renderEvents(), { truncated: eventsTruncated })}
   `;
@@ -5461,8 +5472,11 @@ function buildPackageActivityFromTxs(txs = [], sharedCoverage = {}) {
           functionCounts: {},
           eventTypeCounts: {},
           objectCounts: {},
+          objectTypeCounts: {},
           senderSet: new Set(),
           recentTxs: [],
+          totalGas: 0,
+          gasTxCount: 0,
         };
       }
       const row = byPkg[pkg];
@@ -5489,11 +5503,17 @@ function buildPackageActivityFromTxs(txs = [], sharedCoverage = {}) {
       if (!pkgList.length) continue;
       const objAddr = normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || "");
       const objLabel = objAddr || shortType(outType || inType) || "unknown";
+      const objTypeLabel = shortType(outType || inType) || "unknown";
       for (const pkg of pkgList) {
         if (!byPkg[pkg]) continue;
         bumpCount(byPkg[pkg].objectCounts, objLabel, 1);
+        bumpCount(byPkg[pkg].objectTypeCounts, objTypeLabel, 1);
       }
     }
+
+    // Per-tx gas cost
+    const txGs = tx?.effects?.gasEffects?.gasSummary;
+    const txGasCost = txGs ? Number(txGs.computationCost) + Number(txGs.storageCost) - Number(txGs.storageRebate) : 0;
 
     const pkgKeys = Object.keys(txPkgMap);
     if (!pkgKeys.length) continue;
@@ -5506,6 +5526,7 @@ function buildPackageActivityFromTxs(txs = [], sharedCoverage = {}) {
     for (const pkg of pkgKeys) {
       const row = byPkg[pkg];
       row.txCount++;
+      if (txGasCost > 0) { row.totalGas += txGasCost; row.gasTxCount++; }
       if (txStatus === "SUCCESS") row.successCount++;
       if (!row.latestTs || (txTs && parseTsMs(txTs) > parseTsMs(row.latestTs))) {
         row.latestTs = txTs;
@@ -5538,6 +5559,8 @@ function buildPackageActivityFromTxs(txs = [], sharedCoverage = {}) {
     r.topFunctions = topCountRows(r.functionCounts, 8);
     r.topEventTypes = topCountRows(r.eventTypeCounts, 8);
     r.topObjects = topCountRows(r.objectCounts, 8);
+    r.topObjectTypes = topCountRows(r.objectTypeCounts, 8);
+    r.avgGas = r.gasTxCount > 0 ? r.totalGas / r.gasTxCount : 0;
     r.recentTxs = r.recentTxs
       .sort((a, b) => parseTsMs(b.timestamp) - parseTsMs(a.timestamp))
       .slice(0, 8);
@@ -6432,72 +6455,6 @@ async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY,
   });
 }
 
-async function fetchDefiRiskSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
-  const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
-  const cacheState = getKeyedCacheState(defiRiskCacheByWindow, windowKey);
-  return withTimedCache(cacheState, DEFI_RISK_TTL_MS, force, async () => {
-    const [lending, stable, flows] = await Promise.all([
-      fetchLendingRatesOverview(force),
-      fetchDefiStablecoinSnapshot(windowKey, force),
-      fetchDefiFlowSnapshot(windowKey, force),
-    ]);
-    const alerts = [];
-    const allLendingRows = [...(lending?.byToken?.SUI || []), ...(lending?.byToken?.USDC || [])];
-    const lendingRows = allLendingRows
-      .filter(r => Number.isFinite(r.utilization) && Number.isFinite(r.borrowBps));
-    for (const r of lendingRows) {
-      const spreadBps = Number.isFinite(r.supplyBps) ? (r.borrowBps - r.supplyBps) : null;
-      if (r.utilization > 0.9) alerts.push({ severity: "high", area: "Lending", protocol: r.protocol, token: r.token, metric: "Utilization", value: `${(r.utilization * 100).toFixed(1)}%`, note: "Very high utilization" });
-      else if (r.utilization > 0.8) alerts.push({ severity: "medium", area: "Lending", protocol: r.protocol, token: r.token, metric: "Utilization", value: `${(r.utilization * 100).toFixed(1)}%`, note: "Elevated utilization" });
-      if (r.borrowBps > 2500) alerts.push({ severity: "high", area: "Lending", protocol: r.protocol, token: r.token, metric: "Borrow APR", value: `${(r.borrowBps / 100).toFixed(2)}%`, note: "Borrow cost spike" });
-      else if (r.borrowBps > 1600) alerts.push({ severity: "medium", area: "Lending", protocol: r.protocol, token: r.token, metric: "Borrow APR", value: `${(r.borrowBps / 100).toFixed(2)}%`, note: "Borrow cost elevated" });
-      if (spreadBps != null && spreadBps > 1500) alerts.push({ severity: "medium", area: "Lending", protocol: r.protocol, token: r.token, metric: "Spread", value: `${(spreadBps / 100).toFixed(2)}%`, note: "Wide borrow/supply spread" });
-    }
-    const topStable = (stable?.coins || [])[0];
-    // Concentration is tracked as context but does not contribute to critical risk alerts.
-    const largeFlows = (flows?.rows || []).filter(r => r.usdValue > 500000);
-    if (largeFlows.length >= 8) alerts.push({ severity: "medium", area: "Flows", protocol: "Cross-Protocol", token: "USD", metric: "Large Flows", value: `${largeFlows.length}`, note: "High whale flow count in selected window" });
-
-    const score = Math.min(100, alerts.reduce((s, a) => s + (a.severity === "high" ? 18 : a.severity === "medium" ? 10 : 4), 0));
-    const highCount = alerts.filter(a => a.severity === "high").length;
-    const mediumCount = alerts.filter(a => a.severity === "medium").length;
-    const lendingUnavailable = allLendingRows.filter(r => r.error).length;
-    const lowConfidenceFlowRows = flows?.coverage?.lowConfidenceRows || 0;
-    const totalFlowRows = flows?.coverage?.flowRows || 0;
-    const signals = [
-      highCount
-        ? `${highCount} high-severity threshold alerts are active.`
-        : "No high-severity threshold alerts are active.",
-      topStable
-        ? `Top stablecoin share is ${topStable.pct.toFixed(1)}% (${topStable.symbol}) and is tracked as a non-critical concentration watchlist metric.`
-        : "Stablecoin concentration signal unavailable.",
-      totalFlowRows
-        ? `${((lowConfidenceFlowRows / totalFlowRows) * 100).toFixed(1)}% of flow rows feeding risk are low-confidence protocol mappings.`
-        : "Flow confidence coverage unavailable for this risk snapshot.",
-    ];
-    return {
-      fetchedAt: new Date().toISOString(),
-      score,
-      alerts: alerts.sort((a, b) => (a.severity === b.severity ? 0 : (a.severity === "high" ? -1 : 1))),
-      highCount,
-      mediumCount,
-      lendingRows: lendingRows.sort((a, b) => (b.utilization || 0) - (a.utilization || 0)),
-      topStable: topStable || null,
-      largeFlowCount: largeFlows.length,
-      coverage: {
-        lendingRowsTotal: allLendingRows.length,
-        lendingRowsLive: lendingRows.length,
-        lendingRowsUnavailable: lendingUnavailable,
-        stablecoinsTracked: stable?.coins?.length || 0,
-        flowRows: totalFlowRows,
-        lowConfidenceFlowRows,
-      },
-      signals,
-      window: flows?.window || stable?.window || { windowKey },
-    };
-  });
-}
-
 async function fetchDefiWalletBalances(addr) {
   const allBalances = [];
   let cursor = null;
@@ -6515,8 +6472,11 @@ async function fetchDefiWalletBalances(addr) {
     if (!balances.pageInfo.hasNextPage) break;
     cursor = balances.pageInfo.endCursor;
   }
-  return allBalances
-    .filter(b => Number(b.rawBalance) > 0)
+  const nonZero = allBalances.filter(b => Number(b.rawBalance) > 0);
+  // Prefetch on-chain CoinMetadata for unknown coin types → accurate decimals & symbols
+  const unknownTypes = nonZero.map(b => b.coinType).filter(ct => !KNOWN_COIN_TYPES[ct] && !coinMetaCache[ct]);
+  if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
+  return nonZero
     .map(b => {
       const resolved = resolveCoinType(b.coinType);
       const sym = resolved.symbol;
@@ -6545,11 +6505,19 @@ async function fetchSuilendPositions(addr) {
     if (!ob) continue;
     const deposits = (ob.deposits || []).map(d => {
       const sym = (d.coin_type?.name || "").split("::").pop();
-      return { symbol: sym, amountUsd: Number(d.market_value?.value || 0) / 1e18 };
+      const usd = Number(d.market_value?.value || 0) / 1e18;
+      const dec = getDecimals(sym);
+      const raw = Number(d.deposited_ctoken_amount || 0);
+      const amount = raw > 0 ? raw / Math.pow(10, dec) : (usd > 0 && defiPrices[sym] > 0 ? usd / defiPrices[sym] : 0);
+      return { symbol: sym, amount, amountUsd: usd };
     });
     const borrows = (ob.borrows || []).map(b => {
       const sym = (b.coin_type?.name || "").split("::").pop();
-      return { symbol: sym, amountUsd: Number(b.market_value?.value || 0) / 1e18 };
+      const usd = Number(b.market_value?.value || 0) / 1e18;
+      const dec = getDecimals(sym);
+      const raw = Number(b.borrowed_amount?.value || 0);
+      const amount = raw > 0 ? raw / Math.pow(10, dec) : (usd > 0 && defiPrices[sym] > 0 ? usd / defiPrices[sym] : 0);
+      return { symbol: sym, amount, amountUsd: usd };
     });
     const depositedUsd = Number(ob.deposited_value_usd?.value || 0) / 1e18;
     const borrowedUsd = Number(ob.unweighted_borrowed_value_usd?.value || 0) / 1e18;
@@ -6560,14 +6528,19 @@ async function fetchSuilendPositions(addr) {
   return positions;
 }
 
+// Fetch a wallet's NAVI lending/borrowing positions.
+// Flow: UserInfo → asset IDs → Reserves → user scaled balances → human amounts.
+// See docs/navi-positions.md for the full query walkthrough.
 async function fetchNaviPositions(addr) {
-  // Step 1: Look up user info via dynamic field
+  // Step 1: Look up UserInfo from the dynamic field table keyed by wallet address.
+  // Returns { collaterals: base64, loans: base64 } — VecSet<u8> of asset IDs.
   const userInfoData = await gql(`{ address(address: "${NAVI_USER_INFO_TABLE}") {
     dynamicField(name: { type: "address", bcs: "${addrBcs(addr)}" }) { value { ... on MoveValue { json } } }
   } }`);
   const userInfo = userInfoData?.address?.dynamicField?.value?.json;
   if (!userInfo) return [];
-  // collaterals/loans are VecSet<u8> → serialized as base64 strings of raw bytes
+  // Decode asset IDs: collaterals/loans are VecSet<u8> serialized as base64 strings.
+  // Each byte is one asset ID (e.g. 0=SUI, 10=USDC, 11=ETH, 15=DEEP, 21=BTC, ...).
   const decodeAssetIds = v => {
     if (Array.isArray(v)) return v.map(Number);
     if (typeof v === "string" && v.length > 0) return Array.from(atob(v), c => c.charCodeAt(0));
@@ -6577,7 +6550,9 @@ async function fetchNaviPositions(addr) {
   const loanIds = decodeAssetIds(userInfo.loans);
   const allAssetIds = [...new Set([...collateralIds, ...loanIds])];
   if (!allAssetIds.length) return [];
-  // Step 2: Batch-fetch reserves
+  // Step 2: Batch-fetch Reserve objects from RESERVES_TABLE, keyed by u8 asset ID.
+  // Each reserve contains: coin_type, current_supply_index, current_borrow_index,
+  // supply_balance.user_state.id, borrow_balance.user_state.id, ltv, rates, etc.
   const reserveParts = allAssetIds.map((id, i) => `r${i}: dynamicField(name: { type: "u8", bcs: "${u8Bcs(Number(id))}" }) { value { ... on MoveValue { json } } }`);
   const reserveData = await gql(`{ address(address: "${NAVI_RESERVES_TABLE}") { ${reserveParts.join("\n")} } }`);
   const reserves = {};
@@ -6585,7 +6560,9 @@ async function fetchNaviPositions(addr) {
     const rv = reserveData?.address?.[`r${i}`]?.value?.json;
     if (rv) reserves[id] = rv;
   });
-  // Step 3: Batch-fetch user balances from supply/borrow tables
+  // Step 3: Fetch user's scaled balances from each reserve's balance table.
+  // supply_balance.user_state.id → Table<address, u64> of supply scaled balances
+  // borrow_balance.user_state.id → Table<address, u64> of borrow scaled balances
   const balQueries = [];
   for (const assetId of collateralIds) {
     const rv = reserves[assetId]; if (!rv) continue;
@@ -6603,17 +6580,22 @@ async function fetchNaviPositions(addr) {
     const val = balData[`b${i}`]?.dynamicField?.value?.json;
     return val != null ? { assetId: q.assetId, type: q.type, balance: String(val), reserve: q.reserve } : null;
   }).filter(Boolean);
-  // Prefetch CoinMetadata for any unknown coin types
-  // NAVI reserves return coin_type without 0x prefix and with full 64-char addresses — normalize
+  // Normalize coin_type from reserve: NAVI stores without 0x prefix, with variable-length
+  // address. Pad to canonical 64-hex-char Sui address format for KNOWN_COIN_TYPES lookups.
   const normalizeCt = ct => {
     if (!ct) return "";
     if (!ct.startsWith("0x")) ct = "0x" + ct;
     const sep = ct.indexOf("::");
-    if (sep > 2) { const addr = ct.slice(2, sep).replace(/^0+/, "") || "0"; ct = "0x" + addr + ct.slice(sep); }
+    if (sep > 2) { ct = "0x" + ct.slice(2, sep).padStart(64, "0") + ct.slice(sep); }
     return ct;
   };
+  // Prefetch CoinMetadata for coin types not in our static lookup table
   const unknownTypes = balResults.map(b => normalizeCt(b.reserve.coin_type)).filter(ct => ct && !KNOWN_COIN_TYPES[ct]);
   if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
+  // Step 4: Convert scaled balances to human-readable amounts.
+  // Formula: human_amount = scaled_balance * (current_index / 1e27) / 1e9
+  // NAVI uses 9-decimal internal precision for ALL coins, regardless of native decimals
+  // (e.g. USDC natively has 6 decimals, but NAVI stores USDC balances with 9).
   const deposits = [], borrows = [];
   let totalDepUsd = 0, totalBorUsd = 0;
   for (const b of balResults) {
@@ -6621,22 +6603,23 @@ async function fetchNaviPositions(addr) {
     const coinType = normalizeCt(rv.coin_type);
     const resolved = resolveCoinType(coinType);
     const sym = resolved.symbol || `Asset${b.assetId}`;
-    const dec = resolved.decimals;
+    const dec = 9; // NAVI 9-decimal internal precision — do NOT use coin's native decimals
     const scaled = Number(b.balance);
     if (b.type === "supply") {
       const idx = Number(rv.current_supply_index || 1e27) / NAVI_RAY;
       const human = (scaled * idx) / Math.pow(10, dec);
       const usd = human * (defiPrices[sym] || 0);
       totalDepUsd += usd;
-      deposits.push({ symbol: sym, amountUsd: usd, ltv: Number(rv.ltv || 0) / NAVI_RAY });
+      deposits.push({ symbol: sym, amount: human, amountUsd: usd, ltv: Number(rv.ltv || 0) / NAVI_RAY });
     } else {
       const idx = Number(rv.current_borrow_index || 1e27) / NAVI_RAY;
       const human = (scaled * idx) / Math.pow(10, dec);
       const usd = human * (defiPrices[sym] || 0);
       totalBorUsd += usd;
-      borrows.push({ symbol: sym, amountUsd: usd });
+      borrows.push({ symbol: sym, amount: human, amountUsd: usd });
     }
   }
+  // Health factor = sum(deposit_usd * ltv) / total_borrow_usd
   const weightedColl = deposits.reduce((s, d) => s + d.amountUsd * (d.ltv || 0), 0);
   return [{ protocol: "NAVI", deposits, borrows, depositedUsd: totalDepUsd, borrowedUsd: totalBorUsd, healthFactor: totalBorUsd > 0 ? weightedColl / totalBorUsd : Infinity, netUsd: totalDepUsd - totalBorUsd }];
 }
@@ -6658,8 +6641,8 @@ async function fetchAlphaPositions(addr) {
     const borrowedUsd = extractUsd(data.total_loan_usd);
     const safeCollUsd = extractUsd(data.safe_collateral_usd);
     const collContents = data.collaterals?.contents || [];
-    const deps = collContents.map(c => { const m = Number(c.key || 0); return { symbol: ALPHA_MARKETS[m] || `Market${m}`, amountUsd: collContents.length > 0 ? depositedUsd / collContents.length : 0 }; });
-    const loans = (data.loans || []).map(l => { const sym = String(l.coin_type?.name || "").split("::").pop() || "?"; const dec = getDecimals(sym); const usd = (Number(l.amount || 0) / Math.pow(10, dec)) * (defiPrices[sym] || 0); return { symbol: sym, amountUsd: usd || (borrowedUsd / Math.max((data.loans || []).length, 1)) }; });
+    const deps = collContents.map(c => { const m = Number(c.key || 0); const sym = ALPHA_MARKETS[m] || `Market${m}`; const usdPer = collContents.length > 0 ? depositedUsd / collContents.length : 0; const amt = usdPer > 0 && defiPrices[sym] > 0 ? usdPer / defiPrices[sym] : 0; return { symbol: sym, amount: amt, amountUsd: usdPer }; });
+    const loans = (data.loans || []).map(l => { const sym = String(l.coin_type?.name || "").split("::").pop() || "?"; const dec = getDecimals(sym); const human = Number(l.amount || 0) / Math.pow(10, dec); const usd = human * (defiPrices[sym] || 0); return { symbol: sym, amount: human, amountUsd: usd || (borrowedUsd / Math.max((data.loans || []).length, 1)) }; });
     positions.push({ protocol: "Alpha", deposits: deps, borrows: loans, depositedUsd, borrowedUsd, healthFactor: borrowedUsd > 0 ? safeCollUsd / borrowedUsd : Infinity, netUsd: depositedUsd - borrowedUsd });
   }
   return positions;
@@ -6872,7 +6855,7 @@ async function fetchScallopPositions(addr) {
       const human = amount / Math.pow(10, resolved.decimals);
       const usd = human * (defiPrices[resolved.symbol] || 0);
       totalDepUsd += usd;
-      deposits.push({ symbol: resolved.symbol, amountUsd: usd });
+      deposits.push({ symbol: resolved.symbol, amount: human, amountUsd: usd });
     }
     for (const f of debtNodes) {
       const coinType = "0x" + (f.name?.json?.name || "");
@@ -6884,7 +6867,7 @@ async function fetchScallopPositions(addr) {
       const human = amount / Math.pow(10, resolved.decimals);
       const usd = human * (defiPrices[resolved.symbol] || 0);
       totalBorUsd += usd;
-      borrows.push({ symbol: resolved.symbol, amountUsd: usd });
+      borrows.push({ symbol: resolved.symbol, amount: human, amountUsd: usd });
     }
     const healthFactor = totalBorUsd > 0 ? totalDepUsd / totalBorUsd : Infinity;
     positions.push({ protocol: "Scallop", deposits, borrows, depositedUsd: totalDepUsd, borrowedUsd: totalBorUsd, healthFactor, netUsd: totalDepUsd - totalBorUsd });
@@ -7270,7 +7253,7 @@ async function renderAddress(app, addr) {
         const meta = coinMetaCache[b.coinType];
         const supplyRaw = meta?.supply != null ? Number(meta.supply) : null;
         const supplyFmt = supplyRaw != null ? fmtCompact(supplyRaw / Math.pow(10, meta?.decimals || 9)) : "—";
-        html += `<tr><td class="u-mono-12">${b.symbol}</td><td class="u-mono-12">${b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td><td style="font-family:var(--mono);font-size:12px;color:var(--green)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : "—"}</td><td class="u-mono-11-dim">${supplyFmt}</td></tr>`;
+        html += `<tr><td class="u-mono-12">${b.symbol}</td><td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td><td style="font-family:var(--mono);font-size:12px;color:var(--green)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : "—"}</td><td class="u-mono-11-dim">${supplyFmt}</td></tr>`;
       }
       if (regularBals.length > 15) html += `<tr><td colspan="3" style="color:var(--text-dim);font-size:12px">... and ${regularBals.length - 15} more tokens</td></tr>`;
       html += `</tbody></table>`;
@@ -7287,8 +7270,8 @@ async function renderAddress(app, addr) {
         html += `<tr>
           <td class="u-mono-12">${b.symbol}</td>
           <td class="u-fs12-dim">${lstInfo.protocol || "—"}</td>
-          <td class="u-mono-12">${b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td>
-          <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${b.suiEquiv > 0 ? b.suiEquiv.toLocaleString(undefined, {maximumFractionDigits:4}) + " SUI" : "—"}<span class="u-fs10-dim">${rateLabel}</span></td>
+          <td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td>
+          <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${b.suiEquiv > 0 ? (b.suiEquiv >= 1000 ? fmtCompact(b.suiEquiv) : b.suiEquiv >= 1 ? b.suiEquiv.toFixed(1) : b.suiEquiv.toLocaleString(undefined, {maximumFractionDigits:4})) + " SUI" : "—"}<span class="u-fs10-dim">${rateLabel}</span></td>
           <td style="font-family:var(--mono);font-size:12px;color:var(--accent)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : "—"}</td>
         </tr>`;
       }
@@ -7305,12 +7288,18 @@ async function renderAddress(app, addr) {
         html += `<div class="u-bg-panel-12">`;
         html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span class="u-fw-600">${pos.protocol}</span><span class="badge" style="color:${healthColor};background:${healthColor}20">${healthLabel} ${healthDisplay}</span></div>`;
         if (pos.deposits?.length) {
-          html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Deposits</div>`;
-          for (const d of pos.deposits) html += `<div class="u-row-between-sm"><span>${d.symbol}</span><span class="u-c-green">${d.amountUsd > 0 ? fmtUsdFromFloat(d.amountUsd) : "—"}</span></div>`;
+          html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Supply</div>`;
+          for (const d of pos.deposits) {
+            const fmtAmt = d.amount > 0 ? (d.amount >= 1000 ? fmtCompact(d.amount) : d.amount >= 1 ? d.amount.toFixed(1) : d.amount >= 0.01 ? d.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : d.amount.toFixed(8)) : "";
+            html += `<div style="display:grid;grid-template-columns:72px 1fr auto;gap:4px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${d.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${fmtAmt ? fmtAmt + " " + d.symbol : ""}</span><span class="u-c-green" style="font-family:var(--mono);font-size:12px;text-align:right">${d.amountUsd > 0 ? fmtUsdFromFloat(d.amountUsd) : "—"}</span></div>`;
+          }
         }
         if (pos.borrows?.length) {
-          html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Borrows</div>`;
-          for (const b of pos.borrows) html += `<div class="u-row-between-sm"><span>${b.symbol}</span><span class="u-c-red">${b.amountUsd > 0 ? fmtUsdFromFloat(b.amountUsd) : "—"}</span></div>`;
+          html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Borrow</div>`;
+          for (const b of pos.borrows) {
+            const fmtAmt = b.amount > 0 ? (b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)) : "";
+            html += `<div style="display:grid;grid-template-columns:72px 1fr auto;gap:4px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${b.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${fmtAmt ? fmtAmt + " " + b.symbol : ""}</span><span class="u-c-red" style="font-family:var(--mono);font-size:12px;text-align:right">${b.amountUsd > 0 ? fmtUsdFromFloat(b.amountUsd) : "—"}</span></div>`;
+          }
         }
         html += `<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:6px;display:flex;justify-content:space-between;font-size:13px;font-weight:600"><span>Net Equity</span><span style="color:${pos.netUsd >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsdFromFloat(Math.abs(pos.netUsd))}</span></div>`;
         html += `</div>`;
@@ -7323,7 +7312,7 @@ async function renderAddress(app, addr) {
       for (const pos of allDexLp) {
         html += `<div class="u-bg-panel-12">`;
         html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span class="u-fw-600">${pos.pair}</span><div style="display:flex;gap:6px;align-items:center"><span class="badge" style="background:var(--accent)20;color:var(--accent)">${pos.protocol}</span><span class="badge ${pos.inRange ? 'badge-success' : 'badge-fail'}">${pos.inRange ? "In Range" : "Out of Range"}</span></div></div>`;
-        html += `<div style="display:flex;gap:20px;font-size:13px"><span>${pos.amountA.toFixed(4)} ${pos.symbolA} <span class="u-c-dim">${pos.usdA > 0 ? fmtUsdFromFloat(pos.usdA) : ""}</span></span><span>${pos.amountB.toFixed(4)} ${pos.symbolB} <span class="u-c-dim">${pos.usdB > 0 ? fmtUsdFromFloat(pos.usdB) : ""}</span></span></div>`;
+        html += `<div style="display:flex;gap:20px;font-size:13px"><span>${pos.amountA >= 1000 ? fmtCompact(pos.amountA) : pos.amountA >= 1 ? pos.amountA.toFixed(1) : pos.amountA.toFixed(4)} ${pos.symbolA} <span class="u-c-dim">${pos.usdA > 0 ? fmtUsdFromFloat(pos.usdA) : ""}</span></span><span>${pos.amountB >= 1000 ? fmtCompact(pos.amountB) : pos.amountB >= 1 ? pos.amountB.toFixed(1) : pos.amountB.toFixed(4)} ${pos.symbolB} <span class="u-c-dim">${pos.usdB > 0 ? fmtUsdFromFloat(pos.usdB) : ""}</span></span></div>`;
         html += `<div style="font-size:12px;margin-top:4px;color:var(--text-dim)">Total: <span style="color:var(--text);font-weight:600">${fmtUsdFromFloat(pos.totalUsd)}</span> ${hashLink(pos.posId, '/object/' + pos.posId)}</div>`;
         html += `</div>`;
       }
@@ -8596,7 +8585,7 @@ async function renderObjectDetail(app, id) {
       <div class="card-body">
         <div class="detail-row">
           <div class="detail-key">Object ID</div>
-          <div class="detail-val">${obj.address} ${copyBtn(obj.address)}</div>
+          <div class="detail-val">${fullHashLink(obj.address, '/object/' + obj.address)} ${copyBtn(obj.address)}</div>
         </div>
         ${typeRepr ? `<div class="detail-row">
           <div class="detail-key">Type</div>
@@ -8608,7 +8597,7 @@ async function renderObjectDetail(app, id) {
         </div>
         <div class="detail-row">
           <div class="detail-key">Digest</div>
-          <div class="detail-val">${obj.digest || "—"}</div>
+          <div class="detail-val">${obj.digest || "—"} ${obj.digest ? copyBtn(obj.digest) : ""}</div>
         </div>
         <div class="detail-row">
           <div class="detail-key">Owner</div>
@@ -8726,8 +8715,10 @@ async function renderObjectDetail(app, id) {
               digest
               sender { address }
               effects {
+                timestamp
                 gasEffects { gasSummary { computationCost storageCost storageRebate } }
-                objectChanges(first: 50) { nodes { address idCreated idDeleted } }
+                objectChanges(first: 50) { nodes { address idCreated idDeleted outputState { asMoveObject { contents { type { repr } } } } } }
+                events(first: 50) { nodes { contents { type { repr } } } }
               }
             }
           }
@@ -8751,7 +8742,11 @@ async function renderObjectDetail(app, id) {
           const txCreated = changes.filter(c => c.idCreated).map(c => c.address);
           const txDeleted = changes.filter(c => c.idDeleted).map(c => c.address);
           const txMutated = changes.filter(c => !c.idCreated && !c.idDeleted).map(c => c.address);
-          return { digest: tx.digest, sender: tx.sender?.address || null, gasUsed, comp, stor, reb, txCreated, txDeleted, txMutated };
+          // Per-tx events
+          const txEvents = (tx.effects?.events?.nodes || []).map(ev => shortType(ev.contents?.type?.repr || "unknown"));
+          // Per-tx object types from changes
+          const txObjTypes = [...new Set(changes.map(c => c.outputState?.asMoveObject?.contents?.type?.repr).filter(Boolean).map(shortType))];
+          return { digest: tx.digest, sender: tx.sender?.address || null, gasUsed, comp, stor, reb, txCreated, txDeleted, txMutated, txEvents, txObjTypes };
         });
         const txCount = txStats.length;
         if (txCount === 0) { actCard.remove(); return; }
@@ -8759,6 +8754,41 @@ async function renderObjectDetail(app, id) {
         const created = txStats.reduce((s, t) => s + t.txCreated.length, 0);
         const mutated = txStats.reduce((s, t) => s + t.txMutated.length, 0);
         const deleted = txStats.reduce((s, t) => s + t.txDeleted.length, 0);
+        // Unique senders
+        const senderSet = new Set(txNodes.map(tx => tx.sender?.address).filter(Boolean));
+        const uniqueSenders = senderSet.size;
+        // Event counts by type
+        const eventCounts = {};
+        let totalEvents = 0;
+        for (const tx of txNodes) {
+          for (const ev of (tx.effects?.events?.nodes || [])) {
+            const t = shortType(ev.contents?.type?.repr || "unknown");
+            eventCounts[t] = (eventCounts[t] || 0) + 1;
+            totalEvents++;
+          }
+        }
+        const topEvents = Object.entries(eventCounts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+        // Unique object types from changes
+        const objTypeSet = new Set();
+        for (const tx of txNodes) {
+          for (const c of (tx.effects?.objectChanges?.nodes || [])) {
+            const t = c.outputState?.asMoveObject?.contents?.type?.repr;
+            if (t) objTypeSet.add(shortType(t));
+          }
+        }
+        const uniqueObjTypes = [...objTypeSet].sort();
+        // Time range
+        const timestamps = txNodes.map(tx => new Date(tx.effects?.timestamp).getTime()).filter(Number.isFinite).sort((a, b) => a - b);
+        const oldestTs = timestamps[0] || 0;
+        const newestTs = timestamps[timestamps.length - 1] || 0;
+        const spanMs = newestTs - oldestTs;
+        let timeRangeLabel = "";
+        if (spanMs > 0) {
+          const mins = spanMs / 60000;
+          if (mins < 60) timeRangeLabel = mins.toFixed(0) + " min";
+          else if (mins < 1440) timeRangeLabel = (mins / 60).toFixed(1) + " hrs";
+          else timeRangeLabel = (mins / 1440).toFixed(1) + " days";
+        }
 
         const statCell = (label, value, sub) => `
           <div style="text-align:center;padding:10px 16px">
@@ -8773,25 +8803,21 @@ async function renderObjectDetail(app, id) {
 
         const txRows = txStats.map(t => {
           const hasChanges = t.txCreated.length || t.txMutated.length || t.txDeleted.length;
-          const changeDetail = hasChanges ? `
-            <tr><td colspan="5" style="padding:0 0 6px 24px;background:var(--bg)">
+          const hasDetail = hasChanges || t.txEvents.length || t.txObjTypes.length;
+          // Group per-tx events by type with counts
+          const txEvCounts = {};
+          for (const e of t.txEvents) txEvCounts[e] = (txEvCounts[e] || 0) + 1;
+          const txEvEntries = Object.entries(txEvCounts).sort((a, b) => b[1] - a[1]);
+          const changeDetail = hasDetail ? `
+            <tr><td colspan="8" style="padding:0 0 6px 24px;background:var(--bg)">
               <details style="font-size:11px">
                 <summary style="cursor:pointer;color:var(--text-dim);padding:4px 0;list-style:none;display:flex;align-items:center;gap:4px">
-                  <span style="font-size:10px">▶</span> View object changes
+                  <span style="font-size:10px">▶</span> View details
                 </summary>
-                <div style="padding:6px 0 2px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-                  <div>
-                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--green);margin-bottom:3px">Created (${t.txCreated.length})</div>
-                    ${addrList(t.txCreated, "var(--green)")}
-                  </div>
-                  <div>
-                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);margin-bottom:3px">Mutated (${t.txMutated.length})</div>
-                    ${addrList(t.txMutated, "var(--accent)")}
-                  </div>
-                  <div>
-                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--red);margin-bottom:3px">Deleted (${t.txDeleted.length})</div>
-                    ${addrList(t.txDeleted, "var(--red)")}
-                  </div>
+                <div style="padding:6px 0 2px">
+                  ${hasChanges ? '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px"><div><div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--green);margin-bottom:3px">Created (' + t.txCreated.length + ')</div>' + addrList(t.txCreated, "var(--green)") + '</div><div><div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);margin-bottom:3px">Mutated (' + t.txMutated.length + ')</div>' + addrList(t.txMutated, "var(--accent)") + '</div><div><div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--red);margin-bottom:3px">Deleted (' + t.txDeleted.length + ')</div>' + addrList(t.txDeleted, "var(--red)") + '</div></div>' : ""}
+                  ${txEvEntries.length ? '<div style="margin-bottom:8px"><div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--purple);margin-bottom:3px">Events (' + t.txEvents.length + ')</div>' + txEvEntries.map(function(e) { return '<span class="badge" style="margin:2px 4px 2px 0;background:var(--purple)22;color:var(--purple);font-size:11px">' + escapeHtml(e[0]) + ' <span style="opacity:0.7">(' + e[1] + ')</span></span>'; }).join("") + '</div>' : ""}
+                  ${t.txObjTypes.length ? '<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--blue);margin-bottom:3px">Object Types (' + t.txObjTypes.length + ')</div>' + t.txObjTypes.map(function(ot) { return '<span class="badge" style="margin:2px 4px 2px 0;background:var(--blue)22;color:var(--blue);font-size:11px">' + escapeHtml(ot) + '</span>'; }).join("") + '</div>' : ""}
                 </div>
               </details>
             </td></tr>` : "";
@@ -8815,6 +8841,8 @@ async function renderObjectDetail(app, id) {
               <td class="u-mono-12">${fullHashLink(t.digest, '/tx/' + t.digest)}</td>
               <td class="u-mono-12">${t.sender ? hashLink(t.sender, '/address/' + t.sender) : "—"}</td>
               <td style="text-align:right;vertical-align:top">${gasCell}</td>
+              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--purple)">${t.txEvents.length || "—"}</td>
+              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--blue)">${t.txObjTypes.length || "—"}</td>
               <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--green)">${t.txCreated.length || "—"}</td>
               <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--accent)">${t.txMutated.length || "—"}</td>
               <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--red)">${t.txDeleted.length || "—"}</td>
@@ -8823,15 +8851,21 @@ async function renderObjectDetail(app, id) {
 
         actCard.innerHTML = `
           <div style="padding:10px 16px 8px;font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.07em;border-bottom:1px solid var(--border)">
-            Recent Activity <span style="font-weight:400;text-transform:none;letter-spacing:0">(last ${txCount === 50 ? "50+" : txCount} txns using this package)</span>
+            Recent Activity <span style="font-weight:400;text-transform:none;letter-spacing:0">(last ${txCount === 50 ? "50+" : txCount} txns${timeRangeLabel ? " over " + timeRangeLabel : ""})</span>
           </div>
           <div style="display:flex;flex-wrap:wrap;justify-content:space-around;padding:4px 0;border-bottom:1px solid var(--border)">
             ${statCell("Transactions", txCount.toLocaleString(), txCount === 50 ? "50 sampled" : "")}
+            ${statCell("Unique Senders", uniqueSenders.toLocaleString(), "")}
+            ${statCell("Events", totalEvents.toLocaleString(), topEvents.length + " types")}
             ${statCell("Gas Burned", fmtSui(totalGas.toString()), "across sample")}
+            ${statCell("Avg Gas / Tx", txCount > 0 ? fmtSui((totalGas / BigInt(txCount)).toString()) : "—", "")}
+            ${statCell("Object Types", uniqueObjTypes.length.toLocaleString(), "")}
             ${statCell("Objects Created", created.toLocaleString(), "")}
             ${statCell("Objects Mutated", mutated.toLocaleString(), "")}
             ${statCell("Objects Deleted", deleted.toLocaleString(), "")}
           </div>
+          ${topEvents.length ? '<div style="padding:10px 16px;border-bottom:1px solid var(--border)"><div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em">Event Types</div>' + topEvents.map(function(e) { return '<span class="badge" style="margin:2px 4px 2px 0;background:var(--purple)22;color:var(--purple);font-size:11px">' + escapeHtml(e[0]) + ' <span style="opacity:0.7">(' + e[1] + ')</span></span>'; }).join("") + '</div>' : ""}
+          ${uniqueObjTypes.length ? '<div style="padding:10px 16px;border-bottom:1px solid var(--border)"><div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em">Object Types Modified</div>' + uniqueObjTypes.map(function(t) { return '<span class="badge" style="margin:2px 4px 2px 0;background:var(--blue)22;color:var(--blue);font-size:11px">' + escapeHtml(t) + '</span>'; }).join("") + '</div>' : ""}
           <details style="padding:0">
             <summary style="padding:8px 16px;font-size:12px;color:var(--text-dim);cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;user-select:none">
               <span style="font-size:10px">▶</span> Show transactions
@@ -8842,6 +8876,8 @@ async function renderObjectDetail(app, id) {
                   <th>Digest</th>
                   <th>Sender</th>
                   <th style="text-align:right">Gas Used</th>
+                  <th style="text-align:center;color:var(--purple)">Events</th>
+                  <th style="text-align:center;color:var(--blue)">Obj Types</th>
                   <th style="text-align:center;color:var(--green)">Created</th>
                   <th style="text-align:center;color:var(--accent)">Mutated</th>
                   <th style="text-align:center;color:var(--red)">Deleted</th>
@@ -9371,6 +9407,15 @@ async function renderValidators(app) {
   const minGas = Math.min(...gasPrices);
   const maxGas = Math.max(...gasPrices);
 
+  // Gas price histogram bins (grouped by 50 MIST)
+  const gasBinned = {};
+  for (const gp of gasPrices) {
+    const bin = Math.floor(gp / 50) * 50;
+    gasBinned[bin] = (gasBinned[bin] || 0) + 1;
+  }
+  const gasBins = Object.entries(gasBinned).map(([price, count]) => ({ price: Number(price), count })).sort((a, b) => a.price - b.price);
+  const maxBinCount = Math.max(...gasBins.map(b => b.count), 1);
+
   app.innerHTML = `
     <div class="page-title">Validators <span class="type-tag">Epoch ${epochId}</span></div>
 
@@ -9472,6 +9517,44 @@ async function renderValidators(app) {
       </div>
     </div>
 
+    <div class="card u-mb16">
+      <div class="card-header">Gas Price Distribution <span class="type-tag">${gasBins.length} distinct prices</span></div>
+      <div class="card-body">
+        <div style="display:flex;gap:16px;align-items:flex-end;margin-bottom:12px">
+          <div><span class="u-fs11-dim">Reference Gas Price:</span> <span style="font-family:var(--mono);font-weight:600">${fmtNumber(refGas)} MIST</span></div>
+          <div><span class="u-fs11-dim">Median:</span> <span style="font-family:var(--mono);font-weight:600">${fmtNumber(medianGas)} MIST</span></div>
+          <div><span class="u-fs11-dim">Range:</span> <span style="font-family:var(--mono)">${fmtNumber(minGas)} — ${fmtNumber(maxGas)}</span></div>
+        </div>
+        ${(() => {
+          const H = 150, pad = 30, barPad = 4;
+          const barW = Math.max(20, Math.min(50, 500 / gasBins.length));
+          const totalW = gasBins.length * (barW + barPad) + pad * 2;
+          const refBin = Math.floor(refGas / 50) * 50;
+          const medBin = Math.floor(medianGas / 50) * 50;
+          const bars = gasBins.map((b, i) => {
+            const x = pad + i * (barW + barPad);
+            const barH = Math.max(2, (b.count / maxBinCount) * (H - 60));
+            const y = H - 40 - barH;
+            const isRef = b.price === refBin;
+            const isMed = b.price === medBin;
+            const color = isRef ? "var(--accent)" : isMed ? "var(--green)" : "var(--blue)";
+            const label = b.price + "-" + (b.price + 49);
+            return "<g>" +
+              "<rect x=\"" + x + "\" y=\"" + y + "\" width=\"" + barW + "\" height=\"" + barH + "\" fill=\"" + color + "\" rx=\"2\" opacity=\"" + (isRef || isMed ? 1 : 0.7) + "\" />" +
+              "<text x=\"" + (x + barW / 2) + "\" y=\"" + (y - 4) + "\" text-anchor=\"middle\" fill=\"var(--text)\" style=\"font-size:13px;font-family:var(--mono);font-weight:600\">" + b.count + "</text>" +
+              "<text x=\"" + (x + barW / 2) + "\" y=\"" + (H - 26) + "\" text-anchor=\"end\" fill=\"var(--text-dim)\" style=\"font-size:12px;font-family:var(--mono)\" transform=\"rotate(-45 " + (x + barW / 2) + " " + (H - 26) + ")\">" + label + "</text>" +
+              "</g>";
+          }).join("");
+          return "<div style=\"overflow-x:auto\"><svg viewBox=\"0 0 " + totalW + " " + H + "\" width=\"100%\" height=\"" + H + "\" preserveAspectRatio=\"xMinYMid meet\">" + bars + "</svg></div>";
+        })()}
+        <div style="display:flex;gap:16px;font-size:11px;color:var(--text-dim);margin-top:6px">
+          <span><span style="display:inline-block;width:10px;height:10px;background:var(--accent);border-radius:2px;vertical-align:middle;margin-right:4px"></span>Reference Gas Price</span>
+          <span><span style="display:inline-block;width:10px;height:10px;background:var(--green);border-radius:2px;vertical-align:middle;margin-right:4px"></span>Median</span>
+          <span><span style="display:inline-block;width:10px;height:10px;background:var(--blue);opacity:0.6;border-radius:2px;vertical-align:middle;margin-right:4px"></span>Other</span>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">Validator Set <span class="type-tag">${validators.length} active</span></div>
       <div class="card-body">
@@ -9506,12 +9589,12 @@ async function renderValidators(app) {
                     </div>
                   </div>
                 </td>
-                <td class="u-ta-right-mono">${fmtCompact(stakeSui)}${pendingNet !== 0 ? `<div style="font-size:10px;color:${pendingNet > 0 ? 'var(--green)' : 'var(--red)'}">${pendingNet > 0 ? '+' : ''}${fmtCompact(pendingNet / 1e9)}</div>` : ""}</td>
-                <td style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--text-dim)">${fmtCompact(rewardsSui)}</td>
-                <td class="u-ta-right-mono">${votingPct}%</td>
-                <td class="u-ta-right-mono">${(v.commission / 100).toFixed(1)}%</td>
-                <td style="text-align:right;font-family:var(--mono);color:var(--green)">${estApy.toFixed(2)}%</td>
-                <td class="u-ta-right-mono">${fmtNumber(v.gasPrice)}</td>
+                <td class="u-ta-right-mono" data-sort-value="${stakeSui}">${fmtCompact(stakeSui)}${pendingNet !== 0 ? `<div style="font-size:10px;color:${pendingNet > 0 ? 'var(--green)' : 'var(--red)'}">${pendingNet > 0 ? '+' : ''}${fmtCompact(pendingNet / 1e9)}</div>` : ""}</td>
+                <td style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--text-dim)" data-sort-value="${rewardsSui}">${fmtCompact(rewardsSui)}</td>
+                <td class="u-ta-right-mono" data-sort-value="${v.votingPower}">${votingPct}%</td>
+                <td class="u-ta-right-mono" data-sort-value="${v.commission}">${(v.commission / 100).toFixed(1)}%</td>
+                <td style="text-align:right;font-family:var(--mono);color:var(--green)" data-sort-value="${estApy}">${estApy.toFixed(2)}%</td>
+                <td class="u-ta-right-mono" data-sort-value="${v.gasPrice}">${fmtNumber(v.gasPrice)}</td>
                 <td style="text-align:right;color:${statusColor};font-size:12px">${statusLabel}</td>
               </tr>`;
             }).join("")}
@@ -9681,6 +9764,12 @@ async function renderCongestion(app) {
     }
   }
 
+  const cpDigests = checkpoints.map(c => ({
+    seq: c.sequenceNumber,
+    count: (c.transactions?.nodes || []).length,
+    ts: c.timestamp,
+  }));
+
   const sorted = Object.entries(touches)
     .map(([addr, info]) => ({ addr, ...info, digestSet: undefined }))
     .sort((a, b) => b.count - a.count);
@@ -9818,7 +9907,7 @@ async function renderEvents(app) {
     if (eventTypeFilter) filters.push(`type: "${eventTypeFilter}"`);
     if (senderFilter) filters.push(`sender: "${senderFilter}"`);
     const filterArg = filters.length ? `filter: { ${filters.join(", ")} }` : "";
-    const data = await gql(`{ events(last: 50 ${filterArg}) { nodes { contents { type { repr } json } sender { address } timestamp transactionModule { name package { address } } } } }`);
+    const data = await gql(`{ events(last: 50 ${filterArg}) { nodes { contents { type { repr } json } sender { address } timestamp transaction { digest } transactionModule { name package { address } } } } }`);
     eventsData = data?.events?.nodes || [];
     fetchedAt = new Date().toISOString();
   }
@@ -9848,15 +9937,32 @@ async function renderEvents(app) {
       uniqueTypes: [...new Set(eventsData.map(e => e.contents?.type?.repr).filter(Boolean))],
       uniqueSenders: [...new Set(eventsData.map(e => e.sender?.address).filter(Boolean))],
       uniquePkgs: [...new Set(eventsData.map(e => e.transactionModule?.package?.address).filter(Boolean))],
+      uniqueTxs: [...new Set(eventsData.map(e => e.transaction?.digest).filter(Boolean))],
     };
+  }
+
+  function groupByTx() {
+    const groups = [];
+    const map = new Map();
+    for (const ev of eventsData) {
+      const digest = ev.transaction?.digest || "unknown";
+      if (!map.has(digest)) {
+        const group = { digest, events: [], sender: ev.sender?.address, timestamp: ev.timestamp };
+        map.set(digest, group);
+        groups.push(group);
+      }
+      map.get(digest).events.push(ev);
+    }
+    return groups;
   }
 
   function renderEventsContent() {
     const stats = computeStats();
+    const txGroups = groupByTx();
     let html = `<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px">${copyLinkBtn()}</div>`;
     html += `<h2 class="u-mb12">Global Events</h2>`;
     html += renderDefiScopeBar({
-      sampleLabel: `Last ${fmtNumber(eventsData.length)} events`,
+      sampleLabel: `Last ${fmtNumber(eventsData.length)} events in ${fmtNumber(txGroups.length)} transactions`,
       fetchedAt,
       sourceLabel: "Sui GraphQL Mainnet · events",
     });
@@ -9871,45 +9977,55 @@ async function renderEvents(app) {
     // Stats
     html += `<div class="stats-grid u-mb16">
       <div class="stat-box"><div class="stat-label">Events Shown</div><div class="stat-value">${eventsData.length}</div></div>
-      <div class="stat-box"><div class="stat-label">Unique Packages</div><div class="stat-value">${stats.uniquePkgs.length}</div></div>
+      <div class="stat-box"><div class="stat-label">Transactions</div><div class="stat-value">${txGroups.length}</div></div>
       <div class="stat-box"><div class="stat-label">Unique Types</div><div class="stat-value">${stats.uniqueTypes.length}</div></div>
       <div class="stat-box"><div class="stat-label">Unique Senders</div><div class="stat-value">${stats.uniqueSenders.length}</div></div>
     </div>`;
 
-    // Table
+    // Grouped by transaction
     if (!eventsData.length) {
       html += renderEmpty("No events found." + (eventTypeFilter || senderFilter ? " Try adjusting filters." : ""));
     } else {
-      html += `<table><thead><tr><th>Event Type</th><th>Package</th><th>Module</th><th>Sender</th><th>Data</th><th>Time</th></tr></thead><tbody>`;
-      eventsData.forEach((ev, idx) => {
-        const typeRepr = ev.contents?.type?.repr || "—";
-        const pkg = ev.transactionModule?.package?.address;
-        const modName = ev.transactionModule?.name || "—";
-        const pkgMvr = pkg && mvrNameCache[pkg] ? `@${mvrNameCache[pkg]}` : null;
-        const sender = ev.sender?.address;
-        const hasJson = ev.contents?.json && Object.keys(ev.contents.json).length > 0;
-        const keyCount = hasJson ? Object.keys(ev.contents.json).length : 0;
-        // Event type with MVR name applied
-        const typeShort = typeRepr.replace(/^0x[0-9a-f]{64}::/, "");
-        const typeDisplay = (() => {
-          const typePkgMatch = typeRepr.match(/^(0x[0-9a-f]{64})::/);
-          if (typePkgMatch && mvrNameCache[typePkgMatch[1]]) return `@${mvrNameCache[typePkgMatch[1]]}::${typeShort}`;
-          return typeShort;
-        })();
-        const rowId = `evt-row-${idx}`;
-        html += `<tr>
-          <td style="font-family:var(--mono);font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${typeRepr}">${typeDisplay}</td>
-          <td class="u-fs12">${pkg ? hashLink(pkgMvr || truncHash(pkg), '/object/' + pkg) : "—"}</td>
-          <td class="u-fs12-dim">${modName}</td>
-          <td>${sender ? hashLink(sender, '/address/' + sender) : "—"}</td>
-          <td>${hasJson ? `<button data-action="events-toggle-json" data-row-id="${rowId}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">{${keyCount}} fields</button>` : '<span class="u-c-dim">—</span>'}</td>
-          <td style="white-space:nowrap">${timeTag(ev.timestamp)}</td>
-        </tr>`;
-        if (hasJson) {
-          html += `<tr id="${rowId}" style="display:none"><td colspan="6" style="padding:0 8px 8px">${jsonTreeBlock(ev.contents.json, 280)}</td></tr>`;
+      let evtIdx = 0;
+      for (const group of txGroups) {
+        const sender = group.sender;
+        const groupId = `evt-group-${group.digest.slice(0, 8)}`;
+        html += `<div class="card u-mb16" style="border-left:3px solid var(--accent)">
+          <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer" data-action="events-toggle-group" data-group-id="${groupId}">
+            <div style="display:flex;align-items:center;gap:8px">
+              ${hashLink(group.digest, '/tx/' + group.digest)}
+              <span class="badge" style="background:var(--accent)20;color:var(--accent)">${group.events.length} event${group.events.length > 1 ? 's' : ''}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              ${sender ? `<span class="u-fs12-dim">from</span> ${hashLink(sender, '/address/' + sender)}` : ""}
+              <span style="white-space:nowrap">${timeTag(group.timestamp)}</span>
+            </div>
+          </div>
+          <div class="card-body" id="${groupId}" style="padding:0">
+            <table style="margin:0"><thead><tr><th>Event Type</th><th>Module</th><th>Data</th></tr></thead><tbody>`;
+        for (const ev of group.events) {
+          const typeRepr = ev.contents?.type?.repr || "—";
+          const modName = ev.transactionModule?.name || "—";
+          const hasJson = ev.contents?.json && Object.keys(ev.contents.json).length > 0;
+          const keyCount = hasJson ? Object.keys(ev.contents.json).length : 0;
+          const typeShort = typeRepr.replace(/^0x[0-9a-f]{64}::/, "");
+          const typeDisplay = (() => {
+            const typePkgMatch = typeRepr.match(/^(0x[0-9a-f]{64})::/);
+            if (typePkgMatch && mvrNameCache[typePkgMatch[1]]) return `@${mvrNameCache[typePkgMatch[1]]}::${typeShort}`;
+            return typeShort;
+          })();
+          const rowId = `evt-row-${evtIdx++}`;
+          html += `<tr>
+            <td style="font-family:var(--mono);font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${typeRepr}">${typeDisplay}</td>
+            <td class="u-fs12-dim">${modName}</td>
+            <td>${hasJson ? `<button data-action="events-toggle-json" data-row-id="${rowId}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">{${keyCount}} fields</button>` : '<span class="u-c-dim">—</span>'}</td>
+          </tr>`;
+          if (hasJson) {
+            html += `<tr id="${rowId}" style="display:none"><td colspan="3" style="padding:0 8px 8px">${jsonTreeBlock(ev.contents.json, 280)}</td></tr>`;
+          }
         }
-      });
-      html += `</tbody></table>`;
+        html += `</tbody></table></div></div>`;
+      }
     }
     return html;
   }
@@ -9946,6 +10062,15 @@ async function renderEvents(app) {
       const expanded = row.style.display === "table-row";
       row.style.display = expanded ? "none" : "table-row";
       trigger.setAttribute("aria-expanded", expanded ? "false" : "true");
+    }
+    if (action === "events-toggle-group") {
+      ev.preventDefault();
+      const groupId = trigger.getAttribute("data-group-id") || "";
+      if (!groupId) return;
+      const body = document.getElementById(groupId);
+      if (!body) return;
+      const hidden = body.style.display === "none";
+      body.style.display = hidden ? "" : "none";
     }
   };
   app.addEventListener("click", app._eventsClickHandler);
@@ -10063,7 +10188,7 @@ function renderDefiParityGuardCard(parity = {}, title = "Cross-Page Parity Guard
 
 function fmtHistoryMetricValue(metric, v) {
   if (!Number.isFinite(v)) return "—";
-  if (metric === "network") return fmtNumber(Math.round(v));
+  if (metric === "network") return fmtCompact(Math.round(v));
   const abs = Math.abs(v);
   if (abs >= 1e9) return fmtCompact(v);
   if (abs >= 1e6) return fmtCompact(v);
@@ -10385,7 +10510,7 @@ async function renderPackages(app) {
         <div class="card-header">Package Activity Overview</div>
         <div class="card-body">
           ${rows.length ? `<table>
-            <thead><tr><th>Package</th><th>Source</th><th>Category</th><th>Conf.</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Calls</th><th class="u-ta-right">Success</th><th class="u-ta-right">Senders</th><th>Latest</th></tr></thead>
+            <thead><tr><th>Package</th><th>Source</th><th>Category</th><th>Conf.</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Calls</th><th class="u-ta-right">Success</th><th class="u-ta-right">Senders</th><th class="u-ta-right">Events</th><th class="u-ta-right">Obj Types</th><th>Latest</th></tr></thead>
             <tbody>
               ${rows.map(r => {
                 const isSel = selected?.package === r.package;
@@ -10403,6 +10528,8 @@ async function renderPackages(app) {
                   <td class="u-ta-right-mono">${fmtNumber(r.callCount)}</td>
                   <td class="u-ta-right-mono">${succ.toFixed(1)}%</td>
                   <td class="u-ta-right-mono">${fmtNumber(r.uniqueSenders)}</td>
+                  <td class="u-ta-right-mono">${fmtNumber((r.topEventTypes || []).reduce((s, e) => s + e.count, 0))}</td>
+                  <td class="u-ta-right-mono">${fmtNumber((r.topObjectTypes || []).length)}</td>
                   <td>${timeTag(r.latestTs)}</td>
                 </tr>`;
               }).join("")}
@@ -10424,6 +10551,19 @@ async function renderPackages(app) {
               <div class="stat-box"><div class="stat-label">Call Count</div><div class="stat-value">${fmtNumber(selected.callCount)}</div><div class="stat-sub">move call executions</div></div>
               <div class="stat-box"><div class="stat-label">Success Rate</div><div class="stat-value">${((selected.successRate || 0) * 100).toFixed(1)}%</div><div class="stat-sub">${fmtNumber(selected.successCount)} success / ${fmtNumber(selected.txCount)} txs</div></div>
               <div class="stat-box"><div class="stat-label">Unique Senders</div><div class="stat-value">${fmtNumber(selected.uniqueSenders || 0)}</div><div class="stat-sub">addresses interacting</div></div>
+            </div>
+            <div class="card" style="margin-bottom:12px;border-left:3px solid var(--accent)">
+              <div class="card-header">Activity Summary</div>
+              <div class="card-body">
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:12px">
+                  <div><div class="u-fs11-dim-mb2">Avg Gas / PTB</div><div class="u-mono-14">${selected.avgGas > 0 ? fmtSui(selected.avgGas) : "—"}</div></div>
+                  <div><div class="u-fs11-dim-mb2">Unique Senders</div><div class="u-mono-14">${fmtNumber(selected.uniqueSenders || 0)}</div></div>
+                  <div><div class="u-fs11-dim-mb2">Event Types</div><div class="u-mono-14">${fmtNumber((selected.topEventTypes || []).length)}</div></div>
+                  <div><div class="u-fs11-dim-mb2">Object Types Modified</div><div class="u-mono-14">${fmtNumber((selected.topObjectTypes || []).length)}</div></div>
+                </div>
+                ${(selected.topObjectTypes || []).length ? `<div style="margin-bottom:8px"><div class="u-fs11-dim-mb2">Object Types Touched</div>${(selected.topObjectTypes || []).map(o => '<span class="badge" style="margin:2px 4px 2px 0;background:var(--blue)22;color:var(--blue);font-size:11px">' + escapeHtml(o.value) + ' <span style="opacity:0.7">(' + o.count + ')</span></span>').join("")}</div>` : ""}
+                ${(selected.topEventTypes || []).length ? `<div><div class="u-fs11-dim-mb2">Event Types Emitted</div>${(selected.topEventTypes || []).map(o => '<span class="badge" style="margin:2px 4px 2px 0;background:var(--purple)22;color:var(--purple);font-size:11px">' + escapeHtml(o.value) + ' <span style="opacity:0.7">(' + o.count + ')</span></span>').join("")}</div>` : ""}
+              </div>
             </div>
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px">
               ${renderTopList("Top Modules", selected.topModules || [], "text")}
@@ -10832,8 +10972,7 @@ async function renderDefiOverview(app) {
           <a href="#/defi-rates" class="hash-link u-panel-sm">Lending Rates</a>
           <a href="#/defi-dex" class="hash-link u-panel-sm">DEX</a>
           <a href="#/defi-stablecoins" class="hash-link u-panel-sm">Stablecoins</a>
-          <a href="#/defi-flows" class="hash-link u-panel-sm">Flows</a>
-          <a href="#/defi-risk" class="hash-link u-panel-sm">Risk Monitor</a>
+          <a href="#/defi-flows" class="hash-link u-panel-sm">Volume</a>
         </div>
       </div>
     `;
@@ -11642,7 +11781,7 @@ async function renderDefiFlows(app) {
     const signals = renderDefiSignalsCard(data.signals || []);
 
     return `
-      <div class="page-title">DeFi Flows <span class="type-tag">Selected Window</span></div>
+      <div class="page-title">DeFi Volume <span class="type-tag">Selected Window</span></div>
       ${scope}
       <div class="stats-grid">
         <div class="stat-box"><div class="stat-label">Flow Rows</div><div class="stat-value">${fmtNumber(rows.length)}</div><div class="stat-sub">filtered priced movements</div></div>
@@ -11763,194 +11902,6 @@ async function renderDefiFlows(app) {
 }
 
 // ── DeFi Risk Monitor ────────────────────────────────────────────────
-async function renderDefiRisk(app) {
-  const routeParams = splitRouteAndParams(getRoute()).params;
-  let data = await fetchDefiRiskSnapshot(DEFI_WINDOW_DEFAULT_KEY, false);
-  let severityFilter = ["all", "high", "medium"].includes(routeParams.get("sev")) ? routeParams.get("sev") : "all";
-  let areaFilter = ["all", "lending", "stablecoins", "flows"].includes(routeParams.get("area")) ? routeParams.get("area") : "all";
-  let lendingSort = ["util", "borrow", "spread"].includes(routeParams.get("lsort")) ? routeParams.get("lsort") : "util";
-
-  function persistDefiRiskState() {
-    setRouteParams({
-      sev: severityFilter !== "all" ? severityFilter : null,
-      area: areaFilter !== "all" ? areaFilter : null,
-      lsort: lendingSort !== "util" ? lendingSort : null,
-    });
-  }
-
-  function filteredAlerts() {
-    let rows = [...(data.alerts || [])];
-    if (severityFilter !== "all") rows = rows.filter(a => a.severity === severityFilter);
-    if (areaFilter !== "all") rows = rows.filter(a => String(a.area || "").toLowerCase() === areaFilter.toLowerCase());
-    rows.sort((a, b) => (a.severity === b.severity ? 0 : (a.severity === "high" ? -1 : 1)));
-    return rows;
-  }
-
-  function sortedLendingRows() {
-    let rows = [...(data.lendingRows || [])];
-    if (lendingSort === "borrow") rows.sort((a, b) => (b.borrowBps || 0) - (a.borrowBps || 0));
-    else if (lendingSort === "spread") rows.sort((a, b) => ((b.borrowBps || 0) - (b.supplyBps || 0)) - ((a.borrowBps || 0) - (a.supplyBps || 0)));
-    else rows.sort((a, b) => (b.utilization || 0) - (a.utilization || 0));
-    return rows;
-  }
-
-  function renderContent() {
-    const alerts = filteredAlerts();
-    const lendingRows = sortedLendingRows();
-    const coverage = data.coverage || {};
-    const scoreColor = data.score >= 70 ? "var(--red)" : data.score >= 40 ? "var(--yellow)" : "var(--green)";
-    const flowRows = coverage.flowRows || 0;
-    const lowFlowShare = flowRows ? ((coverage.lowConfidenceFlowRows || 0) / flowRows * 100) : 0;
-    const scope = renderDefiScopeBar({
-      sampleLabel: "Threshold rules over lending + stablecoin + flow snapshots",
-      fetchedAt: data.fetchedAt,
-      ttlMs: DEFI_RISK_TTL_MS,
-      refreshAction: "defi-risk-refresh",
-      leftControls: `
-        <span class="u-fs12-dim">Severity</span>
-        <select data-action="defi-risk-severity" class="ui-control">
-          <option value="all" ${severityFilter === "all" ? "selected" : ""}>All</option>
-          <option value="high" ${severityFilter === "high" ? "selected" : ""}>High</option>
-          <option value="medium" ${severityFilter === "medium" ? "selected" : ""}>Medium</option>
-        </select>
-        <span class="u-fs12-dim">Area</span>
-        <select data-action="defi-risk-area" class="ui-control">
-          <option value="all" ${areaFilter === "all" ? "selected" : ""}>All</option>
-          <option value="lending" ${areaFilter === "lending" ? "selected" : ""}>Lending</option>
-          <option value="stablecoins" ${areaFilter === "stablecoins" ? "selected" : ""}>Stablecoins</option>
-          <option value="flows" ${areaFilter === "flows" ? "selected" : ""}>Flows</option>
-        </select>
-        <span class="u-fs12-dim">Lending Sort</span>
-        <select data-action="defi-risk-lending-sort" class="ui-control">
-          <option value="util" ${lendingSort === "util" ? "selected" : ""}>Utilization</option>
-          <option value="borrow" ${lendingSort === "borrow" ? "selected" : ""}>Borrow APR</option>
-          <option value="spread" ${lendingSort === "spread" ? "selected" : ""}>Spread</option>
-        </select>
-      `,
-    });
-    const methods = renderDefiMethodCard([
-      "Alerts are deterministic threshold checks on lending utilization/APR and large-flow counts.",
-      "Stablecoin concentration is shown as context but does not escalate critical alert severity.",
-      "No predictive model is used; score is a weighted sum of active rule breaches in this snapshot.",
-      "Lending inputs come from protocol state objects and utilization-derived APR computations.",
-      "Coverage reports unavailable lending rows and low-confidence flow mappings used by rules.",
-    ], "How Rules Work");
-    const signals = renderDefiSignalsCard(data.signals || []);
-
-    return `
-      <div class="page-title">DeFi Risk Monitor <span class="type-tag">Threshold Rules</span></div>
-      ${scope}
-      <div class="stats-grid">
-        <div class="stat-box"><div class="stat-label">Rule Score</div><div class="stat-value" style="color:${scoreColor}">${data.score}</div><div class="stat-sub">0 = calm · 100 = stressed</div></div>
-        <div class="stat-box"><div class="stat-label">High Alerts</div><div class="stat-value u-c-red">${data.highCount}</div><div class="stat-sub">requires attention</div></div>
-        <div class="stat-box"><div class="stat-label">Medium Alerts</div><div class="stat-value u-c-yellow">${data.mediumCount}</div><div class="stat-sub">watchlist</div></div>
-        <div class="stat-box"><div class="stat-label">Top Stablecoin Share</div><div class="stat-value">${data.topStable ? data.topStable.pct.toFixed(1) + "%" : "—"}</div><div class="stat-sub">${data.topStable ? data.topStable.symbol : "—"}</div></div>
-        <div class="stat-box"><div class="stat-label">High Util Markets</div><div class="stat-value">${lendingRows.filter(r => (r.utilization || 0) > 0.85).length}</div><div class="stat-sub">utilization &gt; 85%</div></div>
-        <div class="stat-box"><div class="stat-label">Large Flow Count</div><div class="stat-value">${data.largeFlowCount}</div><div class="stat-sub">rows above $500k</div></div>
-        <div class="stat-box"><div class="stat-label">Unavailable Lending Rows</div><div class="stat-value">${fmtNumber(coverage.lendingRowsUnavailable || 0)}</div><div class="stat-sub">of ${fmtNumber(coverage.lendingRowsTotal || 0)} total rows</div></div>
-        <div class="stat-box"><div class="stat-label">Low-Confidence Flow Inputs</div><div class="stat-value" style="color:${lowFlowShare > 25 ? "var(--yellow)" : "var(--text)"}">${fmtNumber(coverage.lowConfidenceFlowRows || 0)}</div><div class="stat-sub">${lowFlowShare.toFixed(1)}% of flow rows</div></div>
-      </div>
-
-      ${signals}
-      ${methods}
-
-      <div class="card u-mb16">
-        <div class="card-header">Active Alerts</div>
-        <div class="card-body">
-          ${alerts.length ? `<table>
-            <thead><tr><th>Severity</th><th>Area</th><th>Protocol</th><th>Token</th><th>Metric</th><th class="u-ta-right">Value</th><th>Note</th></tr></thead>
-            <tbody>
-              ${alerts.map(a => `<tr>
-                <td>${defiSeverityBadge(a.severity)}</td>
-                <td>${a.area}</td>
-                <td>${escapeHtml(a.protocol)}</td>
-                <td>${a.token}</td>
-                <td>${a.metric}</td>
-                <td class="u-ta-right-mono">${a.value}</td>
-                <td class="u-fs12-dim">${escapeHtml(a.note)}</td>
-              </tr>`).join("")}
-            </tbody>
-          </table>` : renderEmpty("No active risk alerts in the current filtered view.")}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">Lending Heatmap Inputs</div>
-        <div class="card-body">
-          ${lendingRows.length ? `<table>
-            <thead><tr><th>Protocol</th><th>Token</th><th class="u-ta-right">Supply APR</th><th class="u-ta-right">Borrow APR</th><th class="u-ta-right">Utilization</th><th class="u-ta-right">Spread</th></tr></thead>
-            <tbody>
-              ${lendingRows.map(r => {
-                const util = (r.utilization || 0) * 100;
-                const utilColor = util > 90 ? "var(--red)" : util > 80 ? "var(--yellow)" : "var(--green)";
-                const spreadBps = Number.isFinite(r.supplyBps) ? (r.borrowBps - r.supplyBps) : null;
-                return `<tr>
-                  <td class="u-fw-600">${escapeHtml(r.protocol)}</td>
-                  <td>${r.token}</td>
-                  <td class="u-ta-right-mono">${Number.isFinite(r.supplyBps) ? (r.supplyBps / 100).toFixed(2) + "%" : "—"}</td>
-                  <td class="u-ta-right-mono">${Number.isFinite(r.borrowBps) ? (r.borrowBps / 100).toFixed(2) + "%" : "—"}</td>
-                  <td style="text-align:right;font-family:var(--mono);color:${utilColor}">${util.toFixed(1)}%</td>
-                  <td class="u-ta-right-mono">${spreadBps != null ? (spreadBps / 100).toFixed(2) + "%" : "—"}</td>
-                </tr>`;
-              }).join("")}
-            </tbody>
-          </table>` : renderEmpty("No lending rows available.")}
-        </div>
-      </div>
-    `;
-  }
-
-  const setDefiRiskSeverity = (v) => {
-    severityFilter = ["all", "high", "medium"].includes(v) ? v : "all";
-    persistDefiRiskState();
-    app.innerHTML = renderContent();
-  };
-  const setDefiRiskArea = (v) => {
-    areaFilter = ["all", "lending", "stablecoins", "flows"].includes(v) ? v : "all";
-    persistDefiRiskState();
-    app.innerHTML = renderContent();
-  };
-  const setDefiRiskLendingSort = (v) => {
-    lendingSort = ["util", "borrow", "spread"].includes(v) ? v : "util";
-    persistDefiRiskState();
-    app.innerHTML = renderContent();
-  };
-  const refreshDefiRisk = async () => {
-    app.innerHTML = renderLoading();
-    data = await fetchDefiRiskSnapshot(DEFI_WINDOW_DEFAULT_KEY, true);
-    app.innerHTML = renderContent();
-  };
-  if (app._defiRiskChangeHandler) app.removeEventListener("change", app._defiRiskChangeHandler);
-  app._defiRiskChangeHandler = (ev) => {
-    const target = ev.target;
-    if (!(target instanceof Element)) return;
-    const action = target.getAttribute("data-action");
-    if (!action) return;
-    if (action === "defi-risk-severity") {
-      setDefiRiskSeverity(target.value);
-      return;
-    }
-    if (action === "defi-risk-area") {
-      setDefiRiskArea(target.value);
-      return;
-    }
-    if (action === "defi-risk-lending-sort") {
-      setDefiRiskLendingSort(target.value);
-    }
-  };
-  app.addEventListener("change", app._defiRiskChangeHandler);
-  if (app._defiRiskClickHandler) app.removeEventListener("click", app._defiRiskClickHandler);
-  app._defiRiskClickHandler = async (ev) => {
-    const trigger = ev.target?.closest?.("[data-action]");
-    if (!trigger || !app.contains(trigger)) return;
-    if (trigger.getAttribute("data-action") !== "defi-risk-refresh") return;
-    ev.preventDefault();
-    await refreshDefiRisk();
-  };
-  app.addEventListener("click", app._defiRiskClickHandler);
-  app.innerHTML = renderContent();
-}
-
 // ── DeFi Lending Rates ────────────────────────────────────────────────
 async function renderDefiRates(app) {
   const routeParams = splitRouteAndParams(getRoute()).params;
@@ -12216,7 +12167,6 @@ async function renderProtocolConfig(app) {
       sourceLabel: "Sui GraphQL Mainnet · chainIdentifier + serviceConfig + protocolConfigs",
     });
     html += `<div class="stats-grid u-mb16">
-      <div class="stat-box"><div class="stat-label">Chain Identifier</div><div class="stat-value u-fs16">${chainIdentifier ? escapeHtml(chainIdentifier) : "—"}</div><div class="stat-sub">GraphQL root: chainIdentifier</div></div>
       <div class="stat-box"><div class="stat-label">Protocol Version</div><div class="stat-value">${pc.protocolVersion}</div></div>
       <div class="stat-box"><div class="stat-label">Config Parameters</div><div class="stat-value">${configs.length}</div></div>
       <div class="stat-box"><div class="stat-label">Feature Flags</div><div class="stat-value">${flags.length}</div><div class="stat-sub">${enabledFlags.length} enabled</div></div>
@@ -12285,6 +12235,7 @@ async function renderDocs(app) {
         A Sui block explorer built around the GraphQL API. The goal is to keep raw chain data visible while adding lightweight structure so users can understand activity quickly.
         <div style="margin-top:8px">Use the top-right <span class="u-c-text">Simple / Advanced</span> toggle to control detail density.</div>
         <div style="margin-top:8px">Use the top-right <span class="u-c-text">theme</span> toggle for visual style and the perf badge for live render/query telemetry.</div>
+        <div style="margin-top:8px">This explorer is open source. View the code and contribute on <a href="https://github.com/Evan-Kim2028/suigraph" target="_blank" rel="noopener" style="color:var(--accent)">GitHub</a>.</div>
       </div>
     </div>
 
@@ -12297,7 +12248,7 @@ async function renderDocs(app) {
         </a>
         <a href="#/defi-overview" class="hash-link u-panel-block">
           <div style="font-weight:600;color:var(--text)">DeFi Monitoring</div>
-          <div class="u-fs12-dim">DeFi Overview -> Rates / DEX / Flows / Risk</div>
+          <div class="u-fs12-dim">DeFi Overview -> Rates / DEX / Volume</div>
         </a>
         <a href="#/graphql" class="hash-link u-panel-block">
           <div style="font-weight:600;color:var(--text)">Developer Inspection</div>
