@@ -835,8 +835,30 @@ const AF_CLEARING_HOUSES = {
   "0x95969906ca735c9d44e8a44b5b7791b4dacaddf70fbdfbda40ccd3f8a9fd4920": "BTC/USD",
   "0xed358c545b4a6698f757d3840a6b7effd1b958dd31260931bef07691f255b1fa": "XAUT/USD",
 };
+const AF_USDC_COIN_TYPE = "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC";
+const AF_CLEARING_HOUSE_TYPE = `${AF_PERPS_PKG}::clearing_house::ClearingHouse<${AF_USDC_COIN_TYPE}>`;
+const AF_POSITION_KEY_TYPE = `${AF_PERPS_PKG}::keys::Position`;
+const AF_ORDERBOOK_KEY_TYPE = `${AF_PERPS_PKG}::keys::Orderbook`;
+const AF_ASKS_MAP_KEY_TYPE = `${AF_PERPS_PKG}::keys::AsksMap`;
+const AF_BIDS_MAP_KEY_TYPE = `${AF_PERPS_PKG}::keys::BidsMap`;
+const AF_IFIXED_SCALE_DECIMALS = 18;
+const AF_IFIXED_SIGN_BIT = 1n << 255n;
+const AF_IFIXED_FULL_RANGE = 1n << 256n;
+const AF_PERPS_EPS_RAW = 1000000n; // 1e-12 in IFixed(1e18) terms
+const AF_COLLATERAL_DUST_RAW = 1000000000000n; // 1e-6 in IFixed(1e18) terms
+const AF_ORDER_SIZE_DECIMALS = 9;
+const AF_ACCOUNT_CAP_PAGE_SIZE = 50;
+const AF_ACCOUNT_CAP_MAX_PAGES = 10;
+const AF_POSITION_QUERY_BATCH = 50;
+const AF_ORDERBOOK_PAGE_SIZE = 50;
+const AF_ORDERBOOK_MAX_PAGES = 24;
+const AF_ORDER_EVENT_TX_SCAN = 40;
+const AF_ORDER_EVENT_PER_TX = 20;
+const AF_CLEARING_HOUSE_DISCOVERY_TTL_MS = 5 * 60 * 1000;
+const AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES = 4;
 const AF_PERPS_SIZE_EPS = 1e-12;
 const AF_PERPS_COLLATERAL_DUST = 1e-6;
+let afClearingHouseDiscoveryCache = { at: 0, rows: [], partial: false };
 
 async function gql(query, variables = {}) {
   const payload = JSON.stringify({ query, variables });
@@ -991,11 +1013,45 @@ function u64Bcs(n) {
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }
+function parseIFixedRaw(val) {
+  const raw = parseBigIntSafe(val);
+  return raw >= AF_IFIXED_SIGN_BIT ? raw - AF_IFIXED_FULL_RANGE : raw;
+}
+function scaledBigIntToApprox(raw, decimals, maxFrac = 8) {
+  const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+  const neg = bi < 0n;
+  const abs = neg ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  let wholeNum = Number(whole);
+  if (!Number.isFinite(wholeNum)) wholeNum = Number.MAX_SAFE_INTEGER;
+  if (d <= 0) return neg ? -wholeNum : wholeNum;
+  const fracStr = frac.toString().padStart(d, "0").slice(0, Math.max(0, maxFrac));
+  const fracNum = fracStr ? Number(`0.${fracStr}`) : 0;
+  const mag = wholeNum + (Number.isFinite(fracNum) ? fracNum : 0);
+  return neg ? -mag : mag;
+}
+function scaledBigIntAbsToApprox(raw, decimals, maxFrac = 8) {
+  const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+  return scaledBigIntToApprox(bi < 0n ? -bi : bi, decimals, maxFrac);
+}
+function scaledBigIntToText(raw, decimals, maxFrac = 8) {
+  const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+  const neg = bi < 0n;
+  const abs = neg ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  if (d <= 0) return `${neg ? "-" : ""}${whole.toString()}`;
+  let fracStr = frac.toString().padStart(d, "0");
+  fracStr = fracStr.slice(0, Math.max(0, maxFrac)).replace(/0+$/, "");
+  return `${neg ? "-" : ""}${whole.toString()}${fracStr ? "." + fracStr : ""}`;
+}
 function parseIFixed(val) {
-  if (!val || val === "0") return 0;
-  const raw = BigInt(val);
-  const signed = raw >= (1n << 255n) ? raw - (1n << 256n) : raw;
-  return Number(signed) / 1e18;
+  return scaledBigIntToApprox(parseIFixedRaw(val), AF_IFIXED_SCALE_DECIMALS, 8);
 }
 
 const FIXED32_SCALE = 4294967296; // 2^32
@@ -6805,81 +6861,574 @@ async function fetchBluefinProPositions(addr) {
   } catch (e) { return { positions: [], collateral: 0 }; }
 }
 
+function afNormalizeAccountId(v) {
+  const raw = String(v ?? "").trim();
+  if (!raw || !/^\d+$/.test(raw)) return "";
+  return raw.replace(/^0+(?=\d)/, "") || "0";
+}
+function afMarketAccountKey(chId, accountId) {
+  return `${chId}::${accountId}`;
+}
+function afMarketLabel(chId) {
+  return AF_CLEARING_HOUSES[chId] || `Market ${truncHash(chId, 6)}`;
+}
+async function fetchAftermathAccountCaps(addr) {
+  const out = [];
+  const seen = new Set();
+  let after = null;
+  let partial = false;
+  for (let page = 0; page < AF_ACCOUNT_CAP_MAX_PAGES; page += 1) {
+    const data = await gql(`query($addr: SuiAddress!, $after: String, $first: Int!) {
+      address(address: $addr) {
+        objects(filter: { type: "${AF_ACCOUNT_CAP_TYPE}" }, first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            address
+            contents { json }
+          }
+        }
+      }
+    }`, {
+      addr,
+      after,
+      first: AF_ACCOUNT_CAP_PAGE_SIZE,
+    });
+    const conn = data?.address?.objects;
+    const rows = conn?.nodes || [];
+    for (const row of rows) {
+      const info = row?.contents?.json || {};
+      const accountId = afNormalizeAccountId(info.account_id);
+      if (!accountId || seen.has(accountId)) continue;
+      seen.add(accountId);
+      out.push({
+        accountId,
+        capObjectId: normalizeSuiAddress(row?.address || ""),
+        accountObjectId: normalizeSuiAddress(info.account_obj_id || ""),
+      });
+    }
+    if (!conn?.pageInfo?.hasNextPage) {
+      after = null;
+      break;
+    }
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+    if (page === AF_ACCOUNT_CAP_MAX_PAGES - 1) partial = true;
+  }
+  return { caps: out, partial };
+}
+async function fetchAftermathClearingHouses(force = false) {
+  const now = Date.now();
+  if (!force
+    && afClearingHouseDiscoveryCache.rows?.length
+    && (now - afClearingHouseDiscoveryCache.at) < AF_CLEARING_HOUSE_DISCOVERY_TTL_MS) {
+    return {
+      rows: afClearingHouseDiscoveryCache.rows,
+      partial: !!afClearingHouseDiscoveryCache.partial,
+      warnings: [],
+    };
+  }
+  const byId = {};
+  for (const [id, label] of Object.entries(AF_CLEARING_HOUSES)) {
+    const norm = normalizeSuiAddress(id) || id;
+    byId[norm] = { id: norm, label, known: true };
+  }
+  let partial = false;
+  const warnings = [];
+  let after = null;
+  for (let page = 0; page < AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES; page += 1) {
+    const data = await gql(`query($type: String!, $after: String, $first: Int!) {
+      objects(filter: { type: $type }, first: $first, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { address }
+      }
+    }`, {
+      type: AF_CLEARING_HOUSE_TYPE,
+      after,
+      first: AF_ORDERBOOK_PAGE_SIZE,
+    });
+    const conn = data?.objects;
+    for (const row of (conn?.nodes || [])) {
+      const id = normalizeSuiAddress(row?.address || "");
+      if (!id) continue;
+      if (!byId[id]) byId[id] = { id, label: afMarketLabel(id), known: false };
+    }
+    if (!conn?.pageInfo?.hasNextPage) {
+      after = null;
+      break;
+    }
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+    if (page === AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES - 1) {
+      partial = true;
+      warnings.push("Aftermath market discovery reached pagination cap; discovered market list may be partial.");
+    }
+  }
+  const rows = Object.values(byId).sort((a, b) => {
+    const ak = a.known ? 0 : 1;
+    const bk = b.known ? 0 : 1;
+    if (ak !== bk) return ak - bk;
+    return String(a.label || "").localeCompare(String(b.label || ""));
+  });
+  afClearingHouseDiscoveryCache = { at: now, rows, partial };
+  return { rows, partial, warnings };
+}
+async function fetchAftermathPositionStates(accountCaps, markets) {
+  const combos = [];
+  let aliasIndex = 0;
+  for (const cap of (accountCaps || [])) {
+    for (const m of (markets || [])) {
+      combos.push({
+        alias: `afp${aliasIndex += 1}`,
+        accountId: cap.accountId,
+        chId: m.id,
+        market: m.label,
+      });
+    }
+  }
+  if (!combos.length) return { states: [], totalCollateral: 0 };
+  const states = [];
+  let totalCollateral = 0;
+  for (const batch of chunkArray(combos, AF_POSITION_QUERY_BATCH)) {
+    const fields = batch.map((row) => `${row.alias}: object(address: "${row.chId}") {
+      dynamicField(name: { type: "${AF_POSITION_KEY_TYPE}", bcs: "${u64Bcs(row.accountId)}" }) {
+        value { ... on MoveValue { json } }
+      }
+    }`).join("\n");
+    const data = await gql(`{ ${fields} }`);
+    for (const row of batch) {
+      const pos = data?.[row.alias]?.dynamicField?.value?.json;
+      if (!pos) continue;
+      const baseRaw = parseIFixedRaw(pos.base_asset_amount);
+      const notionalRaw = parseIFixedRaw(pos.quote_asset_notional_amount);
+      const collateralRaw = parseIFixedRaw(pos.collateral);
+      const askRawAbs = parseIFixedRaw(pos.asks_quantity);
+      const bidRawAbs = parseIFixedRaw(pos.bids_quantity);
+      const askAbs = askRawAbs < 0n ? -askRawAbs : askRawAbs;
+      const bidAbs = bidRawAbs < 0n ? -bidRawAbs : bidRawAbs;
+      const collAbs = collateralRaw < 0n ? -collateralRaw : collateralRaw;
+      const pendingRaw = Number(pos.pending_orders || 0);
+      const pendingOrders = Number.isFinite(pendingRaw) ? Math.max(0, Math.floor(pendingRaw)) : 0;
+
+      const hasOpenPosition = (baseRaw > AF_PERPS_EPS_RAW || baseRaw < -AF_PERPS_EPS_RAW)
+        || (notionalRaw > AF_PERPS_EPS_RAW || notionalRaw < -AF_PERPS_EPS_RAW);
+      const hasOpenOrders = pendingOrders > 0 || askAbs > AF_PERPS_EPS_RAW || bidAbs > AF_PERPS_EPS_RAW;
+      if (!hasOpenPosition && !hasOpenOrders && collAbs < AF_COLLATERAL_DUST_RAW) continue;
+
+      const baseSize = scaledBigIntAbsToApprox(baseRaw, AF_IFIXED_SCALE_DECIMALS, 8);
+      const notionalAbs = scaledBigIntAbsToApprox(notionalRaw, AF_IFIXED_SCALE_DECIMALS, 8);
+      const entryPrice = baseSize > AF_PERPS_SIZE_EPS ? notionalAbs / baseSize : NaN;
+      let side = "flat";
+      if (baseRaw > AF_PERPS_EPS_RAW) side = "long";
+      else if (baseRaw < -AF_PERPS_EPS_RAW) side = "short";
+      else if (bidAbs > askAbs) side = "long";
+      else if (askAbs > bidAbs) side = "short";
+      const collateral = scaledBigIntToApprox(collateralRaw, AF_IFIXED_SCALE_DECIMALS, 8);
+      if (collateral > AF_PERPS_COLLATERAL_DUST) totalCollateral += collateral;
+      states.push({
+        key: afMarketAccountKey(row.chId, row.accountId),
+        chId: row.chId,
+        market: row.market || afMarketLabel(row.chId),
+        accountId: row.accountId,
+        side,
+        hasOpenPosition,
+        hasOpenOrders,
+        pendingOrders,
+        baseRaw,
+        notionalRaw,
+        collateralRaw,
+        askRawAbs: askAbs,
+        bidRawAbs: bidAbs,
+        size: baseSize,
+        entryPrice,
+        notionalAbs,
+        collateral,
+      });
+    }
+  }
+  return { states, totalCollateral };
+}
+async function fetchAftermathOrderbookRefs(markets) {
+  const refs = {};
+  const warnings = [];
+  let partial = false;
+  for (const market of (markets || [])) {
+    const chId = market?.id || "";
+    if (!chId) continue;
+    try {
+      const chData = await gql(`query($id: SuiAddress!) {
+        object(address: $id) {
+          dynamicFields(first: 50) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              name { type { repr } }
+              value {
+                ... on MoveObject { address }
+              }
+            }
+          }
+        }
+      }`, { id: chId });
+      const chConn = chData?.object?.dynamicFields;
+      if (chConn?.pageInfo?.hasNextPage) {
+        partial = true;
+        warnings.push(`Orderbook reference scan for ${market.label} was truncated; results may be partial.`);
+      }
+      const obNode = (chConn?.nodes || []).find((n) => n?.name?.type?.repr === AF_ORDERBOOK_KEY_TYPE);
+      const orderbookId = normalizeSuiAddress(obNode?.value?.address || "");
+      if (!orderbookId) {
+        partial = true;
+        warnings.push(`Missing orderbook reference for ${market.label}; falling back to position aggregates.`);
+        continue;
+      }
+      const obData = await gql(`query($id: SuiAddress!) {
+        object(address: $id) {
+          dynamicFields(first: 10) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              name { type { repr } }
+              value {
+                ... on MoveObject { address }
+              }
+            }
+          }
+        }
+      }`, { id: orderbookId });
+      const obConn = obData?.object?.dynamicFields;
+      if (obConn?.pageInfo?.hasNextPage) {
+        partial = true;
+        warnings.push(`Orderbook map scan for ${market.label} was truncated; results may be partial.`);
+      }
+      const asksMapId = normalizeSuiAddress((obConn?.nodes || []).find((n) => n?.name?.type?.repr === AF_ASKS_MAP_KEY_TYPE)?.value?.address || "");
+      const bidsMapId = normalizeSuiAddress((obConn?.nodes || []).find((n) => n?.name?.type?.repr === AF_BIDS_MAP_KEY_TYPE)?.value?.address || "");
+      if (!asksMapId || !bidsMapId) {
+        partial = true;
+        warnings.push(`Could not resolve asks/bids maps for ${market.label}; falling back to position aggregates.`);
+        continue;
+      }
+      refs[chId] = { orderbookId, asksMapId, bidsMapId };
+    } catch (e) {
+      partial = true;
+      warnings.push(`Orderbook lookup failed for ${market.label}: ${e?.message || "unknown error"}`);
+    }
+  }
+  return { refs, partial, warnings };
+}
+async function fetchAftermathOrdersFromMap(mapId, side, market, accountSet) {
+  const orders = [];
+  const seen = new Set();
+  let after = null;
+  let partial = false;
+  for (let page = 0; page < AF_ORDERBOOK_MAX_PAGES; page += 1) {
+    const data = await gql(`query($id: SuiAddress!, $after: String, $first: Int!) {
+      object(address: $id) {
+        dynamicFields(first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            value {
+              ... on MoveValue {
+                type { repr }
+                json
+              }
+            }
+          }
+        }
+      }
+    }`, {
+      id: mapId,
+      after,
+      first: AF_ORDERBOOK_PAGE_SIZE,
+    });
+    const conn = data?.object?.dynamicFields;
+    for (const node of (conn?.nodes || [])) {
+      const leaf = node?.value?.json;
+      const entries = Array.isArray(leaf?.keys_vals) ? leaf.keys_vals : [];
+      for (const kv of entries) {
+        const accountId = afNormalizeAccountId(kv?.val?.account_id);
+        if (!accountId) continue;
+        if (accountSet && !accountSet.has(accountId)) continue;
+        const orderId = String(kv?.key || "").trim();
+        if (!orderId) continue;
+        const seenKey = `${side}:${orderId}:${accountId}`;
+        if (seen.has(seenKey)) continue;
+        seen.add(seenKey);
+        const sizeRaw = parseBigIntSafe(kv?.val?.size || 0);
+        if (sizeRaw <= 0n) continue;
+        const expirationRaw = kv?.val?.expiration_timestamp_ms;
+        const expirationNum = Number(expirationRaw);
+        const expirationMs = Number.isFinite(expirationNum) && expirationNum > 0 ? expirationNum : NaN;
+        orders.push({
+          market: market?.label || afMarketLabel(market?.id || ""),
+          chId: market?.id || "",
+          accountId,
+          side,
+          orderId,
+          sizeRaw,
+          size: scaledBigIntToApprox(sizeRaw, AF_ORDER_SIZE_DECIMALS, 8),
+          sizeText: scaledBigIntToText(sizeRaw, AF_ORDER_SIZE_DECIMALS, 8),
+          reduceOnly: kv?.val?.reduce_only === true || kv?.val?.reduce_only === "true",
+          expirationMs,
+          kind: `Maker Limit (${Number.isFinite(expirationMs) ? "GTD" : "GTC"})`,
+          synthetic: false,
+        });
+      }
+    }
+    if (!conn?.pageInfo?.hasNextPage) {
+      after = null;
+      break;
+    }
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+    if (page === AF_ORDERBOOK_MAX_PAGES - 1) partial = true;
+  }
+  return { orders, partial };
+}
+async function fetchAftermathRecentOrderEvents(addr, accountSet) {
+  const out = {};
+  const data = await gql(`query($addr: SuiAddress!) {
+    address(address: $addr) {
+      transactions(last: ${AF_ORDER_EVENT_TX_SCAN}) {
+        nodes {
+          digest
+          effects {
+            timestamp
+            events(first: ${AF_ORDER_EVENT_PER_TX}) {
+              nodes {
+                contents {
+                  type { repr }
+                  json
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }`, { addr });
+  const txs = data?.address?.transactions?.nodes || [];
+  for (const tx of txs) {
+    const tsMs = parseTsMs(tx?.effects?.timestamp);
+    for (const ev of (tx?.effects?.events?.nodes || [])) {
+      const type = ev?.contents?.type?.repr || "";
+      if (!type.startsWith(`${AF_PERPS_PKG}::events::`)) continue;
+      const tail = type.split("::").pop() || "";
+      if (tail !== "PostedOrder" && tail !== "CanceledOrder") continue;
+      const json = ev?.contents?.json || {};
+      const accountId = afNormalizeAccountId(json.account_id);
+      if (!accountId) continue;
+      if (accountSet?.size && !accountSet.has(accountId)) continue;
+      const orderId = String(json.order_id || "").trim();
+      if (!orderId) continue;
+      const prev = out[orderId];
+      if (!prev || (Number.isFinite(tsMs) && (!Number.isFinite(prev.tsMs) || tsMs >= prev.tsMs))) {
+        out[orderId] = {
+          action: tail === "PostedOrder" ? "posted" : "canceled",
+          tsMs,
+          digest: String(tx?.digest || ""),
+        };
+      }
+    }
+  }
+  return out;
+}
 // ── Aftermath Perpetuals Fetcher ────────────────────────────────────────
 async function fetchAftermathPerpsPositions(addr) {
   try {
-    // Step 1: Find AccountCap(s) owned by this address to get account_id(s)
-    const capData = await gql(`{
-      address(address: "${addr}") {
-        objects(filter: { type: "${AF_ACCOUNT_CAP_TYPE}" }, first: 5) {
-          nodes { contents { json } }
+    const warnings = [];
+    let partial = false;
+
+    const capsMeta = await fetchAftermathAccountCaps(addr);
+    const caps = capsMeta.caps || [];
+    if (capsMeta.partial) {
+      partial = true;
+      warnings.push("AccountCap scan reached pagination cap; account coverage may be partial.");
+    }
+    if (!caps.length) {
+      return { accounts: [], markets: [], positions: [], orders: [], collateral: 0, partial, warnings };
+    }
+
+    let marketRows = [];
+    try {
+      const marketMeta = await fetchAftermathClearingHouses();
+      marketRows = marketMeta.rows || [];
+      if (marketMeta.partial) partial = true;
+      for (const w of (marketMeta.warnings || [])) warnings.push(w);
+    } catch (e) {
+      partial = true;
+      warnings.push(`Market discovery failed: ${e?.message || "unknown error"}. Falling back to configured market list.`);
+    }
+    if (!marketRows.length) {
+      marketRows = Object.keys(AF_CLEARING_HOUSES).map((id) => ({
+        id: normalizeSuiAddress(id) || id,
+        label: afMarketLabel(id),
+        known: true,
+      }));
+    }
+
+    const posMeta = await fetchAftermathPositionStates(caps, marketRows);
+    const states = posMeta.states || [];
+    const stateByKey = {};
+    for (const s of states) stateByKey[s.key] = s;
+    const totalCollateral = Number.isFinite(posMeta.totalCollateral) ? posMeta.totalCollateral : 0;
+
+    const positions = states
+      .filter((s) => s.hasOpenPosition)
+      .map((s) => ({
+        market: s.market,
+        chId: s.chId,
+        accountId: s.accountId,
+        side: s.side,
+        isLong: s.side === "long",
+        size: s.size,
+        entryPrice: s.entryPrice,
+        notional: s.notionalAbs,
+        collateral: s.collateral,
+        pendingOrders: s.pendingOrders,
+        hasOpenOrders: s.hasOpenOrders,
+      }));
+
+    const expectedByKey = {};
+    const accountSetByMarket = {};
+    const allAccountIds = new Set(caps.map((c) => c.accountId));
+    for (const s of states) {
+      if (!s.hasOpenOrders) continue;
+      const expected = s.pendingOrders > 0 ? s.pendingOrders : 1;
+      expectedByKey[s.key] = Math.max(expectedByKey[s.key] || 0, expected);
+      if (!accountSetByMarket[s.chId]) accountSetByMarket[s.chId] = new Set();
+      accountSetByMarket[s.chId].add(s.accountId);
+    }
+
+    const orders = [];
+    const marketsWithOpenOrders = marketRows.filter((m) => accountSetByMarket[m.id]?.size);
+    if (marketsWithOpenOrders.length) {
+      const refMeta = await fetchAftermathOrderbookRefs(marketsWithOpenOrders);
+      if (refMeta.partial) partial = true;
+      for (const w of (refMeta.warnings || [])) warnings.push(w);
+
+      for (const market of marketsWithOpenOrders) {
+        const refs = refMeta.refs?.[market.id];
+        const accountSet = accountSetByMarket[market.id];
+        if (!refs || !accountSet?.size) continue;
+        const [asks, bids] = await Promise.all([
+          fetchAftermathOrdersFromMap(refs.asksMapId, "short", market, accountSet),
+          fetchAftermathOrdersFromMap(refs.bidsMapId, "long", market, accountSet),
+        ]);
+        orders.push(...asks.orders, ...bids.orders);
+        if (asks.partial || bids.partial) {
+          partial = true;
+          warnings.push(`Orderbook scan for ${market.label} reached pagination cap; open-order detail may be partial.`);
         }
       }
-    }`);
-    const caps = (capData?.address?.objects?.nodes || [])
-      .map(n => n.contents?.json)
-      .filter(Boolean);
-    if (!caps.length) return { positions: [], collateral: 0 };
-    // Step 2: For each account_id, batch-query all ClearingHouses for positions + market state
-    const chIds = Object.keys(AF_CLEARING_HOUSES);
-    const parts = [];
-    const keyType = `${AF_PERPS_PKG}::keys::Position`;
-    for (const cap of caps) {
-      const bcs = u64Bcs(cap.account_id);
-      chIds.forEach((chId, j) => {
-        const idx = `a${cap.account_id}_ch${j}`;
-        parts.push(`${idx}: object(address: "${chId}") {
-          dynamicField(name: { type: "${keyType}", bcs: "${bcs}" }) {
-            value { ... on MoveValue { json } }
-          }
-        }`);
-      });
     }
-    const data = await gql(`{ ${parts.join("\n")} }`);
-    // Parse positions
-    const positions = [];
-    let totalCollateral = 0;
-    for (const cap of caps) {
-      chIds.forEach((chId, j) => {
-        const idx = `a${cap.account_id}_ch${j}`;
-        const pos = data[idx]?.dynamicField?.value?.json;
-        if (!pos) return;
-        const baseAmount = parseIFixed(pos.base_asset_amount);
-        const notional = parseIFixed(pos.quote_asset_notional_amount);
-        const collateral = parseIFixed(pos.collateral); // IFixed already in USDC units (1 USDC = 1.0)
-        const askQty = Math.abs(parseIFixed(pos.asks_quantity));
-        const bidQty = Math.abs(parseIFixed(pos.bids_quantity));
-        const pendingOrders = Number(pos.pending_orders || 0);
 
-        const hasOpenPosition = Math.abs(baseAmount) > AF_PERPS_SIZE_EPS || Math.abs(notional) > AF_PERPS_SIZE_EPS;
-        const hasOpenOrders = pendingOrders > 0 || askQty > AF_PERPS_SIZE_EPS || bidQty > AF_PERPS_SIZE_EPS;
-        if (!hasOpenPosition && !hasOpenOrders && collateral < AF_PERPS_COLLATERAL_DUST) return;
+    const foundByKey = {};
+    for (const o of orders) {
+      const key = afMarketAccountKey(o.chId, o.accountId);
+      foundByKey[key] = (foundByKey[key] || 0) + 1;
+    }
 
-        let side = "flat";
-        if (hasOpenPosition) side = baseAmount >= 0 ? "long" : "short";
-        else if (bidQty > askQty) side = "long";
-        else if (askQty > bidQty) side = "short";
-
-        const size = hasOpenPosition ? Math.abs(baseAmount) : Math.max(askQty, bidQty);
-        const entryPrice = hasOpenPosition && size > AF_PERPS_SIZE_EPS ? Math.abs(notional) / size : NaN;
-        const notionalAbs = hasOpenPosition ? Math.abs(notional) : NaN;
-        totalCollateral += collateral;
-        positions.push({
-          market: AF_CLEARING_HOUSES[chId],
-          side,
-          size,
-          entryPrice,
-          collateral,
-          isLong: side === "long",
-          notional: notionalAbs,
-          orderOnly: !hasOpenPosition && hasOpenOrders,
-          accountId: cap.account_id,
-          pendingOrders,
+    for (const [key, expected] of Object.entries(expectedByKey)) {
+      const found = foundByKey[key] || 0;
+      if (found >= expected) continue;
+      partial = true;
+      const [chId, accountId] = key.split("::");
+      warnings.push(`Order coverage mismatch for ${afMarketLabel(chId)} account ${accountId}: found ${found}/${expected}.`);
+      const st = stateByKey[key];
+      if (!st || found > 0) continue;
+      if (st.askRawAbs > AF_PERPS_EPS_RAW) {
+        orders.push({
+          market: st.market,
+          chId: st.chId,
+          accountId: st.accountId,
+          side: "short",
+          orderId: "",
+          sizeRaw: st.askRawAbs,
+          size: scaledBigIntAbsToApprox(st.askRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          sizeText: scaledBigIntToText(st.askRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          reduceOnly: false,
+          expirationMs: NaN,
+          kind: "Inferred Aggregate",
+          synthetic: true,
         });
-      });
+      }
+      if (st.bidRawAbs > AF_PERPS_EPS_RAW) {
+        orders.push({
+          market: st.market,
+          chId: st.chId,
+          accountId: st.accountId,
+          side: "long",
+          orderId: "",
+          sizeRaw: st.bidRawAbs,
+          size: scaledBigIntAbsToApprox(st.bidRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          sizeText: scaledBigIntToText(st.bidRawAbs, AF_IFIXED_SCALE_DECIMALS, 8),
+          reduceOnly: false,
+          expirationMs: NaN,
+          kind: "Inferred Aggregate",
+          synthetic: true,
+        });
+      }
+      if (st.askRawAbs <= AF_PERPS_EPS_RAW && st.bidRawAbs <= AF_PERPS_EPS_RAW && st.pendingOrders > 0) {
+        orders.push({
+          market: st.market,
+          chId: st.chId,
+          accountId: st.accountId,
+          side: "flat",
+          orderId: "",
+          sizeRaw: 0n,
+          size: NaN,
+          sizeText: "",
+          reduceOnly: false,
+          expirationMs: NaN,
+          kind: "Inferred Pending Orders",
+          synthetic: true,
+        });
+      }
     }
-    return { positions, collateral: totalCollateral };
-  } catch (e) { return { positions: [], collateral: 0 }; }
+
+    const hasConcreteOrders = orders.some((o) => !o.synthetic && o.orderId);
+    if (hasConcreteOrders) {
+      try {
+        const recent = await fetchAftermathRecentOrderEvents(addr, allAccountIds);
+        for (const o of orders) {
+          if (o.synthetic || !o.orderId) continue;
+          const ev = recent[o.orderId];
+          if (!ev) continue;
+          o.lastEventAction = ev.action;
+          o.lastEventTsMs = ev.tsMs;
+          o.lastEventDigest = ev.digest;
+        }
+      } catch (e) {
+        partial = true;
+        warnings.push(`Recent order-event enrichment failed: ${e?.message || "unknown error"}`);
+      }
+    }
+
+    positions.sort((a, b) => (b.notional || 0) - (a.notional || 0) || (b.size || 0) - (a.size || 0));
+    orders.sort((a, b) =>
+      String(a.market || "").localeCompare(String(b.market || ""))
+      || String(a.accountId || "").localeCompare(String(b.accountId || ""))
+      || (a.side === b.side ? 0 : (a.side === "long" ? -1 : 1))
+      || (b.size || 0) - (a.size || 0));
+
+    return {
+      accounts: caps,
+      markets: marketRows,
+      positions,
+      orders,
+      collateral: totalCollateral,
+      partial,
+      warnings: [...new Set(warnings)].slice(0, 12),
+    };
+  } catch (e) {
+    return {
+      accounts: [],
+      markets: [],
+      positions: [],
+      orders: [],
+      collateral: 0,
+      partial: true,
+      warnings: [e?.message || "Aftermath fetch failed."],
+    };
+  }
 }
 
 // ── Address View ────────────────────────────────────────────────────────
@@ -7079,7 +7628,9 @@ async function renderAddress(app, addr) {
     const db = deepbook.status === "fulfilled" ? deepbook.value : { positions: [], pools: {}, riskConfigs: {} };
     const bluefinSpotPos = bluefinSpot.status === "fulfilled" ? bluefinSpot.value : [];
     const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
-    const afPerpsData = aftermathPerps.status === "fulfilled" ? aftermathPerps.value : { positions: [], collateral: 0 };
+    const afPerpsData = aftermathPerps.status === "fulfilled"
+      ? aftermathPerps.value
+      : { accounts: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
 
     // Second pricing pass: price any tokens discovered by fetchers but missing from defiPrices
     const allCoinTypes = new Set();
@@ -7131,7 +7682,14 @@ async function renderAddress(app, addr) {
     totalSupplied += afPerpsData.collateral * (defiPrices["USDC"] || 1);
     const netWorth = totalWallet + totalLst + totalSupplied - totalBorrowed + totalDexLp;
 
-    const hasAnything = allLending.length || allDexLp.length || walletBals.length || db.positions.length || bluefinProData.positions.length || afPerpsData.positions.length;
+    const hasAnything = allLending.length
+      || allDexLp.length
+      || walletBals.length
+      || db.positions.length
+      || bluefinProData.positions.length
+      || afPerpsData.positions.length
+      || afPerpsData.orders.length
+      || afPerpsData.collateral > 0;
     if (!hasAnything) {
       const errors = [];
       if (suilend.status === "rejected") errors.push("Suilend");
@@ -7159,7 +7717,9 @@ async function renderAddress(app, addr) {
     if (totalDexLp > 0) html += `<div class="stat-box"><div class="stat-label">DEX LP</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalDexLp)}</div><div class="stat-sub">${allDexLp.length} positions</div></div>`;
     if (db.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">DeepBook Margin</div><div class="stat-value u-c-accent">${db.positions.length}</div><div class="stat-sub">positions</div></div>`;
     if (bluefinProData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Bluefin Perps</div><div class="stat-value u-c-blue">${bluefinProData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(bluefinProData.collateral)} collateral</div></div>`;
-    if (afPerpsData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
+    if (afPerpsData.positions.length > 0 || afPerpsData.orders.length > 0 || afPerpsData.collateral > 0) {
+      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length}</div><div class="stat-sub">${afPerpsData.positions.length} pos · ${afPerpsData.orders.length} orders · ${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
+    }
     html += `</div>`;
 
     // ─── Wallet Holdings ────────────────────
@@ -7334,32 +7894,81 @@ async function renderAddress(app, addr) {
     }
 
     // ─── Aftermath Perps ─────────────────────
-    if (afPerpsData.positions.length) {
+    if (afPerpsData.positions.length || afPerpsData.orders.length || afPerpsData.collateral > 0 || afPerpsData.warnings?.length) {
       html += `<h3 class="u-section-h3">Aftermath Perpetuals</h3>`;
       html += `<div class="u-bg-panel-12">`;
       if (afPerpsData.collateral > 0) {
         html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
       }
-      html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Orders</th></tr></thead><tbody>`;
-      for (const p of afPerpsData.positions) {
-        const sideLabel = p.side === "long" ? "LONG" : p.side === "short" ? "SHORT" : "FLAT";
-        const sideColor = p.side === "long" ? "var(--green)" : p.side === "short" ? "var(--red)" : "var(--text-dim)";
-        const entryText = Number.isFinite(p.entryPrice) && p.entryPrice > 0
-          ? `$${p.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-          : "—";
-        const notionalText = Number.isFinite(p.notional) && p.notional > 0
-          ? fmtUsdFromFloat(p.notional)
-          : "—";
-        html += `<tr>
-          <td style="font-weight:500">${p.market}${p.orderOnly ? ' <span style="font-size:11px;color:var(--text-dim)">(order-only)</span>' : ""}</td>
-          <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
-          <td class="u-mono">${p.size.toLocaleString(undefined, {maximumFractionDigits:6})}</td>
-          <td class="u-mono">${entryText}</td>
-          <td class="u-ta-right-mono">${notionalText}</td>
-          <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.pendingOrders || "—"}</td>
-        </tr>`;
+      if (afPerpsData.partial || afPerpsData.warnings?.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin:0 0 8px 0;padding:6px 8px;background:var(--panel);border:1px dashed var(--border);border-radius:8px">`;
+        if (afPerpsData.partial) html += `<div>Open-order coverage is partial; incomplete rows are explicitly tagged.</div>`;
+        const warnRows = (afPerpsData.warnings || []).slice(0, 4);
+        for (const w of warnRows) html += `<div>${escapeHtml(w)}</div>`;
+        if ((afPerpsData.warnings || []).length > warnRows.length) html += `<div>+${(afPerpsData.warnings || []).length - warnRows.length} more note(s)</div>`;
+        html += `</div>`;
       }
-      html += `</tbody></table></div>`;
+      if (afPerpsData.positions.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Open Positions</div>`;
+        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Orders</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
+        for (const p of afPerpsData.positions) {
+          const sideLabel = p.side === "long" ? "LONG" : p.side === "short" ? "SHORT" : "FLAT";
+          const sideColor = p.side === "long" ? "var(--green)" : p.side === "short" ? "var(--red)" : "var(--text-dim)";
+          const entryText = Number.isFinite(p.entryPrice) && p.entryPrice > 0
+            ? `$${p.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+            : "—";
+          const notionalText = Number.isFinite(p.notional) && p.notional > 0
+            ? fmtUsdFromFloat(p.notional)
+            : "—";
+          html += `<tr>
+            <td style="font-weight:500">${escapeHtml(p.market || "Unknown")}</td>
+            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
+            <td class="u-mono">${Number.isFinite(p.size) ? p.size.toLocaleString(undefined, {maximumFractionDigits:6}) : "—"}</td>
+            <td class="u-mono">${entryText}</td>
+            <td class="u-ta-right-mono">${notionalText}</td>
+            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.pendingOrders || "—"}</td>
+            <td class="u-ta-right-mono">${escapeHtml(String(p.accountId || "—"))}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+      } else if (afPerpsData.orders.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No open positions; showing live resting orders.</div>`;
+      }
+      if (afPerpsData.orders.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.positions.length ? "8px" : "0"} 0 6px">Open Orders (Resting/Maker)</div>`;
+        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Type</th><th class="u-ta-right">Reduce Only</th><th class="u-ta-right">Expires</th><th class="u-ta-right">Last Activity</th><th class="u-ta-right">Order ID</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
+        for (const o of afPerpsData.orders) {
+          const sideLabel = o.side === "long" ? "BID" : o.side === "short" ? "ASK" : "FLAT";
+          const sideColor = o.side === "long" ? "var(--green)" : o.side === "short" ? "var(--red)" : "var(--text-dim)";
+          const sizeText = Number.isFinite(o.size) && o.size > 0
+            ? o.size.toLocaleString(undefined, { maximumFractionDigits: 6 })
+            : (o.sizeText ? txListFormatTokenAmount(o.sizeText) : "—");
+          const expExpired = Number.isFinite(o.expirationMs) && o.expirationMs <= Date.now();
+          const expText = Number.isFinite(o.expirationMs)
+            ? `${timeTag(o.expirationMs)}${expExpired ? ' <span class="badge badge-fail">expired</span>' : ''}`
+            : `<span class="u-c-dim">GTC</span>`;
+          const activityText = o.lastEventAction
+            ? `${o.lastEventAction === "posted" ? "Posted" : "Canceled"} ${timeTag(o.lastEventTsMs)}`
+            : '<span class="u-c-dim">—</span>';
+          const orderIdLabel = o.orderId
+            ? `<span class="u-mono-11-dim" title="${escapeAttr(o.orderId)}">${escapeHtml(truncHash(o.orderId, 10))}</span>`
+            : '<span class="u-c-dim">—</span>';
+          const kindLabel = `${escapeHtml(o.kind || "Maker Limit")}${o.synthetic ? ' <span class="badge badge-fail">inferred</span>' : ""}`;
+          html += `<tr>
+            <td style="font-weight:500">${escapeHtml(o.market || "Unknown")}</td>
+            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
+            <td class="u-mono">${sizeText}</td>
+            <td>${kindLabel}</td>
+            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${o.reduceOnly ? "Yes" : "No"}</td>
+            <td style="text-align:right">${expText}</td>
+            <td style="text-align:right">${activityText}</td>
+            <td class="u-ta-right-mono">${orderIdLabel}</td>
+            <td class="u-ta-right-mono">${escapeHtml(String(o.accountId || "—"))}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+      }
+      html += `</div>`;
     }
 
     // ─── Errors ─────────────────────────────

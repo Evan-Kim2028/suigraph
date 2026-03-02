@@ -90,6 +90,28 @@ size        = Math.abs(base_amount)
 entry_price = Math.abs(notional) / size
 ```
 
+### Step 4: Query Open Orders from Orderbook State
+
+Position state alone is not enough to render robust open-order detail. For exact resting
+orders (maker-side), read the orderbook maps:
+
+1. On each clearing house object, read dynamic field `keys::Orderbook` to get orderbook object ID.
+2. On the orderbook object, read dynamic fields `keys::AsksMap` and `keys::BidsMap`.
+3. On each map object, paginate `dynamicFields(first: 50, after: ...)` and parse each
+   `ordered_map::Leaf<orderbook::Order>` payload (`keys_vals[]`).
+4. Filter rows by `account_id` and extract:
+   - `key` as `order_id`
+   - `val.size`
+   - `val.reduce_only`
+   - `val.expiration_timestamp_ms`
+
+Interpretation:
+- `AsksMap` rows are sell-side resting orders (`ASK` / short pressure).
+- `BidsMap` rows are buy-side resting orders (`BID` / long pressure).
+- Because these rows are in the live orderbook, they are maker/resting orders by definition.
+- If orderbook scan is truncated, UI should mark data as partial and fall back to aggregate
+  position-side order quantities (`asks_quantity` / `bids_quantity`) when possible.
+
 ## BCS Encoding
 
 ```javascript
@@ -111,3 +133,7 @@ function u64Bcs(n) {
 3. **Multiple clearing houses.** Each market (BTC/USD, XAUT/USD) is a separate clearing
    house object. Query each one per account.
 4. **Positive = long.** `base_asset_amount > 0` means long, negative means short.
+5. **Orderbook pagination matters.** Open-order detail is incomplete if asks/bids map
+   pagination is capped; surface this explicitly.
+6. **Open positions and open orders are distinct.** A user may have no filled position but
+   still have resting orders/collateral in a market.
