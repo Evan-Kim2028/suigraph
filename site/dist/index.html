@@ -2289,8 +2289,8 @@ const EVENT_ACTION_TAGS = [
   { pattern: "borrow",    label: "Borrow" },
   { pattern: "repay",     label: "Repay" },
   { pattern: "liquidat",  label: "Liquidation" },
-  { pattern: "stake",     label: "Stake" },
   { pattern: "unstake",   label: "Unstake" },
+  { pattern: "stake",     label: "Stake" },
   { pattern: "claim",     label: "Claim" },
   { pattern: "mint",      label: "Mint" },
   { pattern: "burn",      label: "Burn" },
@@ -3709,6 +3709,8 @@ const TX_LIST_PRESET_DAYS = { "7d": 7, "30d": 30 };
 const TX_LIST_LATEST_CHECKPOINT_TTL_MS = 30000;
 const TX_LIST_CHECKPOINT_PADDING = 2;
 const txListCheckpointTsCache = {};
+const txListCheckpointTsInFlight = {};
+const txListCheckpointHints = [];
 let txListLatestCheckpointCache = { seq: 0, tsMs: NaN, at: 0 };
 
 function txListNormalizeDateState(state = {}) {
@@ -3745,13 +3747,98 @@ function txListParseInputDateMs(value, endOfDay = false) {
 }
 
 function txListFormatTokenAmount(v) {
-  const n = Math.abs(Number(v || 0));
-  if (!Number.isFinite(n)) return "0";
+  const raw = String(v ?? "").trim();
+  const n = Math.abs(Number(raw || 0));
+  if (!Number.isFinite(n)) {
+    const m = raw.match(/^[-+]?(\d+)(?:\.(\d+))?$/);
+    if (!m) return "0";
+    const intPart = (m[1] || "0").replace(/^0+/, "") || "0";
+    const fracPart = (m[2] || "").replace(/0+$/, "");
+    const len = intPart.length;
+    if (len > 12) return `${intPart.slice(0, len - 12)}.${intPart.slice(len - 12, len - 10)}T`;
+    if (len > 9) return `${intPart.slice(0, len - 9)}.${intPart.slice(len - 9, len - 7)}B`;
+    if (len > 6) return `${intPart.slice(0, len - 6)}.${intPart.slice(len - 6, len - 4)}M`;
+    if (len > 3) return `${intPart.slice(0, len - 3)}.${intPart.slice(len - 3, len - 2)}K`;
+    return fracPart ? `${intPart}.${fracPart.slice(0, 4)}` : intPart;
+  }
   if (n >= 1000000) return fmtCompact(n);
   if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
   if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
   if (n >= 0.0001) return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
   return n.toExponential(2);
+}
+
+function parseBigIntSafe(v) {
+  try {
+    return BigInt(String(v ?? 0));
+  } catch (e) {
+    return 0n;
+  }
+}
+
+function pow10BigInt(n) {
+  const d = Math.max(0, Math.floor(Number(n || 0)));
+  let out = 1n;
+  for (let i = 0; i < d; i += 1) out *= 10n;
+  return out;
+}
+
+function txListRawToApproxAbs(raw, decimals) {
+  const bi = parseBigIntSafe(raw);
+  const abs = bi < 0n ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  let wholeNum = Number(whole);
+  if (!Number.isFinite(wholeNum)) wholeNum = Number.MAX_SAFE_INTEGER;
+  if (d <= 0) return wholeNum;
+  const fracStr = frac.toString().padStart(d, "0").slice(0, 8);
+  const fracNum = fracStr ? Number(`0.${fracStr}`) : 0;
+  return wholeNum + (Number.isFinite(fracNum) ? fracNum : 0);
+}
+
+function txListRawToDecimalText(raw, decimals, maxFrac = 8) {
+  const bi = parseBigIntSafe(raw);
+  const neg = bi < 0n;
+  const abs = neg ? -bi : bi;
+  const d = Math.max(0, Math.floor(Number(decimals || 0)));
+  const scale = pow10BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  if (d <= 0) return `${neg ? "-" : "+"}${whole.toString()}`;
+  let fracStr = frac.toString().padStart(d, "0").slice(0, Math.max(0, maxFrac));
+  fracStr = fracStr.replace(/0+$/, "");
+  return `${neg ? "-" : "+"}${whole.toString()}${fracStr ? `.${fracStr}` : ""}`;
+}
+
+function txListRememberCheckpointHint(tsMs, seq) {
+  if (!Number.isFinite(tsMs) || !Number.isFinite(seq)) return;
+  const s = Math.max(0, Math.floor(seq));
+  const existing = txListCheckpointHints.find((h) => h.seq === s);
+  if (existing) {
+    existing.tsMs = tsMs;
+  } else {
+    txListCheckpointHints.push({ tsMs, seq: s });
+  }
+  txListCheckpointHints.sort((a, b) => a.tsMs - b.tsMs);
+  if (txListCheckpointHints.length > 256) txListCheckpointHints.splice(0, txListCheckpointHints.length - 256);
+}
+
+function txListSearchBoundsFromHints(targetMs, latestSeq) {
+  if (!Number.isFinite(targetMs) || !Number.isFinite(latestSeq) || !txListCheckpointHints.length) {
+    return { lo: 0, hi: Math.max(0, Math.floor(Number(latestSeq || 0))) };
+  }
+  let lower = null;
+  let upper = null;
+  for (const h of txListCheckpointHints) {
+    if (h.tsMs <= targetMs) lower = h;
+    if (h.tsMs >= targetMs) { upper = h; break; }
+  }
+  const lo = lower ? Math.max(0, lower.seq) : 0;
+  const hiBase = upper ? upper.seq : Math.max(0, Math.floor(Number(latestSeq || 0)));
+  const hi = Math.min(Math.max(0, Math.floor(Number(latestSeq || 0))), Math.max(lo, hiBase));
+  return { lo, hi };
 }
 
 function txListBuildFlowSummary(balanceChanges, opts = {}) {
@@ -3766,25 +3853,28 @@ function txListBuildFlowSummary(balanceChanges, opts = {}) {
       if (!ownerNorm || bcOwner !== ownerNorm) continue;
     }
     const coinType = String(bc?.coinType?.repr || "");
-    const raw = Number(bc?.amount || 0);
-    if (!coinType || !Number.isFinite(raw) || raw === 0) continue;
+    const raw = parseBigIntSafe(bc?.amount || 0);
+    if (!coinType || raw === 0n) continue;
     const meta = resolveCoinType(coinType);
     const decimals = Number(meta?.decimals || 9);
-    const human = raw / Math.pow(10, decimals);
-    if (!Number.isFinite(human) || human === 0) continue;
     if (!byCoin[coinType]) {
       byCoin[coinType] = {
         coinType,
         symbol: meta?.symbol || shortType(coinType),
-        amount: 0,
+        decimals,
+        raw: 0n,
       };
     }
-    byCoin[coinType].amount += human;
+    byCoin[coinType].raw += raw;
   }
 
   const rows = Object.values(byCoin)
-    .filter((r) => Number.isFinite(r.amount) && r.amount !== 0)
-    .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+    .map((r) => ({
+      ...r,
+      absApprox: txListRawToApproxAbs(r.raw, r.decimals),
+    }))
+    .filter((r) => r.raw !== 0n)
+    .sort((a, b) => b.absApprox - a.absApprox);
 
   if (!rows.length) {
     return {
@@ -3795,7 +3885,12 @@ function txListBuildFlowSummary(balanceChanges, opts = {}) {
     };
   }
 
-  const partsAll = rows.map((r) => `${r.amount >= 0 ? "+" : "-"}${txListFormatTokenAmount(r.amount)} ${r.symbol}`);
+  const partsAll = rows.map((r) => {
+    const signed = txListRawToDecimalText(r.raw, r.decimals, 8);
+    const sign = signed.startsWith("-") ? "-" : "+";
+    const absText = signed.replace(/^[-+]/, "");
+    return `${sign}${txListFormatTokenAmount(absText)} ${r.symbol}`;
+  });
   const partsShown = partsAll.slice(0, Math.max(1, maxItems));
   const more = partsAll.length > partsShown.length ? `, +${partsAll.length - partsShown.length} more` : "";
   const partialSuffix = partial ? " (partial window)" : "";
@@ -3867,6 +3962,7 @@ async function txListFetchLatestCheckpointHead(force = false) {
     tsMs: Number.isFinite(tsMs) ? tsMs : NaN,
     at: now,
   };
+  txListRememberCheckpointHint(txListLatestCheckpointCache.tsMs, txListLatestCheckpointCache.seq);
   return txListLatestCheckpointCache;
 }
 
@@ -3874,19 +3970,48 @@ async function txListFetchCheckpointTimestampMs(sequenceNumber) {
   const seq = Math.max(0, Math.floor(Number(sequenceNumber || 0)));
   const key = String(seq);
   if (Number.isFinite(txListCheckpointTsCache[key])) return txListCheckpointTsCache[key];
-  const data = await gql(`query($seq: UInt53) {
-    checkpoint(sequenceNumber: $seq) { sequenceNumber timestamp }
-  }`, { seq });
-  const tsMs = parseTsMs(data?.checkpoint?.timestamp);
-  txListCheckpointTsCache[key] = Number.isFinite(tsMs) ? tsMs : NaN;
-  return txListCheckpointTsCache[key];
+  if (txListCheckpointTsInFlight[key]) return txListCheckpointTsInFlight[key];
+  txListCheckpointTsInFlight[key] = (async () => {
+    const data = await gql(`query($seq: UInt53) {
+      checkpoint(sequenceNumber: $seq) { sequenceNumber timestamp }
+    }`, { seq });
+    const tsMs = parseTsMs(data?.checkpoint?.timestamp);
+    txListCheckpointTsCache[key] = Number.isFinite(tsMs) ? tsMs : NaN;
+    if (Number.isFinite(txListCheckpointTsCache[key])) txListRememberCheckpointHint(txListCheckpointTsCache[key], seq);
+    return txListCheckpointTsCache[key];
+  })().finally(() => {
+    delete txListCheckpointTsInFlight[key];
+  });
+  return txListCheckpointTsInFlight[key];
+}
+
+function txListBuildRows(txs) {
+  return (txs || []).map((tx) => {
+    const intent = analyzeTxIntent(tx);
+    const balanceConn = tx?.effects?.balanceChanges;
+    const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
+      ownerAddress: tx?.sender?.address || "",
+      partial: !!balanceConn?.pageInfo?.hasNextPage,
+    });
+    return {
+      tx,
+      intent,
+      flow,
+      summary: flow.hasFlows ? flow.text : intent.label,
+    };
+  });
 }
 
 async function txListFindCheckpointAtOrAfterMs(targetMs, latestSeq) {
-  let lo = 0;
-  let hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  const hinted = txListSearchBoundsFromHints(targetMs, latestSeq);
+  let lo = hinted.lo;
+  let hi = hinted.hi;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) {
+    lo = 0;
+    hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  }
   let steps = 0;
-  while (lo < hi && steps < 40) {
+  while (lo < hi && steps < 32) {
     steps += 1;
     const mid = Math.floor((lo + hi) / 2);
     const midTs = await txListFetchCheckpointTimestampMs(mid);
@@ -3898,10 +4023,15 @@ async function txListFindCheckpointAtOrAfterMs(targetMs, latestSeq) {
 }
 
 async function txListFindCheckpointAtOrBeforeMs(targetMs, latestSeq) {
-  let lo = 0;
-  let hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  const hinted = txListSearchBoundsFromHints(targetMs, latestSeq);
+  let lo = hinted.lo;
+  let hi = hinted.hi;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) {
+    lo = 0;
+    hi = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  }
   let steps = 0;
-  while (lo < hi && steps < 40) {
+  while (lo < hi && steps < 32) {
     steps += 1;
     const mid = Math.floor((lo + hi + 1) / 2);
     const midTs = await txListFetchCheckpointTimestampMs(mid);
@@ -3943,8 +4073,10 @@ async function txListResolveDateFilter(state) {
 
   const clampedToMs = Math.min(toMs, latest.tsMs);
   const clampedFromMs = Math.min(fromMs, clampedToMs);
-  const startSeq = await txListFindCheckpointAtOrAfterMs(clampedFromMs, latest.seq);
-  const endSeq = await txListFindCheckpointAtOrBeforeMs(clampedToMs, latest.seq);
+  const [startSeq, endSeq] = await Promise.all([
+    txListFindCheckpointAtOrAfterMs(clampedFromMs, latest.seq),
+    txListFindCheckpointAtOrBeforeMs(clampedToMs, latest.seq),
+  ]);
   const lo = Math.max(0, Math.min(startSeq, endSeq) - TX_LIST_CHECKPOINT_PADDING);
   const hi = Math.min(latest.seq, Math.max(startSeq, endSeq) + TX_LIST_CHECKPOINT_PADDING);
   const note = `Timestamp range mapped to checkpoint bounds ~${fmtNumber(lo)} to ~${fmtNumber(hi)}.`;
@@ -4006,20 +4138,7 @@ async function renderTransactions(app, before = null, dateState = null) {
     }
   }
 
-  const txRows = txs.map((tx) => {
-    const intent = analyzeTxIntent(tx);
-    const balanceConn = tx?.effects?.balanceChanges;
-    const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
-      ownerAddress: tx?.sender?.address || "",
-      partial: !!balanceConn?.pageInfo?.hasNextPage,
-    });
-    return {
-      tx,
-      intent,
-      flow,
-      summary: flow.hasFlows ? flow.text : intent.label,
-    };
-  });
+  const txRows = txListBuildRows(txs);
 
   const emptyMsg = state.preset === "all"
     ? "No transactions found."
@@ -7914,20 +8033,7 @@ async function renderAddress(app, addr) {
 
   const tabContent = {
     txs: () => {
-      const txRows = allTxs.map((tx) => {
-        const intent = analyzeTxIntent(tx);
-        const balanceConn = tx?.effects?.balanceChanges;
-        const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
-          ownerAddress: tx?.sender?.address || "",
-          partial: !!balanceConn?.pageInfo?.hasNextPage,
-        });
-        return {
-          tx,
-          intent,
-          flow,
-          summary: flow.hasFlows ? flow.text : intent.label,
-        };
-      });
+      const txRows = txListBuildRows(allTxs);
       const txBody = txLoading
         ? renderLoading()
         : (txLoadError
@@ -8433,20 +8539,7 @@ async function renderAddress(app, addr) {
     }
     if (action === "addr-tx-export-csv") {
       if (trigger.hasAttribute("disabled")) return;
-      const txRows = allTxs.map((tx) => {
-        const intent = analyzeTxIntent(tx);
-        const balanceConn = tx?.effects?.balanceChanges;
-        const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
-          ownerAddress: tx?.sender?.address || "",
-          partial: !!balanceConn?.pageInfo?.hasNextPage,
-        });
-        return {
-          tx,
-          intent,
-          flow,
-          summary: flow.hasFlows ? flow.text : intent.label,
-        };
-      });
+      const txRows = txListBuildRows(allTxs);
       if (!txRows.length) return;
       const stamp = new Date().toISOString().slice(0, 10);
       const idPart = normalizeSuiAddress(addr).slice(2, 10) || "address";
