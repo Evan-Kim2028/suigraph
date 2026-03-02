@@ -690,7 +690,7 @@
     .jtree-wrap { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px 14px; max-height:500px; overflow:auto; position:relative; }
     .jtree-wrap .jtree-copy { position:absolute; top:6px; right:8px; background:var(--surface2); border:1px solid var(--border); border-radius:4px; color:var(--text-dim); font-size:11px; padding:2px 8px; cursor:pointer; opacity:0; transition:opacity .15s; z-index:1; }
     .jtree-wrap:hover .jtree-copy { opacity:1; }
-    .jtree-copy:hover { color:var(--text); background:var(--card); }
+    .jtree-copy:hover { color:var(--text); background:var(--surface); }
     .jtree-k { color:var(--purple); }
     .jtree-s { color:var(--green); }
     .jtree-n { color:var(--blue); }
@@ -910,7 +910,7 @@
     .nav-dropdown > .nav-trigger { cursor:pointer; padding:6px 10px; font-size:13px; color:var(--text-dim); background:none; border:none; font-family:inherit; display:inline-flex; align-items:center; gap:4px; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
     .nav-dropdown > .nav-trigger:hover, .nav-dropdown > .nav-trigger.active { color:var(--text); }
     .nav-dropdown > .nav-trigger::after { content:"▾"; font-size:10px; }
-    .nav-dropdown .dropdown-menu { display:none; position:absolute; top:calc(100% + 4px); left:0; background:var(--card); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.4); min-width:170px; padding:4px 0; z-index:9999; }
+    .nav-dropdown .dropdown-menu { display:none; position:absolute; top:calc(100% + 4px); left:0; background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.4); min-width:170px; padding:4px 0; z-index:9999; }
     .nav-dropdown.open .dropdown-menu { display:block; }
     .dropdown-menu a { display:block; padding:10px 16px; font-size:14px; color:var(--text-dim); text-decoration:none; white-space:nowrap; -webkit-tap-highlight-color:transparent; }
     .dropdown-menu a:hover, .dropdown-menu a:active { background:var(--bg-light); color:var(--text); }
