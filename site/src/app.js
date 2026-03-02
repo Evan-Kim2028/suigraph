@@ -796,12 +796,12 @@ const ALPHA_POSITIONS_TABLE = "0x9923cec7b613e58cc3feec1e8651096ad7970c0b4ef28b8
 const ALPHA_CAP_TYPE = `${ALPHA_PKG}::position::PositionCap`;
 const ALPHA_MARKETS = {
   1:"SUI", 2:"stSUI", 3:"BTC", 4:"LBTC", 5:"USDT", 6:"USDC",
-  7:"WAL", 8:"DEEP", 9:"BLUE", 10:"ETH",
+  7:"WAL", 8:"DEEP", 9:"BLUE", 10:"ETH", 11:"DEEP",
   12:"ALPHA", 13:"DMC", 14:"TBTC", 15:"IKA",
   16:"XBTC", 17:"ALKIMI", 18:"XAUM", 19:"UP",
   20:"EBTC", 21:"ESUI", 22:"EGUSDC", 23:"ETHIRD",
   24:"EXBTC", 25:"SDEUSD", 26:"EWAL", 27:"RCUSDP",
-  28:"COIN", 29:"WBTC", 30:"BTCVC", 31:"SUI_USDE",
+  28:"COIN", 29:"WBTC", 30:"BTCVC", 31:"SUI_USDE", 32:"dbUSDC",
 };
 
 // Cetus CLMM
@@ -4324,38 +4324,25 @@ async function fetchSuiPriceFromDeepBook() {
 }
 
 // ── Pool Oracle: on-chain pricing via Cetus + Bluefin CLMM pools ──────
-async function discoverPoolAddresses(coinTypes) {
-  const now = Date.now();
-  const needed = coinTypes.filter(ct => {
-    const c = poolAddressCache[ct];
-    return !c || (now - c.ts > POOL_ORACLE_DISCOVERY_TTL_MS);
-  });
-  if (!needed.length) return;
-
-  // Optimized: Cetus-only (most liquidity), SUI-quote-only (convert via SUI price)
-  // 2 aliases per token (both orderings) instead of 8
+async function _discoverPoolsForDex(needed, prefix, dex, suiType, usdcType) {
   const aliases = [];
   const aliasMeta = [];
-  const suiType = QUOTE_COINS.SUI.type;
   for (const ct of needed) {
-    if (ct === suiType) continue;
+    if (ct === suiType || ct === usdcType) continue;
     // TOKEN/SUI
-    const ab = `${CETUS_POOL_TYPE_PREFIX}<${ct}, ${suiType}>`;
-    const aliasAB = `a${aliases.length}`;
-    aliases.push(`${aliasAB}: objects(filter: { type: "${ab}" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
-    aliasMeta.push({ coinType: ct, dex: "cetus", quoteSymbol: "SUI", isTokenA: true });
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${suiType}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "SUI", isTokenA: true });
     // SUI/TOKEN
-    const ba = `${CETUS_POOL_TYPE_PREFIX}<${suiType}, ${ct}>`;
-    const aliasBA = `a${aliases.length}`;
-    aliases.push(`${aliasBA}: objects(filter: { type: "${ba}" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
-    aliasMeta.push({ coinType: ct, dex: "cetus", quoteSymbol: "SUI", isTokenA: false });
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${suiType}, ${ct}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "SUI", isTokenA: false });
+    // TOKEN/USDC
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${usdcType}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "USDC", isTokenA: true });
+    // USDC/TOKEN
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${usdcType}, ${ct}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex, quoteSymbol: "USDC", isTokenA: false });
   }
   if (!aliases.length) return;
-
-  // Reset stale entries before re-populating to prevent duplicate accumulation
-  for (const ct of needed) poolAddressCache[ct] = { pools: [], ts: 0 };
-
-  // 6 aliases per chunk, all chunks in parallel
   const chunks = chunkArray(aliases.map((a, i) => ({ alias: a, meta: aliasMeta[i] })), 6);
   const CONCURRENCY = 10;
   for (let start = 0; start < chunks.length; start += CONCURRENCY) {
@@ -4372,19 +4359,45 @@ async function discoverPoolAddresses(coinTypes) {
           for (const node of poolNodes) {
             const json = node.asMoveObject?.contents?.json;
             const liq = Number(json?.liquidity || 0);
-            if (liq <= 0) continue; // skip dead pools
+            if (liq <= 0) continue;
             poolAddressCache[meta.coinType].pools.push({
-              address: node.address,
-              dex: meta.dex,
-              quoteSymbol: meta.quoteSymbol,
-              isTokenA: meta.isTokenA,
+              address: node.address, dex: meta.dex,
+              quoteSymbol: meta.quoteSymbol, isTokenA: meta.isTokenA,
               typeRepr: node.asMoveObject?.contents?.type?.repr || "",
             });
           }
         }
-      } catch (e) { console.warn("[pool-oracle] discovery chunk error:", e?.message || e); }
+      } catch (e) { console.warn(`[pool-oracle] ${dex} discovery error:`, e?.message || e); }
     }));
   }
+}
+
+async function discoverPoolAddresses(coinTypes) {
+  const now = Date.now();
+  const needed = coinTypes.filter(ct => {
+    const c = poolAddressCache[ct];
+    return !c || (now - c.ts > POOL_ORACLE_DISCOVERY_TTL_MS);
+  });
+  if (!needed.length) return;
+
+  const suiType = QUOTE_COINS.SUI.type;
+  const usdcType = QUOTE_COINS.USDC.type;
+
+  // Reset stale entries before re-populating
+  for (const ct of needed) poolAddressCache[ct] = { pools: [], ts: 0 };
+
+  // Pass 1: Cetus pools (primary — most tokens have Cetus liquidity)
+  await _discoverPoolsForDex(needed, CETUS_POOL_TYPE_PREFIX, "cetus", suiType, usdcType);
+
+  // Pass 2: Bluefin pools (fallback — only for tokens with no Cetus pools)
+  const needBluefin = needed.filter(ct => {
+    const cached = poolAddressCache[ct];
+    return !cached || !cached.pools.length;
+  });
+  if (needBluefin.length) {
+    await _discoverPoolsForDex(needBluefin, BLUEFIN_POOL_TYPE_PREFIX, "bluefin", suiType, usdcType);
+  }
+
   // Update timestamps
   for (const ct of needed) poolAddressCache[ct].ts = now;
 }
@@ -7156,12 +7169,17 @@ async function fetchAftermathOrdersFromMap(mapId, side, market, accountSet) {
         const expirationRaw = kv?.val?.expiration_timestamp_ms;
         const expirationNum = Number(expirationRaw);
         const expirationMs = Number.isFinite(expirationNum) && expirationNum > 0 ? expirationNum : NaN;
+        // ordered_map key encodes (price << 64 | sequence); price in 1e9 fixed-point
+        const orderKeyBig = parseBigIntSafe(kv?.key || 0);
+        const priceTicks = orderKeyBig >> 64n;
+        const price = Number(priceTicks) / 1e9;
         orders.push({
           market: market?.label || afMarketLabel(market?.id || ""),
           chId: market?.id || "",
           accountId,
           side,
           orderId,
+          price: Number.isFinite(price) && price > 0 ? price : NaN,
           sizeRaw,
           size: scaledBigIntToApprox(sizeRaw, AF_ORDER_SIZE_DECIMALS, 8),
           sizeText: scaledBigIntToText(sizeRaw, AF_ORDER_SIZE_DECIMALS, 8),
@@ -7408,6 +7426,19 @@ async function fetchAftermathPerpsPositions(addr) {
       || String(a.accountId || "").localeCompare(String(b.accountId || ""))
       || (a.side === b.side ? 0 : (a.side === "long" ? -1 : 1))
       || (b.size || 0) - (a.size || 0));
+
+    // Derive XAUM (gold) price from XAUT/USD order prices if no DEX liquidity exists
+    if (!defiPrices.XAUM || defiPrices.XAUM <= 0) {
+      const goldOrders = orders.filter(o => (o.market || "").includes("XAUT") && Number.isFinite(o.price) && o.price > 0);
+      if (goldOrders.length) {
+        const mid = goldOrders.reduce((s, o) => s + o.price, 0) / goldOrders.length;
+        if (mid > 0) defiPrices.XAUM = mid;
+      } else {
+        // Fall back to position entry price
+        const goldPos = positions.filter(p => (p.market || "").includes("XAUT") && Number.isFinite(p.entryPrice) && p.entryPrice > 0);
+        if (goldPos.length) defiPrices.XAUM = goldPos[0].entryPrice;
+      }
+    }
 
     return {
       accounts: caps,
@@ -7712,8 +7743,10 @@ async function renderAddress(app, addr) {
     html += `<div class="stat-box"><div class="stat-label">Net Worth</div><div class="stat-value" style="color:${netWorth >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsdFromFloat(Math.abs(netWorth))}</div></div>`;
     if (totalWallet > 0) html += `<div class="stat-box"><div class="stat-label">Wallet</div><div class="stat-value u-c-purple">${fmtUsdFromFloat(totalWallet)}</div><div class="stat-sub">${regularBals.length} tokens</div></div>`;
     if (totalLst > 0) html += `<div class="stat-box"><div class="stat-label">Liquid Staking</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalLst)}</div><div class="stat-sub">${lstBals.length} LSTs</div></div>`;
-    if (totalSupplied > 0) html += `<div class="stat-box"><div class="stat-label">Supplied / Collateral</div><div class="stat-value u-c-green">${fmtUsdFromFloat(totalSupplied)}</div></div>`;
-    if (totalBorrowed > 0) html += `<div class="stat-box"><div class="stat-label">Borrowed</div><div class="stat-value u-c-yellow">${fmtUsdFromFloat(totalBorrowed)}</div></div>`;
+    if (totalSupplied > 0 || totalBorrowed > 0) {
+      const netSupply = totalSupplied - totalBorrowed;
+      html += `<div class="stat-box"><div class="stat-label">Net Supply</div><div class="stat-value" style="color:${netSupply >= 0 ? 'var(--green)' : 'var(--red)'}">${netSupply >= 0 ? '' : '-'}${fmtUsdFromFloat(Math.abs(netSupply))}</div><div class="stat-sub">${fmtUsdFromFloat(totalSupplied)} supplied · ${fmtUsdFromFloat(totalBorrowed)} borrowed</div></div>`;
+    }
     if (totalDexLp > 0) html += `<div class="stat-box"><div class="stat-label">DEX LP</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalDexLp)}</div><div class="stat-sub">${allDexLp.length} positions</div></div>`;
     if (db.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">DeepBook Margin</div><div class="stat-value u-c-accent">${db.positions.length}</div><div class="stat-sub">positions</div></div>`;
     if (bluefinProData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Bluefin Perps</div><div class="stat-value u-c-blue">${bluefinProData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(bluefinProData.collateral)} collateral</div></div>`;
@@ -7767,18 +7800,20 @@ async function renderAddress(app, addr) {
         if (pos.deposits?.length) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Supply</div>`;
           for (const d of pos.deposits) {
+            const liveUsd = d.amountUsd > 0 ? d.amountUsd : (d.amount > 0 && defiPrices[d.symbol] > 0 ? d.amount * defiPrices[d.symbol] : 0);
             const fmtAmt = d.amount > 0 ? (d.amount >= 1000 ? fmtCompact(d.amount) : d.amount >= 1 ? d.amount.toFixed(1) : d.amount >= 0.01 ? d.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : d.amount.toFixed(8)) : "";
             const amtCell = fmtAmt ? fmtAmt + " " + d.symbol : '<span class="trunc-note">inc_data</span>';
-            const usdCell = d.amountUsd > 0 ? fmtUsdFromFloat(d.amountUsd) : '<span class="trunc-note">inc_data</span>';
+            const usdCell = liveUsd > 0 ? fmtUsdFromFloat(liveUsd) : '<span class="trunc-note">inc_data</span>';
             html += `<div style="display:grid;grid-template-columns:90px 1fr auto;gap:6px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${d.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${amtCell}</span><span class="u-c-green" style="font-family:var(--mono);font-size:12px;text-align:right">${usdCell}</span></div>`;
           }
         }
         if (pos.borrows?.length) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Borrow</div>`;
           for (const b of pos.borrows) {
+            const liveUsd = b.amountUsd > 0 ? b.amountUsd : (b.amount > 0 && defiPrices[b.symbol] > 0 ? b.amount * defiPrices[b.symbol] : 0);
             const fmtAmt = b.amount > 0 ? (b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)) : "";
             const amtCell = fmtAmt ? fmtAmt + " " + b.symbol : '<span class="trunc-note">inc_data</span>';
-            const usdCell = b.amountUsd > 0 ? fmtUsdFromFloat(b.amountUsd) : '<span class="trunc-note">inc_data</span>';
+            const usdCell = liveUsd > 0 ? fmtUsdFromFloat(liveUsd) : '<span class="trunc-note">inc_data</span>';
             html += `<div style="display:grid;grid-template-columns:90px 1fr auto;gap:6px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${b.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${amtCell}</span><span class="u-c-red" style="font-family:var(--mono);font-size:12px;text-align:right">${usdCell}</span></div>`;
           }
         }
@@ -7936,7 +7971,7 @@ async function renderAddress(app, addr) {
       }
       if (afPerpsData.orders.length) {
         html += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.positions.length ? "8px" : "0"} 0 6px">Open Orders (Resting/Maker)</div>`;
-        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Type</th><th class="u-ta-right">Reduce Only</th><th class="u-ta-right">Expires</th><th class="u-ta-right">Last Activity</th><th class="u-ta-right">Order ID</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
+        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th class="u-ta-right">Limit Price</th><th>Type</th><th class="u-ta-right">Reduce Only</th><th class="u-ta-right">Expires</th><th class="u-ta-right">Last Activity</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
         for (const o of afPerpsData.orders) {
           const sideLabel = o.side === "long" ? "BID" : o.side === "short" ? "ASK" : "FLAT";
           const sideColor = o.side === "long" ? "var(--green)" : o.side === "short" ? "var(--red)" : "var(--text-dim)";
@@ -7954,15 +7989,18 @@ async function renderAddress(app, addr) {
             ? `<span class="u-mono-11-dim" title="${escapeAttr(o.orderId)}">${escapeHtml(truncHash(o.orderId, 10))}</span>`
             : '<span class="u-c-dim">—</span>';
           const kindLabel = `${escapeHtml(o.kind || "Maker Limit")}${o.synthetic ? ' <span class="badge badge-fail">inferred</span>' : ""}`;
+          const priceText = Number.isFinite(o.price) && o.price > 0
+            ? `$${o.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
+            : '<span class="u-c-dim">—</span>';
           html += `<tr>
             <td style="font-weight:500">${escapeHtml(o.market || "Unknown")}</td>
             <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
             <td class="u-mono">${sizeText}</td>
+            <td class="u-ta-right-mono">${priceText}</td>
             <td>${kindLabel}</td>
             <td style="text-align:right;font-size:11px;color:var(--text-dim)">${o.reduceOnly ? "Yes" : "No"}</td>
             <td style="text-align:right">${expText}</td>
             <td style="text-align:right">${activityText}</td>
-            <td class="u-ta-right-mono">${orderIdLabel}</td>
             <td class="u-ta-right-mono">${escapeHtml(String(o.accountId || "—"))}</td>
           </tr>`;
         }
