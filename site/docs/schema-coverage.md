@@ -24,7 +24,7 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 | Root field | Static call sites |
 |---|---:|
 | `address` | 26 |
-| `object` | 15 |
+| `object` | 13 |
 | `checkpoint` | 10 |
 | `transactions` | 8 |
 | `checkpoints` | 4 |
