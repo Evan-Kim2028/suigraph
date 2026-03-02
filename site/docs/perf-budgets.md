@@ -1,6 +1,6 @@
 # Perf Budgets
 
-Generated: `2026-02-28T21:24:25.885Z`
+Generated: `2026-03-02T18:51:29.647Z`
 
 | Page | GQL call budget | Render budget (ms) | Budget source |
 |---|---:|---:|---|
@@ -13,7 +13,6 @@ Generated: `2026-02-28T21:24:25.885Z`
 | `defi-lst` | 20 | 2500 | declared |
 | `defi-overview` | 20 | 2500 | declared |
 | `defi-rates` | 20 | 2500 | declared |
-| `defi-risk` | 20 | 2500 | declared |
 | `defi-stablecoins` | 20 | 2500 | declared |
 | `docs` | 1 | 900 | declared |
 | `epoch` | 4 | 1200 | declared |
@@ -31,8 +30,8 @@ Generated: `2026-02-28T21:24:25.885Z`
 
 - Default GQL call budget: 12
 - Default render budget: 1800ms
-- Route pages discovered: 24
-- Explicit budget entries: 24
+- Route pages discovered: 23
+- Explicit budget entries: 23
 - Missing explicit entries: 0
 
 Missing pages: none

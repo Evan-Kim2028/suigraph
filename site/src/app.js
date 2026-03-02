@@ -305,18 +305,29 @@ function initPerfTooltip(el) {
 const GQL = "https://graphql.mainnet.sui.io/graphql";
 
 // ── DeFi Protocol Constants ────────────────────────────────────────────
-const COINGECKO_IDS = {
-  SUI: "sui", USDC: "usd-coin", WAL: "walrus-2", DEEP: "deep", USDT: "tether",
-  WBTC: "bitcoin", WETH: "ethereum", ETH: "ethereum", BTC: "bitcoin", NAVX: "navi", IKA: "ika",
-  CETUS: "cetus-token", HASUI: "sui", BUCK: "buck-stablecoin", FUD: "fud-the-pug", wUSDC: "usd-coin",
-  SPRING_SUI: "sui", MSUI: "sui", KSUI: "sui", CERT: "sui", stSUI: "sui", sSUI: "sui", SUI_USDE: "ethena-usde",
-  haSUI: "sui", afSUI: "sui", vSUI: "sui",
+// Pool oracle: on-chain pricing via Cetus + Bluefin CLMM pools
+const POOL_ORACLE_PRICE_TTL_MS = 15_000;
+const POOL_ORACLE_DISCOVERY_TTL_MS = 10 * 60_000;
+const CETUS_POOL_TYPE_PREFIX = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool";
+const BLUEFIN_POOL_TYPE_PREFIX = "0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267::pool::Pool";
+const QUOTE_COINS = {
+  SUI: { type: "0x2::sui::SUI", decimals: 9 },
+  USDC: { type: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", decimals: 6 },
 };
+const POOL_ORACLE_SKIP = new Set(["SUI", "USDC", "USDT", "wUSDC", "BUCK", "AUSD", "FDUSD", "USDY", "SUI_USDE", "suiUSDe"]);
+const SUI_PEGGED_SYMBOLS = new Set(["haSUI", "afSUI", "vSUI", "sSUI", "HASUI", "SPRING_SUI", "MSUI", "KSUI", "CERT", "stSUI", "mSUI", "kSUI"]);
+const BTC_PEGGED_SYMBOLS = new Set(["WBTC", "BTC", "LBTC", "stBTC", "enzoBTC", "MBTC", "YBTC", "XBTC", "EXBTC"]);
+const BTC_PRICE_SOURCE = "xBTC";
+let poolAddressCache = {};
+let oraclePricesTs = 0;
 const COMMON_DECIMALS = {
   SUI: 9, USDC: 6, USDT: 6, DEEP: 6, WAL: 9, WBTC: 8, WETH: 8, ETH: 8,
   NAVX: 9, CETUS: 9, BLUE: 9, MSUI: 9, KSUI: 9, CERT: 9, stSUI: 9,
   sSUI: 9, SPRING_SUI: 9, IKA: 9, HASUI: 9, haSUI: 9, afSUI: 9, vSUI: 9,
-  BUCK: 9, AUSD: 6, FUD: 5, XBTC: 8, SUI_USDE: 6, wUSDC: 6,
+  BUCK: 9, AUSD: 6, FUD: 5, XBTC: 8, wUSDC: 6, mSUI: 9, kSUI: 9,
+  BTC: 8, LBTC: 8, stBTC: 8, enzoBTC: 8, MBTC: 8, YBTC: 8, xBTC: 8,
+  SOL: 8, NS: 6, SEND: 6, HAEDAL: 9, ALKIMI: 9, XAUM: 9, UP: 6,
+  FDUSD: 6, USDY: 6, SUI_USDE: 6, suiUSDe: 6,
 };
 let defiPrices = {};
 const DEEPBOOK_SPOT_PACKAGE = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809";
@@ -326,7 +337,6 @@ const DEEPBOOK_QUOTE_DECIMALS = 6; // USDC
 const DEEPBOOK_PRICE_LOOKBACK_VERSIONS = 12;
 const DEEPBOOK_PRICE_EVENTS_PER_TX = 30;
 const DEEPBOOK_SUI_PRICE_TTL_MS = 15 * 1000;
-const COINGECKO_PRICE_TTL_MS = 60 * 1000;
 const DEFI_ACTIVITY_TTL_MS = 25 * 1000;
 const DEFI_OVERVIEW_TTL_MS = 45 * 1000;
 const DEFI_DEX_TTL_MS = 30 * 1000;
@@ -359,7 +369,6 @@ const DEFI_WINDOW_SAMPLE_TTL_MS = 20 * 1000;
 const DEFI_WINDOW_SHARED_TTL_MS = 20 * 1000;
 const DASH_EPOCHS_TTL_MS = 60 * 1000;
 let deepbookSuiPriceTs = 0;
-let coinGeckoPricesTs = 0;
 let defiPricesInFlight = null;
 const LENDING_RATES_TTL_MS = 60 * 1000;
 let lendingRatesCache = { data: null, ts: 0 };
@@ -382,41 +391,55 @@ let dashboardEpochsCache = { data: null, ts: 0, inFlight: null };
 // Fixes decimal parsing for bridge tokens whose type ends in ::coin::COIN etc.
 const KNOWN_COIN_TYPES = {
   "0x2::sui::SUI": { symbol: "SUI", decimals: 9 },
-  // Native USDC (Circle)
+  // ── Stablecoins ──
   "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC": { symbol: "USDC", decimals: 6 },
-  // Wormhole bridged USDC
   "0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN": { symbol: "wUSDC", decimals: 6 },
-  // Wormhole bridged USDT
   "0xc060006111016b8a020ad5b33834984a437aaa7d3c74c18e09a95d48aceab08c::coin::COIN": { symbol: "USDT", decimals: 6 },
-  // Sui Bridge USDT
   "0x375f70cf2ae4c00bf37117d0c85a2c71545e6ee05c4a5c7d282cd66a4504b068::usdt::USDT": { symbol: "USDT", decimals: 6 },
-  // Wormhole ETH
-  "0xaf8cd5edc19c4512f4259f0bee101a40d41ebed738ade5874359610ef8eeced5::coin::COIN": { symbol: "WETH", decimals: 8 },
-  // Wormhole BTC
-  "0x027792d9fed7f9844eb4839566001bb6f6cb4804f66aa2da6fe1ee242d896881::coin::COIN": { symbol: "WBTC", decimals: 8 },
-  // Sui Bridge ETH
-  "0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH": { symbol: "ETH", decimals: 8 },
-  // Sui Bridge BTC
-  "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC": { symbol: "BTC", decimals: 8 },
-  // CETUS
-  "0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS": { symbol: "CETUS", decimals: 9 },
-  // DEEP
-  "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP": { symbol: "DEEP", decimals: 6 },
-  // WAL
-  "0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL": { symbol: "WAL", decimals: 9 },
-  // NAVX
-  "0xa99b8952d4f7d947ea77fe0ecdcc9e5fc0bcab2841d6e2a5aa00c3044e5544b5::navx::NAVX": { symbol: "NAVX", decimals: 9 },
-  // BUCK stablecoin
   "0xce7ff77a83ea0cb6fd39bd8748e2ec89a3f41e8efdc3f4eb123e0ca37b184db2::buck::BUCK": { symbol: "BUCK", decimals: 9 },
-  // LSTs
+  "0x2053d08c1e2bd02791056171aab0fd12bd7cd7efad2ab8f6b9c8902f14df2ff2::ausd::AUSD": { symbol: "AUSD", decimals: 6 },
+  "0xf16e6b723f242ec745dfd7634ad072c42d5c1d9ac9d62a39c381303eaa57693a::fdusd::FDUSD": { symbol: "FDUSD", decimals: 6 },
+  "0x960b531667636f39e85867775f52f6b1f220a058c4de786905bdf761e06a56bb::usdy::USDY": { symbol: "USDY", decimals: 6 },
+  "0xd1b72982e40348d069bb1ff701e634c117bb5f741f44dff91e472d3b01461e55::usde::USDE": { symbol: "SUI_USDE", decimals: 6 },
+  "0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE": { symbol: "suiUSDe", decimals: 6 },
+  // ── ETH variants ──
+  "0xaf8cd5edc19c4512f4259f0bee101a40d41ebed738ade5874359610ef8eeced5::coin::COIN": { symbol: "WETH", decimals: 8 },
+  "0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH": { symbol: "ETH", decimals: 8 },
+  // ── BTC variants ──
+  "0x027792d9fed7f9844eb4839566001bb6f6cb4804f66aa2da6fe1ee242d896881::coin::COIN": { symbol: "WBTC", decimals: 8 },
+  "0x0041f9f9344cac094454cd574e333c4fdb132d7bcc9379bcd4aab485b2a63942::wbtc::WBTC": { symbol: "WBTC", decimals: 8 },
+  "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC": { symbol: "BTC", decimals: 8 },
+  "0x876a4b7bce8aeaef60464c11f4026903e9afacab79b9b142686158aa86560b50::xbtc::XBTC": { symbol: "xBTC", decimals: 8 },
+  "0x3e8e9423d80e1774a7ca128fccd8bf5f1f7753be658c5e645929037f7c819040::lbtc::LBTC": { symbol: "LBTC", decimals: 8 },
+  "0x5f496ed5d9d045c5b788dc1bb85f54100f2ede11e46f6a232c29daada4c5bdb6::coin::COIN": { symbol: "stBTC", decimals: 8 },
+  "0x8f2b5eb696ed88b71fea398d330bccfa52f6e2a5a8e1ac6180fcb25c6de42ebc::coin::COIN": { symbol: "enzoBTC", decimals: 8 },
+  "0xd1a91b46bd6d966b62686263609074ad16cfdffc63c31a4775870a2d54d20c6b::mbtc::MBTC": { symbol: "MBTC", decimals: 8 },
+  "0xa03ab7eee2c8e97111977b77374eaf6324ba617e7027382228350db08469189e::ybtc::YBTC": { symbol: "YBTC", decimals: 8 },
+  // ── SOL ──
+  "0xb7844e289a8410e50fb3ca48d69eb9cf29e27d223ef90353fe1bd8e27ff8f3f8::coin::COIN": { symbol: "SOL", decimals: 8 },
+  // ── LSTs ──
   "0x83556891f4a0f233ce7b05cfe7f957d4020492a34f5405b2cb9377d060bef4bf::spring_sui::SPRING_SUI": { symbol: "sSUI", decimals: 9 },
   "0xbde4ba4c2e274a60ce15c1cfff9e5c42e41654ac8b6d906a57efa4bd3c29f47d::hasui::HASUI": { symbol: "haSUI", decimals: 9 },
   "0xf325ce1300e8dac124071d3152c5c5ee6174914f8bc2161e88329cf579246efc::afsui::AFSUI": { symbol: "afSUI", decimals: 9 },
   "0x549e8b69270defbfafd4f94e17ec44cdbdd99820b33bda2278dea3b9a32d3f55::cert::CERT": { symbol: "vSUI", decimals: 9 },
-  // Ethena USDe
-  "0xd1b72982e40348d069bb1ff701e634c117bb5f741f44dff91e472d3b01461e55::usde::USDE": { symbol: "SUI_USDE", decimals: 6 },
-  // IKA
+  "0x922d15d7f55c13fd790f6e54397470ec592caa2b508df292a2e8553f3d3b274f::msui::MSUI": { symbol: "mSUI", decimals: 9 },
+  "0x41ff228bfd566f0c707173ee6413962a77e3929588d010250e4e76f0d1cc0ad4::ksui::KSUI": { symbol: "kSUI", decimals: 9 },
+  "0xd1b72982e40348d069bb1ff701e634c117bb5f741f44dff91e472d3b01461e55::stsui::STSUI": { symbol: "stSUI", decimals: 9 },
+  // ── DeFi protocol tokens ──
+  "0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS": { symbol: "CETUS", decimals: 9 },
+  "0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP": { symbol: "DEEP", decimals: 6 },
+  "0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL": { symbol: "WAL", decimals: 9 },
+  "0xa99b8952d4f7d947ea77fe0ecdcc9e5fc0bcab2841d6e2a5aa00c3044e5544b5::navx::NAVX": { symbol: "NAVX", decimals: 9 },
+  "0xe1b45a0e641b9955a20aa0ad1c1f4ad86aad8afb07296d4085e349a50e90bdca::blue::BLUE": { symbol: "BLUE", decimals: 9 },
+  "0x5145494a5f5100e645e4b0aa950fa6b68f614e8c59e17bc5ded3495123a79178::ns::NS": { symbol: "NS", decimals: 6 },
+  "0x3a304c7feba2d819ea57c3542d68439ca2c386ba02159c740f7b406e592c62ea::haedal::HAEDAL": { symbol: "HAEDAL", decimals: 9 },
+  "0xb45fcfcc2cc07ce0702cc2d229621e046c906ef14d9b25e8e4d25f6e8763fef7::send::SEND": { symbol: "SEND", decimals: 6 },
   "0x3c1e5a06dfa28e3823c6a2e9b999f74c12b3e72d38e4a056be0e0bb22df3bb1a::ika::IKA": { symbol: "IKA", decimals: 9 },
+  "0x7262fb2f7a3a14c888c438a3cd9b912469a58cf60f367352c46584262e8299aa::ika::IKA": { symbol: "IKA", decimals: 9 },
+  "0x1a8f4bc33f8ef7fbc851f156857aa65d397a6a6fd27a7ac2ca717b51f2fd9489::alkimi::ALKIMI": { symbol: "ALKIMI", decimals: 9 },
+  "0x9d297676e7a4b771ab023291377b2adfaa4938fb9080b8d12430e4b108b836a9::xaum::XAUM": { symbol: "XAUM", decimals: 9 },
+  "0x76cb819b01abed502bee8a702b4c2d547532c12f25001c9dea795a5e631c26f1::fud::FUD": { symbol: "FUD", decimals: 5 },
+  "0x87dfe1248a1dc4ce473bd9cb2937d66cdc6c30fee63f3fe0dbb55c7a09d35dec::up::UP": { symbol: "UP", decimals: 6 },
 };
 
 // Stablecoin types for supply tracking (all via GraphQL)
@@ -442,14 +465,29 @@ const STABLECOINS_PROTOCOL = [
   { objAddr: BUCK_PROTOCOL_OBJ, supplyPath: "buck_treasury_cap.total_supply.value", symbol: "BUCK", decimals: 9, color: "#F5A623" },
 ];
 
+// Normalize a full coin type by stripping leading zeros from the address portion.
+// On-chain type.repr uses padded 64-char hex (0x0000...0002::sui::SUI) but
+// KNOWN_COIN_TYPES uses short form (0x2::sui::SUI). This ensures lookups match.
+function normalizeCoinType(coinType) {
+  if (!coinType) return coinType;
+  const sep = coinType.indexOf("::");
+  if (sep <= 2) return coinType;
+  const addr = coinType.slice(0, sep);
+  const rest = coinType.slice(sep);
+  const hex = addr.startsWith("0x") ? addr.slice(2) : addr;
+  const short = "0x" + (hex.replace(/^0+/, "") || "0");
+  return short + rest;
+}
+
 // Resolve a full coin type string to { symbol, decimals } (sync, fast path)
 function resolveCoinType(coinType) {
   if (!coinType) return { symbol: "?", decimals: 9 };
-  const known = KNOWN_COIN_TYPES[coinType];
+  const known = KNOWN_COIN_TYPES[coinType] || KNOWN_COIN_TYPES[normalizeCoinType(coinType)];
   if (known) return known;
   // Check if coinMetaCache has it (populated by prefetchCoinMeta or getCoinMeta)
-  if (typeof coinMetaCache !== "undefined" && coinMetaCache[coinType]) {
-    const m = coinMetaCache[coinType];
+  const normalized = normalizeCoinType(coinType);
+  if (typeof coinMetaCache !== "undefined" && (coinMetaCache[coinType] || coinMetaCache[normalized])) {
+    const m = coinMetaCache[coinType] || coinMetaCache[normalized];
     return { symbol: m.symbol, decimals: m.decimals };
   }
   const sym = coinType.split("::").pop() || "?";
@@ -758,7 +796,7 @@ const ALPHA_POSITIONS_TABLE = "0x9923cec7b613e58cc3feec1e8651096ad7970c0b4ef28b8
 const ALPHA_CAP_TYPE = `${ALPHA_PKG}::position::PositionCap`;
 const ALPHA_MARKETS = {
   1:"SUI", 2:"stSUI", 3:"BTC", 4:"LBTC", 5:"USDT", 6:"USDC",
-  7:"WAL", 8:"DEEP", 9:"BLUE", 10:"ETH", 11:"DEEP",
+  7:"WAL", 8:"DEEP", 9:"BLUE", 10:"ETH",
   12:"ALPHA", 13:"DMC", 14:"TBTC", 15:"IKA",
   16:"XBTC", 17:"ALKIMI", 18:"XAUM", 19:"UP",
   20:"EBTC", 21:"ESUI", 22:"EGUSDC", 23:"ETHIRD",
@@ -989,10 +1027,14 @@ function coinTypeKey(coinType) {
   return `${addr}::${parts.slice(1).join("::").toLowerCase()}`;
 }
 function tokenFromCoinType(coinType) {
-  const key = coinTypeKey(coinType);
-  if (key.endsWith("::sui::sui")) return "SUI";
-  if (key.endsWith("::usdc::usdc")) return "USDC";
-  return "";
+  if (!coinType) return "";
+  // Try KNOWN_COIN_TYPES first (handles wormhole ::coin::COIN types)
+  const ct = coinType.startsWith("0x") ? coinType : "0x" + coinType;
+  const known = KNOWN_COIN_TYPES[ct] || KNOWN_COIN_TYPES[normalizeCoinType(ct)];
+  if (known) return known.symbol;
+  // Fallback: extract module::TYPE from the coin type string
+  const parts = String(coinType).split("::");
+  return parts.length >= 3 ? parts[parts.length - 1] : "";
 }
 function interpolateRateBps(utilPct, kinks, rates) {
   const ks = (kinks || []).map(numOrZero).filter(Number.isFinite);
@@ -1638,21 +1680,22 @@ async function getCoinMeta(coinType) {
 
 // Batch-fetch metadata for multiple coin types at once (via aliases)
 async function prefetchCoinMeta(coinTypes) {
-  const toFetch = [...new Set(coinTypes.filter(ct => ct && !coinMetaCache[ct] && !KNOWN_COIN_TYPES[ct]))];
+  const toFetch = [...new Set(coinTypes.filter(ct => ct && !coinMetaCache[ct] && !KNOWN_COIN_TYPES[ct] && !KNOWN_COIN_TYPES[normalizeCoinType(ct)]))];
   if (!toFetch.length) return;
-  // Keep query payloads bounded and survive partial failures by chunking + per-coin fallback.
-  for (const chunk of chunkArray(toFetch, 10)) {
+  // Run chunks in parallel (5 aliases each to stay within GQL backing-store limits)
+  const chunks = chunkArray(toFetch, 5);
+  await Promise.all(chunks.map(async (chunk) => {
     const aliases = chunk.map((ct, i) => `c${i}: coinMetadata(coinType: "${ct}") { decimals symbol name iconUrl supply }`);
     try {
       const data = await gql(`{ ${aliases.join("\n")} }`);
       chunk.forEach((ct, i) => { if (data?.[`c${i}`]) coinMetaCache[ct] = data[`c${i}`]; });
     } catch (e) {
-      // Batch query can fail for individual bad types; recover with best-effort singles.
+      // Batch failed — try individual lookups in parallel
       await Promise.all(chunk.map(async (ct) => {
         try { await getCoinMeta(ct); } catch (_) { /* ignore */ }
       }));
     }
-  }
+  }));
 }
 
 function fmtCoinWithMeta(amount, coinRepr) {
@@ -3706,18 +3749,223 @@ async function fetchSuiPriceFromDeepBook() {
   return bidPx != null ? bidPx : askPx;
 }
 
-async function fetchCoinGeckoPrices() {
-  const ids = [...new Set(Object.values(COINGECKO_IDS))].join(",");
-  const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
-  if (!res.ok) return null;
-  return res.json();
+// ── Pool Oracle: on-chain pricing via Cetus + Bluefin CLMM pools ──────
+async function discoverPoolAddresses(coinTypes) {
+  const now = Date.now();
+  const needed = coinTypes.filter(ct => {
+    const c = poolAddressCache[ct];
+    return !c || (now - c.ts > POOL_ORACLE_DISCOVERY_TTL_MS);
+  });
+  if (!needed.length) return;
+
+  // Optimized: Cetus-only (most liquidity), SUI-quote-only (convert via SUI price)
+  // 2 aliases per token (both orderings) instead of 8
+  const aliases = [];
+  const aliasMeta = [];
+  const suiType = QUOTE_COINS.SUI.type;
+  for (const ct of needed) {
+    if (ct === suiType) continue;
+    // TOKEN/SUI
+    const ab = `${CETUS_POOL_TYPE_PREFIX}<${ct}, ${suiType}>`;
+    const aliasAB = `a${aliases.length}`;
+    aliases.push(`${aliasAB}: objects(filter: { type: "${ab}" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex: "cetus", quoteSymbol: "SUI", isTokenA: true });
+    // SUI/TOKEN
+    const ba = `${CETUS_POOL_TYPE_PREFIX}<${suiType}, ${ct}>`;
+    const aliasBA = `a${aliases.length}`;
+    aliases.push(`${aliasBA}: objects(filter: { type: "${ba}" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliasMeta.push({ coinType: ct, dex: "cetus", quoteSymbol: "SUI", isTokenA: false });
+  }
+  if (!aliases.length) return;
+
+  // Reset stale entries before re-populating to prevent duplicate accumulation
+  for (const ct of needed) poolAddressCache[ct] = { pools: [], ts: 0 };
+
+  // 6 aliases per chunk, all chunks in parallel
+  const chunks = chunkArray(aliases.map((a, i) => ({ alias: a, meta: aliasMeta[i] })), 6);
+  const CONCURRENCY = 10;
+  for (let start = 0; start < chunks.length; start += CONCURRENCY) {
+    const batch = chunks.slice(start, start + CONCURRENCY);
+    await Promise.all(batch.map(async (chunk) => {
+      try {
+        const q = `{ ${chunk.map(c => c.alias).join("\n")} }`;
+        const data = await gql(q);
+        for (let i = 0; i < chunk.length; i++) {
+          const aliasKey = chunk[i].alias.split(":")[0];
+          const poolNodes = data?.[aliasKey]?.nodes || [];
+          const meta = chunk[i].meta;
+          if (!poolAddressCache[meta.coinType]) poolAddressCache[meta.coinType] = { pools: [], ts: 0 };
+          for (const node of poolNodes) {
+            const json = node.asMoveObject?.contents?.json;
+            const liq = Number(json?.liquidity || 0);
+            if (liq <= 0) continue; // skip dead pools
+            poolAddressCache[meta.coinType].pools.push({
+              address: node.address,
+              dex: meta.dex,
+              quoteSymbol: meta.quoteSymbol,
+              isTokenA: meta.isTokenA,
+              typeRepr: node.asMoveObject?.contents?.type?.repr || "",
+            });
+          }
+        }
+      } catch (e) { console.warn("[pool-oracle] discovery chunk error:", e?.message || e); }
+    }));
+  }
+  // Update timestamps
+  for (const ct of needed) poolAddressCache[ct].ts = now;
 }
 
-async function fetchDefiPrices(force = false) {
+async function readPoolPrices(coinTypesBySymbol) {
+  // Collect all pool addresses we need to read
+  const addrToMeta = {}; // address → { coinType, symbol, dex, quoteSymbol, isTokenA }
+  for (const [sym, ct] of Object.entries(coinTypesBySymbol)) {
+    const cached = poolAddressCache[ct];
+    if (!cached) continue;
+    for (const pool of cached.pools) {
+      addrToMeta[pool.address] = { coinType: ct, symbol: sym, dex: pool.dex, quoteSymbol: pool.quoteSymbol, isTokenA: pool.isTokenA, typeRepr: pool.typeRepr };
+    }
+  }
+  const addresses = Object.keys(addrToMeta);
+  if (!addresses.length) return {};
+
+  const poolById = await multiGetObjectsTypeJsonByAddress(addresses);
+
+  // Compute prices per symbol, weighted by liquidity
+  const accum = {}; // symbol → { weightedSum, liqSum }
+  for (const addr of addresses) {
+    const obj = poolById[addr];
+    if (!obj) continue;
+    const contents = obj.asMoveObject?.contents;
+    const json = contents?.json;
+    const typeRepr = contents?.type?.repr || addrToMeta[addr].typeRepr;
+    if (!json || !typeRepr) continue;
+
+    const sqrtPrice = json.current_sqrt_price;
+    const liquidity = Number(json.liquidity || 0);
+    if (!sqrtPrice || liquidity <= 0) continue;
+
+    const meta = addrToMeta[addr];
+
+    // Extract coin types from type repr: Pool<TypeA, TypeB>
+    const typeMatch = typeRepr.match(/Pool<(.+),\s*(.+)>/);
+    if (!typeMatch) continue;
+    const coinTypeA = typeMatch[1].trim();
+    const coinTypeB = typeMatch[2].trim();
+
+    // Resolve decimals
+    const resolvedA = resolveCoinType(coinTypeA);
+    const resolvedB = resolveCoinType(coinTypeB);
+
+    // sqrtPriceToHumanPrice gives price of A in terms of B
+    const priceAinB = sqrtPriceToHumanPrice(sqrtPrice, resolvedA.decimals, resolvedB.decimals);
+    if (!priceAinB || !Number.isFinite(priceAinB)) continue;
+
+    // Determine the USD price of our target token
+    let tokenPriceUsd;
+    if (meta.isTokenA) {
+      // Our token is A, quote is B → price = priceAinB * quoteUsdPrice
+      if (meta.quoteSymbol === "USDC") tokenPriceUsd = priceAinB;
+      else if (meta.quoteSymbol === "SUI") tokenPriceUsd = priceAinB * (defiPrices.SUI || 0);
+    } else {
+      // Our token is B, quote is A → price = (1/priceAinB) * quoteUsdPrice
+      if (priceAinB <= 0) continue;
+      const priceBinA = 1 / priceAinB;
+      if (meta.quoteSymbol === "USDC") tokenPriceUsd = priceBinA;
+      else if (meta.quoteSymbol === "SUI") tokenPriceUsd = priceBinA * (defiPrices.SUI || 0);
+    }
+
+    if (!tokenPriceUsd || !Number.isFinite(tokenPriceUsd) || tokenPriceUsd <= 0) continue;
+
+    if (!accum[meta.symbol]) accum[meta.symbol] = { weightedSum: 0, liqSum: 0 };
+    accum[meta.symbol].weightedSum += tokenPriceUsd * liquidity;
+    accum[meta.symbol].liqSum += liquidity;
+  }
+
+  const result = {};
+  for (const [sym, { weightedSum, liqSum }] of Object.entries(accum)) {
+    if (liqSum > 0) result[sym] = weightedSum / liqSum;
+  }
+  return result;
+}
+
+async function fetchPoolOraclePrices(specificCoinTypes) {
+  // Resolve which coin types to price
+  const entries = []; // { coinType, symbol, decimals }
+  const source = specificCoinTypes
+    ? specificCoinTypes
+    : Object.keys(KNOWN_COIN_TYPES);
+  for (const ct of source) {
+    const resolved = resolveCoinType(ct);
+    if (POOL_ORACLE_SKIP.has(resolved.symbol)) continue;
+    if (SUI_PEGGED_SYMBOLS.has(resolved.symbol)) continue;
+    if (BTC_PEGGED_SYMBOLS.has(resolved.symbol)) continue;
+    entries.push({ coinType: ct, symbol: resolved.symbol, decimals: resolved.decimals });
+  }
+  if (!entries.length) return;
+
+  // Prefetch metadata for any unknown decimals
+  const unknownMeta = entries.filter(e => e.decimals === 9 && !COMMON_DECIMALS[e.symbol] && !KNOWN_COIN_TYPES[e.coinType]).map(e => e.coinType);
+  if (unknownMeta.length) await prefetchCoinMeta(unknownMeta);
+
+  // Discover pool addresses for any uncached coin types
+  const coinTypesToDiscover = entries.map(e => e.coinType);
+  await discoverPoolAddresses(coinTypesToDiscover);
+
+  // Read fresh prices from pools
+  const coinTypesBySymbol = {};
+  for (const e of entries) coinTypesBySymbol[e.symbol] = e.coinType;
+  const prices = await readPoolPrices(coinTypesBySymbol);
+
+  // Write into defiPrices
+  for (const [sym, usd] of Object.entries(prices)) {
+    if (usd > 0) defiPrices[sym] = usd;
+  }
+  oraclePricesTs = Date.now();
+}
+
+async function ensurePrices(coinTypes) {
+  if (!coinTypes || !coinTypes.length) return;
+  // Ensure SUI price exists first (needed for SUI-quoted pool conversions)
+  if (!defiPrices.SUI) {
+    try { const p = await fetchSuiPriceFromDeepBook(); if (p) { defiPrices.SUI = p; deepbookSuiPriceTs = Date.now(); } } catch (_) {}
+  }
+  // Only attempt pool discovery for known coin types — random memecoins
+  // won't have meaningful DEX liquidity and their long type strings can
+  // exceed GQL payload limits
+  const needed = [];
+  for (const ct of coinTypes) {
+    const norm = normalizeCoinType(ct);
+    if (!KNOWN_COIN_TYPES[ct] && !KNOWN_COIN_TYPES[norm]) continue;
+    const resolved = resolveCoinType(ct);
+    if (POOL_ORACLE_SKIP.has(resolved.symbol)) continue;
+    if (SUI_PEGGED_SYMBOLS.has(resolved.symbol)) {
+      if (defiPrices.SUI) defiPrices[resolved.symbol] = defiPrices.SUI;
+      continue;
+    }
+    if (BTC_PEGGED_SYMBOLS.has(resolved.symbol)) {
+      if (defiPrices[BTC_PRICE_SOURCE]) defiPrices[resolved.symbol] = defiPrices[BTC_PRICE_SOURCE];
+      continue;
+    }
+    if (defiPrices[resolved.symbol] > 0) continue;
+    needed.push(ct);
+  }
+  if (!needed.length) return;
+  await fetchPoolOraclePrices(needed);
+}
+
+function syncPeggedPrices() {
+  if (defiPrices.SUI) { for (const sym of SUI_PEGGED_SYMBOLS) defiPrices[sym] = defiPrices.SUI; }
+  defiPrices.USDC = 1; defiPrices.USDT = 1; defiPrices.wUSDC = 1;
+  defiPrices.BUCK = 1; defiPrices.AUSD = 1; defiPrices.FDUSD = 1;
+  defiPrices.USDY = 1; defiPrices.SUI_USDE = 1; defiPrices.suiUSDe = 1;
+  if (defiPrices[BTC_PRICE_SOURCE]) { for (const sym of BTC_PEGGED_SYMBOLS) defiPrices[sym] = defiPrices[BTC_PRICE_SOURCE]; }
+}
+
+async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
   const now = Date.now();
   const needSui = force || !defiPrices.SUI || (now - deepbookSuiPriceTs > DEEPBOOK_SUI_PRICE_TTL_MS);
-  const needCoinGecko = force || (now - coinGeckoPricesTs > COINGECKO_PRICE_TTL_MS);
-  if (!needSui && !needCoinGecko) {
+  const needOracle = !skipOracle && (force || (now - oraclePricesTs > POOL_ORACLE_PRICE_TTL_MS));
+  if (!needSui && !needOracle) {
     notePerfCache(true);
     return;
   }
@@ -3725,42 +3973,22 @@ async function fetchDefiPrices(force = false) {
   notePerfCache(false);
 
   defiPricesInFlight = (async () => {
-    const [deepBookSuiPrice, coingeckoData] = await Promise.all([
-      needSui ? fetchSuiPriceFromDeepBook().catch(() => null) : Promise.resolve(defiPrices.SUI || null),
-      needCoinGecko ? fetchCoinGeckoPrices().catch(() => null) : Promise.resolve(null),
-    ]);
+    // DeepBook SUI price must resolve first (needed for SUI-quoted pool conversions)
+    const deepBookSuiPrice = needSui
+      ? await fetchSuiPriceFromDeepBook().catch(() => null)
+      : (defiPrices.SUI || null);
 
     if (deepBookSuiPrice && Number.isFinite(deepBookSuiPrice)) {
       defiPrices.SUI = deepBookSuiPrice;
       deepbookSuiPriceTs = Date.now();
     }
 
-    if (coingeckoData) {
-      for (const [symbol, cgId] of Object.entries(COINGECKO_IDS)) {
-        if (symbol === "SUI") continue;
-        if (cgId === "sui") continue; // use DeepBook SUI price for all SUI-pegged symbols
-        const usd = Number(coingeckoData?.[cgId]?.usd);
-        if (usd > 0) defiPrices[symbol] = usd;
-      }
-      coinGeckoPricesTs = Date.now();
+    // Pool oracle: price all known tokens from on-chain CLMM pools
+    if (needOracle && defiPrices.SUI) {
+      await fetchPoolOraclePrices().catch(() => null);
     }
 
-    // Keep SUI-derived symbols coherent with the on-chain DeepBook SUI quote.
-    if (defiPrices.SUI) {
-      for (const [symbol, cgId] of Object.entries(COINGECKO_IDS)) {
-        if (cgId === "sui") defiPrices[symbol] = defiPrices.SUI;
-      }
-    } else {
-      // Fallback only if DeepBook data is temporarily unavailable.
-      const fallback = Number(coingeckoData?.sui?.usd);
-      if (fallback > 0) {
-        defiPrices.SUI = fallback;
-        deepbookSuiPriceTs = Date.now();
-        for (const [symbol, cgId] of Object.entries(COINGECKO_IDS)) {
-          if (cgId === "sui") defiPrices[symbol] = fallback;
-        }
-      }
-    }
+    syncPeggedPrices();
   })().finally(() => { defiPricesInFlight = null; });
 
   return defiPricesInFlight;
@@ -3893,8 +4121,11 @@ function renderDonutChart(coins, totalSupply) {
   </svg>`;
 }
 
+const CORE_LENDING_TOKENS = new Set(["SUI", "USDC", "USDT", "ETH", "WETH", "BTC", "WBTC", "LBTC", "stBTC", "enzoBTC", "MBTC", "YBTC", "xBTC", "XBTC", "WAL", "DEEP", "XAUM", "SOL"]);
+function isCoreToken(sym) { return CORE_LENDING_TOKENS.has(sym); }
+
 // ── Protocol Fetchers ──────────────────────────────────────────────────
-function buildRateRow(protocol, token, borrowBps, supplyBps, utilization, sourceId, sourceLabel, note = "") {
+function buildRateRow(protocol, token, borrowBps, supplyBps, utilization, sourceId, sourceLabel, note = "", totalSupplyHuman = 0, totalBorrowHuman = 0) {
   return {
     protocol,
     token,
@@ -3904,6 +4135,8 @@ function buildRateRow(protocol, token, borrowBps, supplyBps, utilization, source
     sourceId: sourceId || "",
     sourceLabel: sourceLabel || "",
     note,
+    totalSupplyHuman,
+    totalBorrowHuman,
     error: "",
   };
 }
@@ -3918,6 +4151,8 @@ function emptyRateRow(protocol, token, sourceId, sourceLabel, error = "") {
     sourceId: sourceId || "",
     sourceLabel: sourceLabel || "",
     note: "",
+    totalSupplyHuman: 0,
+    totalBorrowHuman: 0,
     error: error || "Unavailable",
   };
 }
@@ -3944,7 +4179,10 @@ async function fetchNaviLendingRates() {
     const totalSupply = supplyShares * supplyIdx;
     const totalBorrow = borrowShares * borrowIdx;
     const util = totalSupply > 0 ? totalBorrow / totalSupply : 0;
-    rows[token] = buildRateRow("NAVI", token, borrowBps, supplyBps, util, NAVI_RESERVES_TABLE, "Reserves Table");
+    const dec = getDecimals(token);
+    const supplyHuman = totalSupply / Math.pow(10, dec);
+    const borrowHuman = totalBorrow / Math.pow(10, dec);
+    rows[token] = buildRateRow("NAVI", token, borrowBps, supplyBps, util, NAVI_RESERVES_TABLE, "Reserves Table", "", supplyHuman, borrowHuman);
   }
   return rows;
 }
@@ -3960,8 +4198,11 @@ async function fetchSuilendLendingRates() {
   for (const reserve of reserves) {
     const token = tokenFromCoinType(reserve?.coin_type?.name);
     if (!token || rows[token]) continue;
+    // available_amount is in native token decimals (raw units).
+    // borrowed_amount.value is stored as native_amount * 1e18 (WAD precision),
+    // so dividing by 1e18 yields the same native units as available_amount.
+    // Both values are in the same scale, suitable for utilization and human conversion.
     const available = numOrZero(reserve.available_amount);
-    // Suilend stores borrowed amount in fixed-18 precision.
     const borrowed = numOrZero(reserve.borrowed_amount?.value) / 1e18;
     const util = (available + borrowed) > 0 ? borrowed / (available + borrowed) : 0;
     const kinks = decodeB64U8Array(reserve?.config?.element?.interest_rate_utils);
@@ -3969,25 +4210,29 @@ async function fetchSuilendLendingRates() {
     const borrowBps = interpolateRateBps(util * 100, kinks, aprs);
     const spreadBps = numOrZero(reserve?.config?.element?.spread_fee_bps);
     const supplyBps = borrowBps * util * (1 - clamp01(spreadBps / 10000));
-    rows[token] = buildRateRow("Suilend", token, borrowBps, supplyBps, util, SUILEND_MAIN_POOL_OBJECT, "Main Pool Object");
+    const coinType = reserve?.coin_type?.name;
+    const { decimals: suilendDec } = resolveCoinType(coinType ? (coinType.startsWith("0x") ? coinType : "0x" + coinType) : "");
+    const supplyHuman = (available + borrowed) / Math.pow(10, suilendDec);
+    const borrowHuman = borrowed / Math.pow(10, suilendDec);
+    rows[token] = buildRateRow("Suilend", token, borrowBps, supplyBps, util, SUILEND_MAIN_POOL_OBJECT, "Main Pool Object", "", supplyHuman, borrowHuman);
   }
   return rows;
 }
 
 async function fetchAlphaLendingRates() {
   const rows = {};
+  // Fetch all markets from Alpha's dynamic field table via dynamicFields
   const data = await gql(`{
     address(address: "${ALPHA_MARKETS_TABLE}") {
-      sui: dynamicField(name: { type: "u64", bcs: "${u64Bcs(1)}" }) { value { ... on MoveValue { json } } }
-      usdc: dynamicField(name: { type: "u64", bcs: "${u64Bcs(6)}" }) { value { ... on MoveValue { json } } }
+      dynamicFields(first: 50) { nodes { name { json } value { ... on MoveValue { json } } } }
     }
   }`);
-  const entries = [
-    { token: "SUI", market: data?.address?.sui?.value?.json },
-    { token: "USDC", market: data?.address?.usdc?.value?.json },
-  ];
-  for (const { token, market } of entries) {
-    if (!market) continue;
+  for (const n of (data?.address?.dynamicFields?.nodes || [])) {
+    const marketId = Number(n?.name?.json);
+    const market = n?.value?.json;
+    if (!market || !Number.isFinite(marketId)) continue;
+    const token = ALPHA_MARKETS[marketId] || `Market${marketId}`;
+    if (rows[token]) continue;
     const borrowed = numOrZero(market.borrowed_amount);
     const cash = numOrZero(market.balance_holding);
     const util = (borrowed + cash) > 0 ? borrowed / (borrowed + cash) : 0;
@@ -3996,7 +4241,10 @@ async function fetchAlphaLendingRates() {
     const borrowBps = interpolateRateBps(util * 100, kinks, rates);
     const spreadBps = numOrZero(market?.config?.spread_fee_bps);
     const supplyBps = borrowBps * util * (1 - clamp01(spreadBps / 10000));
-    rows[token] = buildRateRow("Alpha", token, borrowBps, supplyBps, util, ALPHA_MARKETS_TABLE, "Markets Table");
+    const alphaDec = getDecimals(token);
+    const supplyHuman = (cash + borrowed) / Math.pow(10, alphaDec);
+    const borrowHuman = borrowed / Math.pow(10, alphaDec);
+    rows[token] = buildRateRow("Alpha", token, borrowBps, supplyBps, util, ALPHA_MARKETS_TABLE, "Markets Table", "", supplyHuman, borrowHuman);
   }
   return rows;
 }
@@ -4031,7 +4279,10 @@ async function fetchScallopLendingRates() {
     if (token && !imByToken[token]) imByToken[token] = n?.value?.json || {};
   }
 
-  for (const token of ["SUI", "USDC"]) {
+  // Iterate all tokens that have borrow dynamics + balance sheets + interest models
+  const allTokens = new Set([...Object.keys(bdByToken), ...Object.keys(bsByToken), ...Object.keys(imByToken)]);
+  for (const token of allTokens) {
+    if (!token) continue;
     const bd = bdByToken[token];
     const bs = bsByToken[token];
     const im = imByToken[token];
@@ -4044,7 +4295,10 @@ async function fetchScallopLendingRates() {
     const util = denom > 0 ? debt / denom : 0;
     const revenueFactor = clamp01(fixed32ToFloat(im?.revenue_factor?.value || im?.revenue_factor));
     const supplyBps = borrowBps * util * (1 - revenueFactor);
-    rows[token] = buildRateRow("Scallop", token, borrowBps, supplyBps, util, SCALLOP_MARKET_OBJECT, "Market Object");
+    const scallopDec = getDecimals(token);
+    const supplyHuman = (cash + debt) / Math.pow(10, scallopDec);
+    const borrowHuman = debt / Math.pow(10, scallopDec);
+    rows[token] = buildRateRow("Scallop", token, borrowBps, supplyBps, util, SCALLOP_MARKET_OBJECT, "Market Object", "", supplyHuman, borrowHuman);
   }
   return rows;
 }
@@ -4077,8 +4331,23 @@ async function fetchLendingRatesOverview(force = false) {
     const byProtocol = {};
     for (const s of settled) byProtocol[s.name] = s;
 
-    const byToken = { SUI: [], USDC: [] };
-    for (const token of ["SUI", "USDC"]) {
+    // Collect all token symbols from all protocols
+    const allTokenSymbols = new Set();
+    for (const s of settled) {
+      for (const sym of Object.keys(s.rows || {})) allTokenSymbols.add(sym);
+    }
+    // Ensure SUI and USDC are always present, sorted with majors first
+    const majorOrder = ["SUI", "USDC", "USDT", "ETH", "BTC", "WETH", "WBTC", "SOL", "DEEP", "WAL", "CETUS", "NAVX"];
+    const sortedTokens = [...allTokenSymbols].sort((a, b) => {
+      const ai = majorOrder.indexOf(a), bi = majorOrder.indexOf(b);
+      if (ai >= 0 && bi >= 0) return ai - bi;
+      if (ai >= 0) return -1;
+      if (bi >= 0) return 1;
+      return a.localeCompare(b);
+    });
+    const byToken = {};
+    for (const token of sortedTokens) {
+      byToken[token] = [];
       for (const p of protocolMeta) {
         const out = byProtocol[p.name];
         const row = out?.rows?.[token];
@@ -5647,6 +5916,14 @@ async function fetchAlphaPositions(addr) {
   return positions;
 }
 
+function sqrtPriceToHumanPrice(sqrtPriceStr, decimalsA, decimalsB) {
+  const s = Number(sqrtPriceStr);
+  if (!s || !Number.isFinite(s)) return 0;
+  const ratio = s / (2 ** 64);
+  const p = ratio * ratio * Math.pow(10, decimalsA - decimalsB);
+  return Number.isFinite(p) && p > 0 ? p : 0;
+}
+
 function i32FromBits(val) { const n = Number(val?.bits ?? val); return n > 0x7FFFFFFF ? n - 0x100000000 : n; }
 function tickToSqrtPriceX64(tick) { return Math.pow(1.0001, tick / 2) * (2 ** 64); }
 function getCoinAmountsFromLiquidity(liq, curSqrt, lowSqrt, upSqrt) {
@@ -6167,15 +6444,23 @@ async function renderAddress(app, addr) {
 
   async function loadDefi() {
     if (defiLoaded) return;
-    await Promise.all([fetchDefiPrices(), fetchLstExchangeRates()]);
-    const results = await Promise.allSettled([
-      fetchSuilendPositions(addr), fetchNaviPositions(addr),
-      fetchAlphaPositions(addr), fetchScallopPositions(addr),
-      fetchCetusPositions(addr), fetchTurbosPositions(addr),
-      fetchDefiWalletBalances(addr), fetchDeepBookPositions(addr),
-      fetchBluefinSpotPositions(addr), fetchBluefinProPositions(addr),
-      fetchAftermathPerpsPositions(addr),
+    // Phase 1: Get SUI price + stablecoins + LSTs quickly (skip slow pool oracle)
+    await Promise.all([fetchDefiPrices(false, { skipOracle: true }), fetchLstExchangeRates()]);
+    // Phase 2: Run pool oracle concurrently with position fetchers
+    const [, results] = await Promise.all([
+      fetchPoolOraclePrices().catch(() => null),
+      Promise.allSettled([
+        fetchSuilendPositions(addr), fetchNaviPositions(addr),
+        fetchAlphaPositions(addr), fetchScallopPositions(addr),
+        fetchCetusPositions(addr), fetchTurbosPositions(addr),
+        fetchDefiWalletBalances(addr), fetchDeepBookPositions(addr),
+        fetchBluefinSpotPositions(addr), fetchBluefinProPositions(addr),
+        fetchAftermathPerpsPositions(addr),
+      ]),
     ]);
+    // Sync LSTs + stablecoins + BTC variants now that oracle is done
+    syncPeggedPrices();
+
     const [suilend, navi, alpha, scallop, cetus, turbos, wallet, deepbook, bluefinSpot, bluefinPro, aftermathPerps] = results;
     const suilendPos = suilend.status === "fulfilled" ? suilend.value : [];
     const naviPos = navi.status === "fulfilled" ? navi.value : [];
@@ -6188,6 +6473,32 @@ async function renderAddress(app, addr) {
     const bluefinSpotPos = bluefinSpot.status === "fulfilled" ? bluefinSpot.value : [];
     const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
     const afPerpsData = aftermathPerps.status === "fulfilled" ? aftermathPerps.value : { positions: [], collateral: 0 };
+
+    // Second pricing pass: price any tokens discovered by fetchers but missing from defiPrices
+    const allCoinTypes = new Set();
+    for (const b of walletBals) { if (b.coinType) allCoinTypes.add(b.coinType); }
+    await ensurePrices([...allCoinTypes]);
+    // Recompute wallet USD values with fresh prices
+    for (const b of walletBals) {
+      const lstRate = b.isLST ? (lstExchangeRates[b.symbol] || 1) : 1;
+      b.price = b.isLST ? (defiPrices.SUI || 0) * lstRate : (defiPrices[b.symbol] || 0);
+      b.usdValue = b.amount * b.price;
+    }
+    // Recompute lending position USD values now that prices are available
+    for (const pos of [...naviPos, ...alphaPos]) {
+      let depUsd = 0, borUsd = 0;
+      for (const d of (pos.deposits || [])) {
+        if (d.amountUsd <= 0 && d.amount > 0 && defiPrices[d.symbol] > 0) d.amountUsd = d.amount * defiPrices[d.symbol];
+        depUsd += d.amountUsd;
+      }
+      for (const b of (pos.borrows || [])) {
+        if (b.amountUsd <= 0 && b.amount > 0 && defiPrices[b.symbol] > 0) b.amountUsd = b.amount * defiPrices[b.symbol];
+        borUsd += b.amountUsd;
+      }
+      if (pos.depositedUsd <= 0 && depUsd > 0) pos.depositedUsd = depUsd;
+      if (pos.borrowedUsd <= 0 && borUsd > 0) pos.borrowedUsd = borUsd;
+      pos.netUsd = pos.depositedUsd - pos.borrowedUsd;
+    }
 
     // Separate LSTs from regular wallet holdings
     const lstBals = walletBals.filter(b => b.isLST);
@@ -8206,6 +8517,7 @@ const TRACKED_TOKENS = {
 
 async function renderTransfers(app) {
   await fetchDefiPrices();
+  await ensurePrices(Object.keys(TRACKED_TOKENS));
 
   const data = await gql(`{
     transactions(last: 50, filter: { kind: PROGRAMMABLE_TX }) {
@@ -9972,7 +10284,7 @@ async function renderDefiOverview(app) {
       <div class="card">
         <div class="card-header">DeFi Quick Views</div>
         <div class="card-body" style="padding:12px 16px;display:flex;flex-wrap:wrap;gap:8px">
-          <a href="#/defi-rates" class="hash-link u-panel-sm">Lending Rates</a>
+          <a href="#/defi-rates" class="hash-link u-panel-sm">Lending Markets</a>
           <a href="#/defi-dex" class="hash-link u-panel-sm">DEX</a>
           <a href="#/defi-stablecoins" class="hash-link u-panel-sm">Stablecoins</a>
           <a href="#/defi-flows" class="hash-link u-panel-sm">Volume</a>
@@ -10905,12 +11217,13 @@ async function renderDefiFlows(app) {
 }
 
 // ── DeFi Risk Monitor ────────────────────────────────────────────────
-// ── DeFi Lending Rates ────────────────────────────────────────────────
+// ── DeFi Lending Markets ────────────────────────────────────────────────
 async function renderDefiRates(app) {
   const routeParams = splitRouteAndParams(getRoute()).params;
-  let token = routeParams.get("asset") === "USDC" ? "USDC" : "SUI";
-  let sortKey = ["borrow", "supply", "util", "spread", "protocol"].includes(routeParams.get("sort")) ? routeParams.get("sort") : "borrow";
+  let token = routeParams.get("asset") || "SUI";
+  let sortKey = ["borrow", "supply", "util", "spread", "protocol", "tvl", "borrowed"].includes(routeParams.get("sort")) ? routeParams.get("sort") : "borrow";
   let statusFilter = ["all", "live", "unavailable"].includes(routeParams.get("status")) ? routeParams.get("status") : "all";
+  let showAllTokens = routeParams.get("all") === "1";
   let loadErr = "";
   let data = null;
 
@@ -10919,6 +11232,7 @@ async function renderDefiRates(app) {
       asset: token !== "SUI" ? token : null,
       sort: sortKey !== "borrow" ? sortKey : null,
       status: statusFilter !== "all" ? statusFilter : null,
+      all: showAllTokens ? "1" : null,
     });
   }
 
@@ -10931,6 +11245,7 @@ async function renderDefiRates(app) {
 
   async function load(force = false) {
     try {
+      await fetchDefiPrices();
       data = await fetchLendingRatesOverview(force);
       loadErr = "";
     } catch (e) {
@@ -10948,17 +11263,27 @@ async function renderDefiRates(app) {
     else if (sortKey === "util") rows.sort((a, b) => (b.utilization || -Infinity) - (a.utilization || -Infinity));
     else if (sortKey === "spread") rows.sort((a, b) => ((b.borrowBps || 0) - (b.supplyBps || 0)) - ((a.borrowBps || 0) - (a.supplyBps || 0)));
     else if (sortKey === "protocol") rows.sort((a, b) => String(a.protocol || "").localeCompare(String(b.protocol || "")));
+    else if (sortKey === "tvl") {
+      const usd = new Map(rows.map(r => [r, (r.totalSupplyHuman || 0) * (defiPrices[r.token] || 0)]));
+      rows.sort((a, b) => usd.get(b) - usd.get(a));
+    } else if (sortKey === "borrowed") {
+      const usd = new Map(rows.map(r => [r, (r.totalBorrowHuman || 0) * (defiPrices[r.token] || 0)]));
+      rows.sort((a, b) => usd.get(b) - usd.get(a));
+    }
     else rows.sort((a, b) => (b.borrowBps || -Infinity) - (a.borrowBps || -Infinity));
     return rows;
   }
 
   function renderContent() {
-    if (loadErr) return `<div class="page-title">Lending Rates</div>${renderEmpty(escapeHtml(loadErr))}`;
+    if (loadErr) return `<div class="page-title">Lending Markets</div>${renderEmpty(escapeHtml(loadErr))}`;
     const allRows = data?.byToken?.[token] || [];
     const rows = sortedRows(allRows);
     const live = allRows.filter(r => Number.isFinite(r.borrowBps) && Number.isFinite(r.supplyBps));
     const avgBorrow = live.length ? live.reduce((s, r) => s + r.borrowBps, 0) / live.length : null;
     const avgSupply = live.length ? live.reduce((s, r) => s + r.supplyBps, 0) / live.length : null;
+    const price = defiPrices[token] || 0;
+    const totalSupplyUsd = live.reduce((s, r) => s + (r.totalSupplyHuman || 0) * price, 0);
+    const totalBorrowUsd = live.reduce((s, r) => s + (r.totalBorrowHuman || 0) * price, 0);
     const topBorrow = live.length ? [...live].sort((a, b) => (b.borrowBps || 0) - (a.borrowBps || 0))[0] : null;
     const topUtil = live.length ? [...live].sort((a, b) => (b.utilization || 0) - (a.utilization || 0))[0] : null;
     const unavailable = allRows.length - live.length;
@@ -10975,14 +11300,20 @@ async function renderDefiRates(app) {
       leftControls: `
         <span class="u-fs12-dim">Asset</span>
         <select data-action="defi-rates-token" class="ui-control">
-          <option value="SUI" ${token === "SUI" ? "selected" : ""}>SUI</option>
-          <option value="USDC" ${token === "USDC" ? "selected" : ""}>USDC</option>
+          ${Object.keys(data?.byToken || {}).filter(t => showAllTokens || isCoreToken(t)).map(t =>
+            `<option value="${escapeAttr(t)}" ${t === token ? "selected" : ""}>${escapeHtml(t)}</option>`
+          ).join("")}
         </select>
+        <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;color:var(--text-dim)">
+          <input type="checkbox" data-action="defi-rates-all" ${showAllTokens ? "checked" : ""}> All assets
+        </label>
         <span class="u-fs12-dim">Sort</span>
         <select data-action="defi-rates-sort" class="ui-control">
           <option value="borrow" ${sortKey === "borrow" ? "selected" : ""}>Borrow APR</option>
           <option value="supply" ${sortKey === "supply" ? "selected" : ""}>Supply APR</option>
           <option value="util" ${sortKey === "util" ? "selected" : ""}>Utilization</option>
+          <option value="tvl" ${sortKey === "tvl" ? "selected" : ""}>Total Supply</option>
+          <option value="borrowed" ${sortKey === "borrowed" ? "selected" : ""}>Total Borrow</option>
           <option value="spread" ${sortKey === "spread" ? "selected" : ""}>Spread</option>
           <option value="protocol" ${sortKey === "protocol" ? "selected" : ""}>Protocol</option>
         </select>
@@ -11001,7 +11332,7 @@ async function renderDefiRates(app) {
       "This page is deterministic from on-chain state and does not use predictive heuristics.",
     ]);
     return `
-      <div class="page-title">Lending Rates <span class="type-tag">On-Chain</span></div>
+      <div class="page-title">Lending Markets <span class="type-tag">On-Chain</span></div>
       ${scope}
 
       <div class="stats-grid">
@@ -11031,6 +11362,16 @@ async function renderDefiRates(app) {
           <div class="stat-sub">${topUtil ? topUtil.protocol : "—"}</div>
         </div>
         <div class="stat-box">
+          <div class="stat-label">Total Supply</div>
+          <div class="stat-value u-c-green">${totalSupplyUsd > 0 ? fmtUsdFromFloat(totalSupplyUsd) : "—"}</div>
+          <div class="stat-sub">${token} across ${live.length} protocols</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Total Borrow</div>
+          <div class="stat-value u-c-yellow">${totalBorrowUsd > 0 ? fmtUsdFromFloat(totalBorrowUsd) : "—"}</div>
+          <div class="stat-sub">${token} across ${live.length} protocols</div>
+        </div>
+        <div class="stat-box">
           <div class="stat-label">Unavailable Rows</div>
           <div class="stat-value">${Math.max(0, unavailable)}</div>
           <div class="stat-sub">${token} data quality gap</div>
@@ -11044,7 +11385,7 @@ async function renderDefiRates(app) {
         <div class="card-header">Cross-Protocol Lending Snapshot</div>
         <div class="card-body">
           <table>
-            <thead><tr><th>Protocol</th><th>Conf.</th><th class="u-ta-right">Supply APR</th><th class="u-ta-right">Borrow APR</th><th class="u-ta-right">Utilization</th><th class="u-ta-right">Spread</th><th>Source</th><th>Status</th></tr></thead>
+            <thead><tr><th>Protocol</th><th>Conf.</th><th class="u-ta-right">Supply APR</th><th class="u-ta-right">Borrow APR</th><th class="u-ta-right">Utilization</th><th class="u-ta-right">Total Supply</th><th class="u-ta-right">Total Borrow</th><th class="u-ta-right">Spread</th><th>Source</th><th>Status</th></tr></thead>
             <tbody>
               ${rows.map(r => {
                 const utilColor = !Number.isFinite(r.utilization) ? "var(--text-dim)"
@@ -11058,12 +11399,18 @@ async function renderDefiRates(app) {
                 const source = r.sourceId
                   ? `${hashLink(r.sourceId, '/object/' + r.sourceId)}<div class="u-fs11-dim">${escapeHtml(r.sourceLabel || "")}</div>`
                   : '<span class="u-c-dim">—</span>';
+                const supplyUsd = r.totalSupplyHuman * (defiPrices[r.token] || 0);
+                const borrowUsd = r.totalBorrowHuman * (defiPrices[r.token] || 0);
+                const fmtSupplyUsd = r.error || !supplyUsd ? "—" : fmtUsdFromFloat(supplyUsd);
+                const fmtBorrowUsd = r.error || !borrowUsd ? "—" : fmtUsdFromFloat(borrowUsd);
                 return `<tr>
                   <td class="u-fw-600">${escapeHtml(r.protocol)}</td>
                   <td>${defiConfidenceBadge(r.error ? "low" : "high")}</td>
                   <td style="text-align:right;font-family:var(--mono);color:var(--green)">${fmtApr(r.supplyBps)}</td>
                   <td style="text-align:right;font-family:var(--mono);color:var(--yellow)">${fmtApr(r.borrowBps)}</td>
                   <td style="text-align:right;font-family:var(--mono);color:${utilColor}">${fmtUtil(r.utilization)}</td>
+                  <td class="u-ta-right-mono">${fmtSupplyUsd}</td>
+                  <td class="u-ta-right-mono">${fmtBorrowUsd}</td>
                   <td class="u-ta-right-mono">${fmtApr(spreadBps)}</td>
                   <td>${source}</td>
                   <td>${status}</td>
@@ -11078,12 +11425,12 @@ async function renderDefiRates(app) {
 
   await load(false);
   const setDefiToken = (nextToken) => {
-    token = nextToken === "USDC" ? "USDC" : "SUI";
+    token = (data?.byToken?.[nextToken]) ? nextToken : "SUI";
     persistDefiRateState();
     app.innerHTML = renderContent();
   };
   const setDefiRateSort = (nextSort) => {
-    sortKey = ["borrow", "supply", "util", "spread", "protocol"].includes(nextSort) ? nextSort : "borrow";
+    sortKey = ["borrow", "supply", "util", "spread", "protocol", "tvl", "borrowed"].includes(nextSort) ? nextSort : "borrow";
     persistDefiRateState();
     app.innerHTML = renderContent();
   };
@@ -11113,6 +11460,14 @@ async function renderDefiRates(app) {
     }
     if (action === "defi-rates-status") {
       setDefiRateStatus(target.value);
+      return;
+    }
+    if (action === "defi-rates-all") {
+      showAllTokens = target.checked;
+      // If current token is not in the filtered set, reset to SUI
+      if (!showAllTokens && !isCoreToken(token)) token = "SUI";
+      persistDefiRateState();
+      app.innerHTML = renderContent();
     }
   };
   app.addEventListener("change", app._defiRatesChangeHandler);
@@ -11292,7 +11647,7 @@ async function renderDocs(app) {
         <a href="#/events" class="hash-link u-panel-sm">Events</a>
         <a href="#/packages" class="hash-link u-panel-sm">Packages</a>
         <a href="#/defi-dex" class="hash-link u-panel-sm">DeFi DEX</a>
-        <a href="#/defi-rates" class="hash-link u-panel-sm">Lending Rates</a>
+        <a href="#/defi-rates" class="hash-link u-panel-sm">Lending Markets</a>
         <a href="#/graphql" class="hash-link u-panel-sm">GraphQL Playground</a>
       </div>
     </div>
