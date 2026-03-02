@@ -6514,9 +6514,10 @@ async function fetchSuilendPositions(addr) {
     const borrows = (ob.borrows || []).map(b => {
       const sym = (b.coin_type?.name || "").split("::").pop();
       const usd = Number(b.market_value?.value || 0) / 1e18;
-      const dec = getDecimals(sym);
-      const raw = Number(b.borrowed_amount?.value || 0);
-      const amount = raw > 0 ? raw / Math.pow(10, dec) : (usd > 0 && defiPrices[sym] > 0 ? usd / defiPrices[sym] : 0);
+      // borrowed_amount.value is NOT in native decimals — it's a cumulative
+      // interest-scaled value. Derive human amount from USD / price instead.
+      const price = defiPrices[sym] || 0;
+      const amount = usd > 0 && price > 0 ? usd / price : 0;
       return { symbol: sym, amount, amountUsd: usd };
     });
     const depositedUsd = Number(ob.deposited_value_usd?.value || 0) / 1e18;
@@ -6641,9 +6642,23 @@ async function fetchAlphaPositions(addr) {
     const borrowedUsd = extractUsd(data.total_loan_usd);
     const safeCollUsd = extractUsd(data.safe_collateral_usd);
     const collContents = data.collaterals?.contents || [];
-    const deps = collContents.map(c => { const m = Number(c.key || 0); const sym = ALPHA_MARKETS[m] || `Market${m}`; const usdPer = collContents.length > 0 ? depositedUsd / collContents.length : 0; const amt = usdPer > 0 && defiPrices[sym] > 0 ? usdPer / defiPrices[sym] : 0; return { symbol: sym, amount: amt, amountUsd: usdPer }; });
-    const loans = (data.loans || []).map(l => { const sym = String(l.coin_type?.name || "").split("::").pop() || "?"; const dec = getDecimals(sym); const human = Number(l.amount || 0) / Math.pow(10, dec); const usd = human * (defiPrices[sym] || 0); return { symbol: sym, amount: human, amountUsd: usd || (borrowedUsd / Math.max((data.loans || []).length, 1)) }; });
-    positions.push({ protocol: "Alpha", deposits: deps, borrows: loans, depositedUsd, borrowedUsd, healthFactor: borrowedUsd > 0 ? safeCollUsd / borrowedUsd : Infinity, netUsd: depositedUsd - borrowedUsd });
+    const deps = collContents.map(c => {
+      const m = Number(c.key || 0);
+      const sym = ALPHA_MARKETS[m] || `Market${m}`;
+      const dec = getDecimals(sym);
+      const amount = Number(c.value || 0) / Math.pow(10, dec);
+      const price = defiPrices[sym] || 0;
+      const amountUsd = amount * price;
+      return { symbol: sym, amount, amountUsd };
+    });
+    const loans = (data.loans || []).map(l => { const sym = String(l.coin_type?.name || "").split("::").pop() || "?"; const dec = getDecimals(sym); const human = Number(l.amount || 0) / Math.pow(10, dec); const usd = human * (defiPrices[sym] || 0); return { symbol: sym, amount: human, amountUsd: usd }; });
+    // Recompute USD totals from per-asset amounts when on-chain values are 0
+    const computedDepUsd = deps.reduce((s, d) => s + d.amountUsd, 0);
+    const computedBorUsd = loans.reduce((s, l) => s + l.amountUsd, 0);
+    const finalDepUsd = depositedUsd > 0 ? depositedUsd : computedDepUsd;
+    const finalBorUsd = borrowedUsd > 0 ? borrowedUsd : computedBorUsd;
+    const finalSafeUsd = safeCollUsd > 0 ? safeCollUsd : computedDepUsd * 0.8;
+    positions.push({ protocol: "Alpha", deposits: deps, borrows: loans, depositedUsd: finalDepUsd, borrowedUsd: finalBorUsd, healthFactor: finalBorUsd > 0 ? finalSafeUsd / finalBorUsd : Infinity, netUsd: finalDepUsd - finalBorUsd });
   }
   return positions;
 }
@@ -7291,14 +7306,18 @@ async function renderAddress(app, addr) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Supply</div>`;
           for (const d of pos.deposits) {
             const fmtAmt = d.amount > 0 ? (d.amount >= 1000 ? fmtCompact(d.amount) : d.amount >= 1 ? d.amount.toFixed(1) : d.amount >= 0.01 ? d.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : d.amount.toFixed(8)) : "";
-            html += `<div style="display:grid;grid-template-columns:72px 1fr auto;gap:4px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${d.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${fmtAmt ? fmtAmt + " " + d.symbol : ""}</span><span class="u-c-green" style="font-family:var(--mono);font-size:12px;text-align:right">${d.amountUsd > 0 ? fmtUsdFromFloat(d.amountUsd) : "—"}</span></div>`;
+            const amtCell = fmtAmt ? fmtAmt + " " + d.symbol : '<span class="trunc-note">inc_data</span>';
+            const usdCell = d.amountUsd > 0 ? fmtUsdFromFloat(d.amountUsd) : '<span class="trunc-note">inc_data</span>';
+            html += `<div style="display:grid;grid-template-columns:90px 1fr auto;gap:6px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${d.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${amtCell}</span><span class="u-c-green" style="font-family:var(--mono);font-size:12px;text-align:right">${usdCell}</span></div>`;
           }
         }
         if (pos.borrows?.length) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Borrow</div>`;
           for (const b of pos.borrows) {
             const fmtAmt = b.amount > 0 ? (b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)) : "";
-            html += `<div style="display:grid;grid-template-columns:72px 1fr auto;gap:4px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${b.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${fmtAmt ? fmtAmt + " " + b.symbol : ""}</span><span class="u-c-red" style="font-family:var(--mono);font-size:12px;text-align:right">${b.amountUsd > 0 ? fmtUsdFromFloat(b.amountUsd) : "—"}</span></div>`;
+            const amtCell = fmtAmt ? fmtAmt + " " + b.symbol : '<span class="trunc-note">inc_data</span>';
+            const usdCell = b.amountUsd > 0 ? fmtUsdFromFloat(b.amountUsd) : '<span class="trunc-note">inc_data</span>';
+            html += `<div style="display:grid;grid-template-columns:90px 1fr auto;gap:6px;font-size:13px;padding:2px 0;align-items:baseline"><span class="u-fw-600">${b.symbol}</span><span style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${amtCell}</span><span class="u-c-red" style="font-family:var(--mono);font-size:12px;text-align:right">${usdCell}</span></div>`;
           }
         }
         html += `<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:6px;display:flex;justify-content:space-between;font-size:13px;font-weight:600"><span>Net Equity</span><span style="color:${pos.netUsd >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsdFromFloat(Math.abs(pos.netUsd))}</span></div>`;
