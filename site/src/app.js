@@ -835,6 +835,8 @@ const AF_CLEARING_HOUSES = {
   "0x95969906ca735c9d44e8a44b5b7791b4dacaddf70fbdfbda40ccd3f8a9fd4920": "BTC/USD",
   "0xed358c545b4a6698f757d3840a6b7effd1b958dd31260931bef07691f255b1fa": "XAUT/USD",
 };
+const AF_PERPS_SIZE_EPS = 1e-12;
+const AF_PERPS_COLLATERAL_DUST = 1e-6;
 
 async function gql(query, variables = {}) {
   const payload = JSON.stringify({ query, variables });
@@ -6845,17 +6847,34 @@ async function fetchAftermathPerpsPositions(addr) {
         const baseAmount = parseIFixed(pos.base_asset_amount);
         const notional = parseIFixed(pos.quote_asset_notional_amount);
         const collateral = parseIFixed(pos.collateral); // IFixed already in USDC units (1 USDC = 1.0)
-        if (baseAmount === 0 && collateral === 0) return;
-        const isLong = baseAmount > 0;
-        const size = Math.abs(baseAmount);
-        const entryPrice = size > 0 ? Math.abs(notional) / size : 0;
+        const askQty = Math.abs(parseIFixed(pos.asks_quantity));
+        const bidQty = Math.abs(parseIFixed(pos.bids_quantity));
+        const pendingOrders = Number(pos.pending_orders || 0);
+
+        const hasOpenPosition = Math.abs(baseAmount) > AF_PERPS_SIZE_EPS || Math.abs(notional) > AF_PERPS_SIZE_EPS;
+        const hasOpenOrders = pendingOrders > 0 || askQty > AF_PERPS_SIZE_EPS || bidQty > AF_PERPS_SIZE_EPS;
+        if (!hasOpenPosition && !hasOpenOrders && collateral < AF_PERPS_COLLATERAL_DUST) return;
+
+        let side = "flat";
+        if (hasOpenPosition) side = baseAmount >= 0 ? "long" : "short";
+        else if (bidQty > askQty) side = "long";
+        else if (askQty > bidQty) side = "short";
+
+        const size = hasOpenPosition ? Math.abs(baseAmount) : Math.max(askQty, bidQty);
+        const entryPrice = hasOpenPosition && size > AF_PERPS_SIZE_EPS ? Math.abs(notional) / size : NaN;
+        const notionalAbs = hasOpenPosition ? Math.abs(notional) : NaN;
         totalCollateral += collateral;
         positions.push({
           market: AF_CLEARING_HOUSES[chId],
-          size, entryPrice, collateral, isLong,
-          notional: Math.abs(notional),
+          side,
+          size,
+          entryPrice,
+          collateral,
+          isLong: side === "long",
+          notional: notionalAbs,
+          orderOnly: !hasOpenPosition && hasOpenOrders,
           accountId: cap.account_id,
-          pendingOrders: Number(pos.pending_orders || 0),
+          pendingOrders,
         });
       });
     }
@@ -7323,14 +7342,20 @@ async function renderAddress(app, addr) {
       }
       html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Orders</th></tr></thead><tbody>`;
       for (const p of afPerpsData.positions) {
-        const sideColor = p.isLong ? "var(--green)" : "var(--red)";
-        const sideLabel = p.isLong ? "LONG" : "SHORT";
+        const sideLabel = p.side === "long" ? "LONG" : p.side === "short" ? "SHORT" : "FLAT";
+        const sideColor = p.side === "long" ? "var(--green)" : p.side === "short" ? "var(--red)" : "var(--text-dim)";
+        const entryText = Number.isFinite(p.entryPrice) && p.entryPrice > 0
+          ? `$${p.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+          : "—";
+        const notionalText = Number.isFinite(p.notional) && p.notional > 0
+          ? fmtUsdFromFloat(p.notional)
+          : "—";
         html += `<tr>
-          <td style="font-weight:500">${p.market}</td>
+          <td style="font-weight:500">${p.market}${p.orderOnly ? ' <span style="font-size:11px;color:var(--text-dim)">(order-only)</span>' : ""}</td>
           <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
           <td class="u-mono">${p.size.toLocaleString(undefined, {maximumFractionDigits:6})}</td>
-          <td class="u-mono">$${p.entryPrice.toLocaleString(undefined, {maximumFractionDigits:2})}</td>
-          <td class="u-ta-right-mono">${fmtUsdFromFloat(p.notional)}</td>
+          <td class="u-mono">${entryText}</td>
+          <td class="u-ta-right-mono">${notionalText}</td>
           <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.pendingOrders || "—"}</td>
         </tr>`;
       }
