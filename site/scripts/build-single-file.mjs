@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +11,8 @@ const LEGACY_SRC_PATH = resolve(SITE_ROOT, "src/index.html");
 const TEMPLATE_PATH = resolve(SITE_ROOT, "src/index.template.html");
 const CSS_PATH = resolve(SITE_ROOT, "src/styles.css");
 const JS_PATH = resolve(SITE_ROOT, "src/app.js");
+const WS_RESOURCES_SRC = resolve(SITE_ROOT, "ws-resources.json");
+const WS_RESOURCES_OUT = resolve(SITE_ROOT, "dist/ws-resources.json");
 const PRIMARY_OUT = resolve(SITE_ROOT, "index.html");
 const DIST_OUT = resolve(SITE_ROOT, "dist/index.html");
 const MANIFEST_OUT = resolve(SITE_ROOT, "dist/build-manifest.json");
@@ -100,6 +102,10 @@ writeFileSync(
   ) + "\n",
   "utf8"
 );
+
+if (existsSync(WS_RESOURCES_SRC)) {
+  copyFileSync(WS_RESOURCES_SRC, WS_RESOURCES_OUT);
+}
 
 console.log(`build-single-file: wrote index.html and dist/index.html`);
 console.log(`build-single-file: sha256 ${hash}`);

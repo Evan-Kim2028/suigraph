@@ -1,6 +1,6 @@
-# GraphQL Sui Block Explorer (Single-File Site)
+# suigraph block explorer (single-file site)
 
-Sui block explorer focused on GraphQL-powered chain introspection, with a single deployable HTML artifact and zero runtime dependencies.
+a graphql based block explorer, focused on GraphQL-powered chain introspection, with a single deployable HTML artifact and zero runtime dependencies.
 
 ## Goals
 - Keep runtime dependency-free in the browser.

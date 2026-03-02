@@ -2,10 +2,30 @@
 function toggleDropdown(el) {
   const wasOpen = el.classList.contains("open");
   closeDropdowns();
-  if (!wasOpen) el.classList.add("open");
+  if (!wasOpen) {
+    el.classList.add("open");
+    el.querySelector(".nav-trigger")?.setAttribute("aria-expanded", "true");
+  }
 }
 function closeDropdowns() {
-  document.querySelectorAll(".nav-dropdown.open").forEach(d => d.classList.remove("open"));
+  document.querySelectorAll(".nav-dropdown.open").forEach(d => {
+    d.classList.remove("open");
+    d.querySelector(".nav-trigger")?.setAttribute("aria-expanded", "false");
+  });
+}
+function closeMobileNav() {
+  const topbar = document.querySelector(".topbar");
+  if (!topbar) return;
+  topbar.classList.remove("nav-open");
+  document.querySelector(".nav-hamburger")?.setAttribute("aria-expanded", "false");
+}
+function flashCopyBtn(el) {
+  const orig = el.innerHTML;
+  el.innerHTML = "✓";
+  el.classList.add("copied");
+  setTimeout(() => {
+    if (el.isConnected) { el.innerHTML = orig; el.classList.remove("copied"); }
+  }, 1200);
 }
 document.addEventListener("click", (e) => {
   const actionEl = e.target?.closest?.("[data-action]");
@@ -19,6 +39,14 @@ document.addEventListener("click", (e) => {
       return;
     } else if (action === "nav-close-dropdowns") {
       closeDropdowns();
+      closeMobileNav();
+    } else if (action === "nav-toggle-mobile") {
+      e.stopPropagation();
+      const topbar = document.querySelector(".topbar");
+      if (!topbar) return;
+      const isOpen = topbar.classList.toggle("nav-open");
+      actionEl.setAttribute("aria-expanded", String(isOpen));
+      return;
     } else if (action === "toggle-theme") {
       toggleTheme();
       return;
@@ -27,9 +55,9 @@ document.addEventListener("click", (e) => {
       return;
     } else if (action === "copy-text") {
       const text = actionEl.getAttribute("data-copy-text") || "";
-      navigator.clipboard.writeText(text).catch(() => {});
+      navigator.clipboard.writeText(text).then(() => flashCopyBtn(actionEl)).catch(() => {});
     } else if (action === "copy-link") {
-      navigator.clipboard.writeText(window.location.href).catch(() => {});
+      navigator.clipboard.writeText(window.location.href).then(() => flashCopyBtn(actionEl)).catch(() => {});
     } else if (action === "copy-text-flash") {
       const text = actionEl.getAttribute("data-copy-text") || "";
       navigator.clipboard.writeText(text).then(() => {
@@ -53,9 +81,11 @@ document.addEventListener("click", (e) => {
     }
   }
   if (!e.target.closest(".nav-dropdown")) closeDropdowns();
+  if (!e.target.closest(".topbar")) closeMobileNav();
 });
 document.addEventListener("touchend", (e) => {
   if (!e.target.closest(".nav-dropdown")) closeDropdowns();
+  if (!e.target.closest(".topbar")) closeMobileNav();
 });
 document.addEventListener("error", (e) => {
   const img = e.target;
@@ -226,7 +256,8 @@ function applyPerfBadge() {
     el.textContent = "Idle";
     el.style.color = "var(--text-dim)";
     el.style.borderColor = "var(--border)";
-    el.title = "Page perf stats";
+    el._perfRows = null;
+    initPerfTooltip(el);
     return;
   }
   const render = pagePerf.renderMs != null ? pagePerf.renderMs : Math.round(performance.now() - pagePerf.startedAt);
@@ -239,16 +270,36 @@ function applyPerfBadge() {
     || (budgetGqlCalls > 0 && pagePerf.gqlCalls > budgetGqlCalls);
   el.style.color = warn ? "var(--yellow)" : "var(--text-dim)";
   el.style.borderColor = warn ? "var(--yellow)" : "var(--border)";
-  el.title = [
-    `Page: ${pagePerf.page || "unknown"}`,
-    `Status: ${pagePerf.status}`,
-    `Render: ${render}ms (budget ${budgetRenderMs}ms)`,
-    `GraphQL calls: ${pagePerf.gqlCalls} (budget ${budgetGqlCalls})`,
-    `GraphQL time: ${Math.round(pagePerf.gqlMs)}ms`,
-    `Req bytes: ${fmtNumber(Math.round(pagePerf.reqBytes))}`,
-    `Res bytes: ${fmtNumber(Math.round(pagePerf.resBytes))}`,
-    `Cache hits/misses: ${pagePerf.cacheHits}/${pagePerf.cacheMisses}`,
-  ].join("\n");
+  el._perfRows = [
+    { label: "Page",       value: pagePerf.page || "unknown" },
+    { label: "Status",     value: pagePerf.status, warn: pagePerf.status === "error" },
+    { label: "Render",     value: `${render}ms`, sub: `budget ${budgetRenderMs}ms`, warn: render > budgetRenderMs },
+    { label: "GQL calls",  value: String(pagePerf.gqlCalls), sub: `budget ${budgetGqlCalls}`, warn: budgetGqlCalls > 0 && pagePerf.gqlCalls > budgetGqlCalls },
+    { label: "GQL time",   value: `${Math.round(pagePerf.gqlMs)}ms` },
+    { label: "Req bytes",  value: fmtNumber(Math.round(pagePerf.reqBytes)) },
+    { label: "Res bytes",  value: fmtNumber(Math.round(pagePerf.resBytes)) },
+    { label: "Cache",      value: `${pagePerf.cacheHits} hits / ${pagePerf.cacheMisses} misses` },
+  ];
+  initPerfTooltip(el);
+}
+
+function initPerfTooltip(el) {
+  if (el._perfTooltipInit) return;
+  el._perfTooltipInit = true;
+  const tip = document.getElementById("perf-tooltip");
+  if (!tip) return;
+  el.addEventListener("mouseenter", () => {
+    const rows = el._perfRows;
+    if (!rows) return;
+    tip.innerHTML = rows.map(r =>
+      `<div class="pt-row"><span class="pt-label">${r.label}</span><span class="pt-value${r.warn ? " pt-warn" : ""}">${r.value}${r.sub ? ` <span class="pt-sub">(${r.sub})</span>` : ""}</span></div>`
+    ).join("");
+    const rect = el.getBoundingClientRect();
+    tip.style.bottom = (window.innerHeight - rect.top + 8) + "px";
+    tip.style.right = (window.innerWidth - rect.right) + "px";
+    tip.classList.add("visible");
+  });
+  el.addEventListener("mouseleave", () => tip.classList.remove("visible"));
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -701,7 +752,15 @@ const ALPHA_PKG = "0xd631cd66138909636fc3f73ed75820d0c5b76332d1644608ed1c85ea2b8
 const ALPHA_MARKETS_TABLE = "0x2326d387ba8bb7d24aa4cfa31f9a1e58bf9234b097574afb06c5dfb267df4c2e";
 const ALPHA_POSITIONS_TABLE = "0x9923cec7b613e58cc3feec1e8651096ad7970c0b4ef28b805c7d97fe58ff91ba";
 const ALPHA_CAP_TYPE = `${ALPHA_PKG}::position::PositionCap`;
-const ALPHA_MARKETS = { 1:"SUI",2:"stSUI",3:"BTC",5:"USDT",6:"USDC",7:"WAL",8:"DEEP",9:"BLUE",10:"ETH",11:"USDC",15:"sSUI",16:"XBTC",18:"NAVX" };
+const ALPHA_MARKETS = {
+  1:"SUI", 2:"stSUI", 3:"BTC", 4:"LBTC", 5:"USDT", 6:"USDC",
+  7:"WAL", 8:"DEEP", 9:"BLUE", 10:"ETH", 11:"DEEP",
+  12:"ALPHA", 13:"DMC", 14:"TBTC", 15:"IKA",
+  16:"XBTC", 17:"ALKIMI", 18:"XAUM", 19:"UP",
+  20:"EBTC", 21:"ESUI", 22:"EGUSDC", 23:"ETHIRD",
+  24:"EXBTC", 25:"SDEUSD", 26:"EWAL", 27:"RCUSDP",
+  28:"COIN", 29:"WBTC", 30:"BTCVC", 31:"SUI_USDE",
+};
 
 // Cetus CLMM
 const CETUS_CLMM_PKG = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb";
@@ -1058,7 +1117,7 @@ function fullHashLink(hash, route) {
 }
 
 function copyBtn(text) {
-  return `<button class="copy-btn" data-action="copy-text" data-copy-text="${escapeAttr(text)}" title="Copy">&#x2398;</button>`;
+  return `<button class="copy-btn" data-action="copy-text" data-copy-text="${escapeAttr(text)}" title="Copy" aria-label="Copy to clipboard">&#x2398;</button>`;
 }
 
 function statusBadge(s) {
@@ -1071,6 +1130,11 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
 function escapeAttr(s) {
@@ -1603,7 +1667,7 @@ function fmtCoinWithMeta(amount, coinRepr) {
 }
 
 function copyLinkBtn() {
-  return `<button class="copy-btn" data-action="copy-link" title="Copy link">&#x1F517;</button>`;
+  return `<button class="copy-btn" data-action="copy-link" title="Copy link" aria-label="Copy page link to clipboard">&#x1F517;</button>`;
 }
 
 // Short type display: "0xpkg::mod::Type<...>" → "mod::Type"
@@ -1742,7 +1806,7 @@ async function routeTo(route) {
   const r = parseRoute(route);
   startPagePerf(r.page);
   // Update active nav — handle flat links and dropdown items
-  const networkPages = ["transfers","congestion","events","protocol","packages"];
+  const networkPages = ["transfers","congestion","events","protocol","validators"];
   const defiPages = ["defi-overview","defi-rates","defi-dex","defi-stablecoins","defi-lst","defi-flows","defi-risk"];
   const devtoolsPages = ["graphql","simulate"];
   document.querySelectorAll(".topbar nav > a").forEach(a => {
@@ -1796,7 +1860,7 @@ async function routeTo(route) {
     finishPagePerf("ok");
   } catch (e) {
     console.error(e);
-    app.innerHTML = renderEmpty("Error loading page: " + e.message);
+    app.innerHTML = renderEmpty("Error loading page: " + escapeHtml(e.message));
     finishPagePerf("error");
   }
   scheduleUiEnhancements();
@@ -5488,8 +5552,14 @@ async function fetchNaviPositions(addr) {
   } }`);
   const userInfo = userInfoData?.address?.dynamicField?.value?.json;
   if (!userInfo) return [];
-  const collateralIds = userInfo.collaterals || [];
-  const loanIds = userInfo.loans || [];
+  // collaterals/loans are VecSet<u8> → serialized as base64 strings of raw bytes
+  const decodeAssetIds = v => {
+    if (Array.isArray(v)) return v.map(Number);
+    if (typeof v === "string" && v.length > 0) return Array.from(atob(v), c => c.charCodeAt(0));
+    return [];
+  };
+  const collateralIds = decodeAssetIds(userInfo.collaterals);
+  const loanIds = decodeAssetIds(userInfo.loans);
   const allAssetIds = [...new Set([...collateralIds, ...loanIds])];
   if (!allAssetIds.length) return [];
   // Step 2: Batch-fetch reserves
@@ -5519,13 +5589,21 @@ async function fetchNaviPositions(addr) {
     return val != null ? { assetId: q.assetId, type: q.type, balance: String(val), reserve: q.reserve } : null;
   }).filter(Boolean);
   // Prefetch CoinMetadata for any unknown coin types
-  const unknownTypes = balResults.map(b => b.reserve.coin_type).filter(ct => ct && !KNOWN_COIN_TYPES[ct]);
+  // NAVI reserves return coin_type without 0x prefix and with full 64-char addresses — normalize
+  const normalizeCt = ct => {
+    if (!ct) return "";
+    if (!ct.startsWith("0x")) ct = "0x" + ct;
+    const sep = ct.indexOf("::");
+    if (sep > 2) { const addr = ct.slice(2, sep).replace(/^0+/, "") || "0"; ct = "0x" + addr + ct.slice(sep); }
+    return ct;
+  };
+  const unknownTypes = balResults.map(b => normalizeCt(b.reserve.coin_type)).filter(ct => ct && !KNOWN_COIN_TYPES[ct]);
   if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
   const deposits = [], borrows = [];
   let totalDepUsd = 0, totalBorUsd = 0;
   for (const b of balResults) {
     const rv = b.reserve;
-    const coinType = rv.coin_type || "";
+    const coinType = normalizeCt(rv.coin_type);
     const resolved = resolveCoinType(coinType);
     const sym = resolved.symbol || `Asset${b.assetId}`;
     const dec = resolved.decimals;
@@ -6151,7 +6229,7 @@ async function renderAddress(app, addr) {
       if (bluefinSpot.status === "rejected") errors.push("Bluefin Spot");
       if (bluefinPro.status === "rejected") errors.push("Bluefin Pro");
       if (aftermathPerps.status === "rejected") errors.push("Aftermath Perps");
-      defiHtml = renderEmpty("No DeFi positions found." + (errors.length ? " (Failed: " + errors.join(", ") + ")" : ""));
+      defiHtml = renderEmpty("No DeFi positions found." + (errors.length ? " (Failed: " + errors.map(escapeHtml).join(", ") + ")" : ""));
       defiLoaded = true; renderTabs("defi"); return;
     }
 
@@ -6378,7 +6456,7 @@ async function renderAddress(app, addr) {
     // Lazy-load DeFi data when tab is clicked
     if (active === "defi" && !defiLoaded) {
       loadDefi().catch(e => {
-        defiHtml = renderEmpty("Failed to load DeFi data: " + e.message);
+        defiHtml = renderEmpty("Failed to load DeFi data: " + escapeHtml(e.message));
         defiLoaded = true;
         renderTabs("defi");
       });
@@ -6831,7 +6909,7 @@ async function renderDeletedObjectDetail(app, id) {
     <div class="card u-mb16">
       <div class="card-body" id="deleted-obj-card">${renderOverviewBody()}</div>
     </div>
-    <div class="card" style="overflow:hidden">
+    <div class="card">
       <div id="obj-tabs" class="inner-tabs"></div>
       <div id="obj-tab-content" class="card-body"></div>
     </div>
@@ -6928,6 +7006,7 @@ async function renderObjectDetail(app, id) {
   const moduleData = {};
   let selectedModule = modules[0]?.name || "";
   let activeModuleTab = "functions";
+  let expandedFunctions = new Set();
 
   async function loadMoreDynamicFields() {
     if (dynFieldsLoading || !dynFieldsHasNext) return;
@@ -7104,9 +7183,42 @@ async function renderObjectDetail(app, id) {
           const tpStr = tps ? `&lt;${tps}&gt;` : "";
           const params = (f.parameters || []).map(p => shortType(p.repr)).join(", ");
           const ret = (f.return || []).map(r => shortType(r.repr)).join(", ");
-          html += `<div style="padding:6px 16px;font-family:var(--mono);font-size:12px;border-bottom:1px solid var(--border)">
-            <span style="color:${visColor};font-size:11px;display:inline-block;width:45px">${vis}</span>${f.isEntry ? '<span style="color:var(--accent);font-size:11px"> entry</span> ' : ""}<span class="u-fw-600">${f.name}</span>${tpStr}(<span class="u-c-dim">${params}</span>)${ret ? ` -&gt; <span class="u-c-purple">${ret}</span>` : ""}
+          const isExpanded = expandedFunctions.has(f.name);
+          const chevron = isExpanded ? "▼" : "▶";
+          html += `<div data-action="obj-toggle-fn" data-fn="${escapeAttr(f.name)}" style="padding:6px 16px;font-family:var(--mono);font-size:12px;border-bottom:${isExpanded ? "none" : "1px solid var(--border)"};cursor:pointer;display:flex;align-items:flex-start;gap:8px;user-select:none" title="Click to ${isExpanded ? "collapse" : "expand"} function details">
+            <span style="color:var(--text-dim);font-size:10px;margin-top:2px;flex-shrink:0">${chevron}</span>
+            <div style="min-width:0;flex:1"><span style="color:${visColor};font-size:11px;display:inline-block;width:45px">${vis}</span>${f.isEntry ? '<span style="color:var(--accent);font-size:11px"> entry</span> ' : ""}<span class="u-fw-600">${escapeHtml(f.name)}</span>${tpStr}(<span class="u-c-dim">${params}</span>)${ret ? ` -&gt; <span class="u-c-purple">${ret}</span>` : ""}</div>
           </div>`;
+          if (isExpanded) {
+            html += `<div style="padding:10px 16px 14px 40px;border-bottom:1px solid var(--border);background:var(--bg);font-family:var(--mono);font-size:12px;line-height:1.6">`;
+            if (f.typeParameters?.length) {
+              html += `<div style="margin-bottom:10px"><div style="color:var(--text-dim);font-size:10px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">Type Parameters</div>`;
+              f.typeParameters.forEach((tp, i) => {
+                const con = tp.constraints?.length ? ` <span style="color:var(--text-dim)">:</span> <span class="u-c-purple">${tp.constraints.map(escapeHtml).join(" + ")}</span>` : "";
+                html += `<div style="padding:1px 0"><span class="u-c-purple">T${i}</span>${con}</div>`;
+              });
+              html += `</div>`;
+            }
+            html += `<div style="margin-bottom:10px"><div style="color:var(--text-dim);font-size:10px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">Parameters</div>`;
+            if (f.parameters?.length) {
+              f.parameters.forEach((p, i) => {
+                html += `<div style="padding:1px 0"><span class="u-c-dim">_${i}:</span> <span class="u-c-blue">${escapeHtml(p.repr)}</span></div>`;
+              });
+            } else {
+              html += `<div style="color:var(--text-dim)">(none)</div>`;
+            }
+            html += `</div>`;
+            html += `<div><div style="color:var(--text-dim);font-size:10px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">Returns</div>`;
+            if (f.return?.length) {
+              f.return.forEach(r => {
+                html += `<div style="padding:1px 0"><span class="u-c-purple">${escapeHtml(r.repr)}</span></div>`;
+              });
+            } else {
+              html += `<div style="color:var(--text-dim)">(none)</div>`;
+            }
+            html += `</div>`;
+            html += `</div>`;
+          }
         }
         html += '</div>';
       }
@@ -7185,7 +7297,7 @@ async function renderObjectDetail(app, id) {
       const act = m.name === selectedModule;
       const d = moduleData[m.name];
       const badge = d ? `<span class="u-fs10-dim">${d.functions.length}fn ${d.structs.length}st${d.enums?.length ? ' ' + d.enums.length + 'en' : ''}</span>` : "";
-      return `<div data-action="obj-select-module" data-module="${escapeAttr(m.name)}" style="padding:6px 12px;cursor:pointer;font-family:var(--mono);font-size:12px;display:flex;justify-content:space-between;align-items:center;background:${act ? 'var(--bg-light)' : 'transparent'};border-left:2px solid ${act ? 'var(--accent)' : 'transparent'};color:${act ? 'var(--text)' : 'var(--text-dim)'}">${escapeHtml(m.name)}${badge}</div>`;
+      return `<div role="button" tabindex="0" data-action="obj-select-module" data-module="${escapeAttr(m.name)}" style="padding:6px 12px;cursor:pointer;font-family:var(--mono);font-size:12px;display:flex;justify-content:space-between;align-items:center;background:${act ? 'var(--bg-light)' : 'transparent'};border-left:2px solid ${act ? 'var(--accent)' : 'transparent'};color:${act ? 'var(--text)' : 'var(--text-dim)'}">${escapeHtml(m.name)}${badge}</div>`;
     }).join("");
     if (modulesHasNext || modulesLoading) {
       html += `<div style="padding:8px 10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -7205,6 +7317,7 @@ async function renderObjectDetail(app, id) {
   const selectModule = async (modName) => {
     selectedModule = modName;
     activeModuleTab = "functions";
+    expandedFunctions = new Set();
     filterModules(document.getElementById("pkg-mod-filter")?.value || "");
     const panel = document.getElementById("pkg-module-panel");
     if (!panel) return;
@@ -7502,7 +7615,8 @@ async function renderObjectDetail(app, id) {
         </div>
       </div>
     </div>
-    <div class="card" style="overflow:hidden">
+    ${isPackage ? `<div class="card u-mb16" id="pkg-activity-card"><div class="card-body" style="padding:12px 16px;color:var(--text-dim);font-size:13px">Loading activity stats...</div></div>` : ""}
+    <div class="card">
       <div id="obj-tabs" class="inner-tabs"></div>
       <div id="obj-tab-content" class="card-body"></div>
     </div>
@@ -7540,6 +7654,19 @@ async function renderObjectDetail(app, id) {
       await loadMorePackageModules();
       return;
     }
+    if (action === "obj-toggle-fn") {
+      ev.preventDefault();
+      const fnName = trigger.getAttribute("data-fn") || "";
+      if (!fnName) return;
+      if (expandedFunctions.has(fnName)) {
+        expandedFunctions.delete(fnName);
+      } else {
+        expandedFunctions.add(fnName);
+      }
+      const panel = document.getElementById("pkg-module-panel");
+      if (panel) panel.innerHTML = renderModulePanel();
+      return;
+    }
     if (action === "obj-switch-mod-tab") {
       ev.preventDefault();
       switchModuleTab(trigger.getAttribute("data-tab") || "functions");
@@ -7561,7 +7688,159 @@ async function renderObjectDetail(app, id) {
     filterModules(target.value || "");
   };
   app.addEventListener("input", app._objectDetailInputHandler);
+  if (app._objectDetailKeyHandler) app.removeEventListener("keydown", app._objectDetailKeyHandler);
+  app._objectDetailKeyHandler = async (ev) => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    const trigger = ev.target?.closest?.("[data-action='obj-select-module']");
+    if (!trigger || !app.contains(trigger)) return;
+    ev.preventDefault();
+    const modName = trigger.getAttribute("data-module") || "";
+    if (modName) await selectModule(modName);
+  };
+  app.addEventListener("keydown", app._objectDetailKeyHandler);
   renderTabs(isPackage ? "modules" : "fields");
+
+  if (isPackage) {
+    (async () => {
+      const actCard = document.getElementById("pkg-activity-card");
+      if (!actCard) return;
+      try {
+        const actData = await gql(`query($pkg: String!) {
+          transactions(last: 50, filter: { function: $pkg }) {
+            nodes {
+              digest
+              sender { address }
+              effects {
+                gasEffects { gasSummary { computationCost storageCost storageRebate } }
+                objectChanges(first: 50) { nodes { address idCreated idDeleted } }
+              }
+            }
+          }
+        }`, { pkg: id });
+        // Deduplicate: a tx can appear multiple times if it calls the package multiple times
+        const seenDigests = new Set();
+        const txNodes = (actData?.transactions?.nodes || []).filter(tx => {
+          if (!tx.digest || seenDigests.has(tx.digest)) return false;
+          seenDigests.add(tx.digest);
+          return true;
+        });
+        if (!actCard.isConnected) return;
+        // Per-tx stats
+        const txStats = txNodes.map(tx => {
+          const gs = tx.effects?.gasEffects?.gasSummary;
+          const comp = gs ? BigInt(gs.computationCost ?? 0) : 0n;
+          const stor = gs ? BigInt(gs.storageCost ?? 0) : 0n;
+          const reb  = gs ? BigInt(gs.storageRebate ?? 0) : 0n;
+          const gasUsed = comp + stor - reb;
+          const changes = tx.effects?.objectChanges?.nodes || [];
+          const txCreated = changes.filter(c => c.idCreated).map(c => c.address);
+          const txDeleted = changes.filter(c => c.idDeleted).map(c => c.address);
+          const txMutated = changes.filter(c => !c.idCreated && !c.idDeleted).map(c => c.address);
+          return { digest: tx.digest, sender: tx.sender?.address || null, gasUsed, comp, stor, reb, txCreated, txDeleted, txMutated };
+        });
+        const txCount = txStats.length;
+        if (txCount === 0) { actCard.remove(); return; }
+        const totalGas = txStats.reduce((s, t) => s + t.gasUsed, 0n);
+        const created = txStats.reduce((s, t) => s + t.txCreated.length, 0);
+        const mutated = txStats.reduce((s, t) => s + t.txMutated.length, 0);
+        const deleted = txStats.reduce((s, t) => s + t.txDeleted.length, 0);
+
+        const statCell = (label, value, sub) => `
+          <div style="text-align:center;padding:10px 16px">
+            <div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--text)">${value}</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:3px">${label}</div>
+            ${sub ? `<div style="font-size:10px;color:var(--text-dim);opacity:0.6;margin-top:1px">${sub}</div>` : ""}
+          </div>`;
+
+        const addrList = (addrs, color) => addrs.length
+          ? addrs.map(a => `<div style="padding:1px 0">${hashLink(a, '/object/' + a)}</div>`).join("")
+          : `<span style="color:var(--text-dim)">—</span>`;
+
+        const txRows = txStats.map(t => {
+          const hasChanges = t.txCreated.length || t.txMutated.length || t.txDeleted.length;
+          const changeDetail = hasChanges ? `
+            <tr><td colspan="5" style="padding:0 0 6px 24px;background:var(--bg)">
+              <details style="font-size:11px">
+                <summary style="cursor:pointer;color:var(--text-dim);padding:4px 0;list-style:none;display:flex;align-items:center;gap:4px">
+                  <span style="font-size:10px">▶</span> View object changes
+                </summary>
+                <div style="padding:6px 0 2px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+                  <div>
+                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--green);margin-bottom:3px">Created (${t.txCreated.length})</div>
+                    ${addrList(t.txCreated, "var(--green)")}
+                  </div>
+                  <div>
+                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);margin-bottom:3px">Mutated (${t.txMutated.length})</div>
+                    ${addrList(t.txMutated, "var(--accent)")}
+                  </div>
+                  <div>
+                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--red);margin-bottom:3px">Deleted (${t.txDeleted.length})</div>
+                    ${addrList(t.txDeleted, "var(--red)")}
+                  </div>
+                </div>
+              </details>
+            </td></tr>` : "";
+          const storNet  = t.stor > t.reb ? t.stor - t.reb : 0n;
+          const compPct  = t.gasUsed > 0n ? Number(t.comp   * 1000n / t.gasUsed) / 10 : 0;
+          const storPct  = t.gasUsed > 0n ? Number(storNet  * 1000n / t.gasUsed) / 10 : 0;
+          const gasCell = `
+            <div>
+              <div style="font-family:var(--mono);font-size:12px;text-align:right">${fmtSui(t.gasUsed.toString())}</div>
+              <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:4px;background:var(--border)">
+                <div style="width:${compPct}%;min-width:${compPct>0?3:0}px;background:var(--accent)"></div>
+                <div style="width:${storPct}%;min-width:${storPct>0?3:0}px;background:var(--yellow)"></div>
+              </div>
+              <div style="display:flex;gap:8px;font-size:10px;color:var(--text-dim);margin-top:3px;justify-content:flex-end">
+                <span style="display:flex;align-items:center;gap:3px"><span style="display:inline-block;width:8px;height:8px;border-radius:1px;background:var(--accent)"></span>comp</span>
+                <span style="display:flex;align-items:center;gap:3px"><span style="display:inline-block;width:8px;height:8px;border-radius:1px;background:var(--yellow)"></span>stor</span>
+              </div>
+            </div>`;
+          return `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td class="u-mono-12">${fullHashLink(t.digest, '/tx/' + t.digest)}</td>
+              <td class="u-mono-12">${t.sender ? hashLink(t.sender, '/address/' + t.sender) : "—"}</td>
+              <td style="text-align:right;vertical-align:top">${gasCell}</td>
+              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--green)">${t.txCreated.length || "—"}</td>
+              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--accent)">${t.txMutated.length || "—"}</td>
+              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--red)">${t.txDeleted.length || "—"}</td>
+            </tr>${changeDetail}`;
+        }).join("");
+
+        actCard.innerHTML = `
+          <div style="padding:10px 16px 8px;font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.07em;border-bottom:1px solid var(--border)">
+            Recent Activity <span style="font-weight:400;text-transform:none;letter-spacing:0">(last ${txCount === 50 ? "50+" : txCount} txns using this package)</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;justify-content:space-around;padding:4px 0;border-bottom:1px solid var(--border)">
+            ${statCell("Transactions", txCount.toLocaleString(), txCount === 50 ? "50 sampled" : "")}
+            ${statCell("Gas Burned", fmtSui(totalGas.toString()), "across sample")}
+            ${statCell("Objects Created", created.toLocaleString(), "")}
+            ${statCell("Objects Mutated", mutated.toLocaleString(), "")}
+            ${statCell("Objects Deleted", deleted.toLocaleString(), "")}
+          </div>
+          <details style="padding:0">
+            <summary style="padding:8px 16px;font-size:12px;color:var(--text-dim);cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;user-select:none">
+              <span style="font-size:10px">▶</span> Show transactions
+            </summary>
+            <div style="overflow-x:auto">
+              <table style="margin:0">
+                <thead><tr>
+                  <th>Digest</th>
+                  <th>Sender</th>
+                  <th style="text-align:right">Gas Used</th>
+                  <th style="text-align:center;color:var(--green)">Created</th>
+                  <th style="text-align:center;color:var(--accent)">Mutated</th>
+                  <th style="text-align:center;color:var(--red)">Deleted</th>
+                </tr></thead>
+                <tbody>${txRows}</tbody>
+              </table>
+            </div>
+          </details>`;
+      } catch (e) {
+        const actCard2 = document.getElementById("pkg-activity-card");
+        if (actCard2) actCard2.innerHTML = `<div class="card-body" style="padding:10px 16px;color:var(--text-dim);font-size:12px">Activity stats unavailable: ${escapeHtml(e?.message || String(e))}</div>`;
+      }
+    })();
+  }
 }
 
 // ── Epoch Detail ───────────────────────────────────────────────────────
@@ -7730,7 +8009,7 @@ const QUERIES = {
     }
   }
 }`,
-    variables: { digest: "" },
+    variables: { digest: "2nCB7sd9hVJqnnQCSuzbkTLk4DuWp2RhdKfdQPgqfA4x" },
   },
   checkpoint_detail: {
     label: "Checkpoint Detail",
@@ -7774,7 +8053,7 @@ const QUERIES = {
     objects(first: 20) { nodes { address version digest contents { type { repr } json } } }
   }
 }`,
-    variables: { addr: "" },
+    variables: { addr: "0xffd4f043057226453aeba59732d41c6093516f54823ebc3a16d17f8a77d2f0ad" },
   },
   object_detail: {
     label: "Object Detail",
@@ -7799,7 +8078,54 @@ const QUERIES = {
     } }
   }
 }`,
-    variables: { id: "" },
+    variables: { id: "0x98cb609be3149a6b38f19117e61b6052054fd239427e8ab4439088525f2d7ed3" },
+  },
+  deepbook_trade_events: {
+    label: "DeepBook — Recent Trade Fills",
+    query: `{
+  events(last: 20, filter: {
+    type: "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809::order_info::OrderFilled"
+  }) {
+    nodes {
+      contents {
+        type { repr }
+        json
+      }
+      sender { address }
+      timestamp
+      transactionModule { name package { address } }
+    }
+  }
+}`,
+    variables: {},
+  },
+  deepbook_pool_object: {
+    label: "DeepBook — SUI/USDC Pool + Recent Activity",
+    query: `{
+  object(address: "0xe05dafb5133bcffb8d59f4e12465dc0e9faeaa05e3e342a08fe135800e3e4407") {
+    address version digest
+    asMoveObject {
+      contents { type { repr } json }
+    }
+    objectVersionsBefore(last: 5) {
+      nodes {
+        version digest
+        previousTransaction {
+          digest
+          effects {
+            status timestamp
+            events(first: 10) {
+              nodes {
+                contents { type { repr } json }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`,
+    variables: {},
   },
   sample: {
     label: "Sample — Latest Checkpoint",
@@ -8522,8 +8848,8 @@ async function renderEvents(app) {
 
     // Filters
     html += `<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-      <input id="evt-type-filter" type="text" placeholder="Filter by event type..." value="${eventTypeFilter}" style="flex:1;min-width:200px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:var(--mono)" />
-      <input id="evt-sender-filter" type="text" placeholder="Filter by sender..." value="${senderFilter}" style="width:200px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:var(--mono)" />
+      <input id="evt-type-filter" type="text" placeholder="Filter by event type..." value="${eventTypeFilter}" aria-label="Filter events by type" style="flex:1;min-width:200px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:var(--mono)" />
+      <input id="evt-sender-filter" type="text" placeholder="Filter by sender..." value="${senderFilter}" aria-label="Filter events by sender address" style="width:200px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:var(--mono)" />
       <button data-action="events-apply-filter" style="padding:6px 16px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">Filter</button>
     </div>`;
 
@@ -9174,11 +9500,12 @@ async function renderPackages(app) {
     app.innerHTML = renderContent();
   };
   if (app._packagesInputHandler) app.removeEventListener("input", app._packagesInputHandler);
+  const _debouncedPkgQuery = debounce((val) => setPackagesQuery(val), 300);
   app._packagesInputHandler = (ev) => {
     const target = ev.target;
     if (!(target instanceof Element)) return;
     if (target.getAttribute("data-action") !== "packages-query") return;
-    setPackagesQuery(target.value || "");
+    _debouncedPkgQuery(target.value || "");
   };
   app.addEventListener("input", app._packagesInputHandler);
   if (app._packagesChangeHandler) app.removeEventListener("change", app._packagesChangeHandler);
@@ -9806,11 +10133,12 @@ async function renderDefiDex(app) {
     app.innerHTML = renderContent();
   };
   if (app._defiDexInputHandler) app.removeEventListener("input", app._defiDexInputHandler);
+  const _debouncedDexQuery = debounce((val) => setDefiDexQuery(val), 300);
   app._defiDexInputHandler = (ev) => {
     const target = ev.target;
     if (!(target instanceof Element)) return;
     if (target.getAttribute("data-action") !== "defi-dex-query") return;
-    setDefiDexQuery(target.value || "");
+    _debouncedDexQuery(target.value || "");
   };
   app.addEventListener("input", app._defiDexInputHandler);
   if (app._defiDexChangeHandler) app.removeEventListener("change", app._defiDexChangeHandler);
@@ -10032,11 +10360,12 @@ async function renderDefiStablecoins(app) {
     app.innerHTML = renderContent();
   };
   if (app._defiStableInputHandler) app.removeEventListener("input", app._defiStableInputHandler);
+  const _debouncedStableQuery = debounce((val) => setDefiStableQuery(val), 300);
   app._defiStableInputHandler = (ev) => {
     const target = ev.target;
     if (!(target instanceof Element)) return;
     if (target.getAttribute("data-action") !== "defi-stable-query") return;
-    setDefiStableQuery(target.value || "");
+    _debouncedStableQuery(target.value || "");
   };
   app.addEventListener("input", app._defiStableInputHandler);
   if (app._defiStableChangeHandler) app.removeEventListener("change", app._defiStableChangeHandler);
@@ -10188,11 +10517,12 @@ async function renderDefiLst(app) {
     app.innerHTML = renderContent();
   };
   if (app._defiLstInputHandler) app.removeEventListener("input", app._defiLstInputHandler);
+  const _debouncedLstQuery = debounce((val) => setDefiLstQuery(val), 300);
   app._defiLstInputHandler = (ev) => {
     const target = ev.target;
     if (!(target instanceof Element)) return;
     if (target.getAttribute("data-action") !== "defi-lst-query") return;
-    setDefiLstQuery(target.value || "");
+    _debouncedLstQuery(target.value || "");
   };
   app.addEventListener("input", app._defiLstInputHandler);
   if (app._defiLstChangeHandler) app.removeEventListener("change", app._defiLstChangeHandler);
@@ -10374,11 +10704,12 @@ async function renderDefiFlows(app) {
     app.innerHTML = renderContent();
   };
   if (app._defiFlowInputHandler) app.removeEventListener("input", app._defiFlowInputHandler);
+  const _debouncedFlowQuery = debounce((val) => setDefiFlowQuery(val), 300);
   app._defiFlowInputHandler = (ev) => {
     const target = ev.target;
     if (!(target instanceof Element)) return;
     if (target.getAttribute("data-action") !== "defi-flow-query") return;
-    setDefiFlowQuery(target.value || "");
+    _debouncedFlowQuery(target.value || "");
   };
   app.addEventListener("input", app._defiFlowInputHandler);
   if (app._defiFlowChangeHandler) app.removeEventListener("change", app._defiFlowChangeHandler);
@@ -10653,7 +10984,7 @@ async function renderDefiRates(app) {
   }
 
   function renderContent() {
-    if (loadErr) return `<div class="page-title">Lending Rates</div>${renderEmpty(loadErr)}`;
+    if (loadErr) return `<div class="page-title">Lending Rates</div>${renderEmpty(escapeHtml(loadErr))}`;
     const allRows = data?.byToken?.[token] || [];
     const rows = sortedRows(allRows);
     const live = allRows.filter(r => Number.isFinite(r.borrowBps) && Number.isFinite(r.supplyBps));
@@ -10912,13 +11243,16 @@ async function renderProtocolConfig(app) {
   }
 
   if (app._protoInputHandler) app.removeEventListener("input", app._protoInputHandler);
+  const _debouncedProtoFilter = debounce((val) => {
+    configFilter = val;
+    setRouteParams({ q: configFilter || null });
+    app.innerHTML = renderContent();
+  }, 300);
   app._protoInputHandler = (ev) => {
     const target = ev.target;
     if (!(target instanceof Element)) return;
     if (target.id !== "proto-filter") return;
-    configFilter = target.value || "";
-    setRouteParams({ q: configFilter || null });
-    app.innerHTML = renderContent();
+    _debouncedProtoFilter(target.value || "");
   };
   app.addEventListener("input", app._protoInputHandler);
   app.innerHTML = renderContent();
@@ -11024,7 +11358,7 @@ async function renderSimulator(app) {
 
     // Results
     if (simError) {
-      html += `<div class="card" style="border-color:var(--red);padding:16px"><div style="color:var(--red);font-weight:600;margin-bottom:4px">Simulation Error</div><div style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${simError}</div></div>`;
+      html += `<div class="card" style="border-color:var(--red);padding:16px"><div style="color:var(--red);font-weight:600;margin-bottom:4px">Simulation Error</div><div style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${escapeHtml(simError)}</div></div>`;
     }
     if (simResult) {
       const eff = simResult.effects;
@@ -11094,7 +11428,7 @@ async function renderSimulator(app) {
     if (rerender) app.innerHTML = renderContent();
     try {
       const data = await gql(`{
-        transactions(last: 40) {
+        transactions(last: 40, filter: { kind: PROGRAMMABLE_TX }) {
           nodes { digest transactionBcs effects { status } }
         }
       }`);

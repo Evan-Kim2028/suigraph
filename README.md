@@ -1,6 +1,6 @@
-# GraphQL Sui Block Explorer
+# suigraph block explorer
 
-Standalone repository root for the Sui GraphQL-powered block explorer.
+a graphql based block explorer.
 
 ## Structure
 - `site/`: single-file web app source, build scripts, docs, and deploy artifact output.
@@ -13,4 +13,3 @@ Run from `site/`:
 
 ## Deploy Artifact
 - `site/dist/index.html`
-

@@ -1,6 +1,6 @@
 {
-  "name": "graphql-sui-block-explorer-site",
-  "description": "Single-file Sui GraphQL block explorer site",
+  "name": "suigraph-site",
+  "description": "a graphql based block explorer (single-file site)",
   "private": true,
   "type": "module",
   "engines": {

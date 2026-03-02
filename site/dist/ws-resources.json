@@ -1,0 +1,22 @@
+{
+  "site_name": "suigraph block explorer",
+  "routes": {
+    "/*": "/index.html"
+  },
+  "headers": {
+    "/index.html": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-cache, must-revalidate",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src https://graphql.mainnet.sui.io https://api.coingecko.com; img-src 'self' data: https:; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
+    }
+  },
+  "metadata": {
+    "description": "a graphql based block explorer",
+    "project_url": "https://github.com/Evan-Kim2028/suigraph",
+    "creator": "Sui Community"
+  }
+}
