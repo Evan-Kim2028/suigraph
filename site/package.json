@@ -1,5 +1,6 @@
 {
   "name": "suigraph-site",
+  "version": "1.0.0",
   "description": "a graphql based block explorer (single-file site)",
   "private": true,
   "type": "module",
