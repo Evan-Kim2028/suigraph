@@ -1,16 +1,16 @@
 # Baseline Metrics
 
-Generated: `2026-02-28T21:24:26.065Z`
+Generated: `2026-03-02T03:04:57.927Z`
 
 | Metric | Value |
 |---|---:|
 | Source file | `src/index.template.html + src/styles.css + src/app.js` |
-| Lines | 12280 |
-| Bytes | 584827 |
-| Inline style attributes | 337 |
+| Lines | 12684 |
+| Bytes | 606428 |
+| Inline style attributes | 391 |
 | `window.*` handler assignments | 0 |
-| `await gql(...)` call sites | 78 |
-| Total `gql(...)` call sites | 80 |
+| `await gql(...)` call sites | 79 |
+| Total `gql(...)` call sites | 81 |
 | Router `case` labels | 24 |
 
 Notes:

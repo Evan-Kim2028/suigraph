@@ -9,8 +9,8 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 
 | Metric | Value |
 |---|---:|
-| Total gql call sites | 80 |
-| Static template query call sites | 76 |
+| Total gql call sites | 81 |
+| Static template query call sites | 77 |
 | Dynamic/non-literal call sites | 4 |
 | Query root fields in schema snapshot | 32 |
 | Query root fields used (static scan) | 21 |
@@ -26,7 +26,7 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 | `address` | 25 |
 | `object` | 12 |
 | `checkpoint` | 8 |
-| `transactions` | 7 |
+| `transactions` | 8 |
 | `checkpoints` | 4 |
 | `epoch` | 3 |
 | `objectVersions` | 3 |
