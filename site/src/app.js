@@ -1212,6 +1212,36 @@ function intentConfidenceClass(confidence) {
   return "intent-low";
 }
 
+// Event-type keyword → action label (first match wins, checked against lowercased event type repr)
+const EVENT_ACTION_TAGS = [
+  { pattern: "swap",      label: "Swap" },
+  { pattern: "deposit",   label: "Deposit" },
+  { pattern: "withdraw",  label: "Withdraw" },
+  { pattern: "borrow",    label: "Borrow" },
+  { pattern: "repay",     label: "Repay" },
+  { pattern: "liquidat",  label: "Liquidation" },
+  { pattern: "stake",     label: "Stake" },
+  { pattern: "unstake",   label: "Unstake" },
+  { pattern: "claim",     label: "Claim" },
+  { pattern: "mint",      label: "Mint" },
+  { pattern: "burn",      label: "Burn" },
+  { pattern: "flash",     label: "Flash Loan" },
+  { pattern: "order",     label: "Order" },
+  { pattern: "fill",      label: "Fill" },
+];
+
+function classifyEventAction(events) {
+  if (!events?.length) return null;
+  for (const ev of events) {
+    const repr = (ev?.contents?.type?.repr || "").toLowerCase();
+    if (!repr) continue;
+    for (const tag of EVENT_ACTION_TAGS) {
+      if (repr.includes(tag.pattern)) return { label: tag.label, eventType: ev.contents.type.repr };
+    }
+  }
+  return null;
+}
+
 function analyzeTxIntent(tx) {
   const kind = tx?.kind;
   if (!kind) {
@@ -1261,11 +1291,19 @@ function analyzeTxIntent(tx) {
     : "";
   const protocol = inferProtocolTag(movePkg);
 
+  // Event-based action tagging (high confidence — protocol-authored events)
+  const events = tx?.effects?.events?.nodes || [];
+  const eventAction = classifyEventAction(events);
+
   let label = "Programmable Tx";
   let confidence = "low";
   const evidence = [];
 
-  if (counts.publish > 0) {
+  if (eventAction) {
+    label = eventAction.label;
+    confidence = "high";
+    evidence.push(`Event: ${eventAction.eventType}`);
+  } else if (counts.publish > 0) {
     label = counts.publish > 1 ? "Publish Batch" : "Publish";
     confidence = "high";
     evidence.push(`${counts.publish} publish command${counts.publish > 1 ? "s" : ""}`);
@@ -2048,6 +2086,7 @@ async function renderDashboard(app) {
         effects {
           status timestamp
           gasEffects { gasSummary { computationCost storageCost storageRebate } }
+          events(first: 3) { nodes { contents { type { repr } } } }
         }
       }
     }
@@ -2364,6 +2403,7 @@ async function renderDashboard(app) {
             effects {
               status timestamp
               gasEffects { gasSummary { computationCost storageCost storageRebate } }
+              events(first: 3) { nodes { contents { type { repr } } } }
             }
           }
         }
@@ -2869,6 +2909,7 @@ async function renderTransactions(app, before = null, dateState = null) {
               checkpoint { sequenceNumber }
               gasEffects { gasSummary { computationCost storageCost storageRebate } }
               balanceChanges(first: 16) { nodes { amount coinType { repr } } }
+              events(first: 3) { nodes { contents { type { repr } } } }
             }
           }
         }
@@ -6757,6 +6798,7 @@ async function renderAddress(app, addr) {
                 status timestamp
                 checkpoint { sequenceNumber }
                 balanceChanges(first: 16) { nodes { amount coinType { repr } } }
+                events(first: 3) { nodes { contents { type { repr } } } }
               }
             }
           }
