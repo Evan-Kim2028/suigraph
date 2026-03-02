@@ -305,13 +305,19 @@ function initPerfTooltip(el) {
 const GQL = "https://graphql.mainnet.sui.io/graphql";
 
 // ── DeFi Protocol Constants ────────────────────────────────────────────
-const COINGECKO_IDS = {
-  SUI: "sui", USDC: "usd-coin", WAL: "walrus-2", DEEP: "deep", USDT: "tether",
-  WBTC: "bitcoin", WETH: "ethereum", ETH: "ethereum", BTC: "bitcoin", NAVX: "navi", IKA: "ika",
-  CETUS: "cetus-token", HASUI: "sui", BUCK: "buck-stablecoin", FUD: "fud-the-pug", wUSDC: "usd-coin",
-  SPRING_SUI: "sui", MSUI: "sui", KSUI: "sui", CERT: "sui", stSUI: "sui", sSUI: "sui", SUI_USDE: "ethena-usde",
-  haSUI: "sui", afSUI: "sui", vSUI: "sui",
+// Pool oracle: on-chain pricing via Cetus + Bluefin CLMM pools
+const POOL_ORACLE_PRICE_TTL_MS = 30_000;
+const POOL_ORACLE_DISCOVERY_TTL_MS = 10 * 60_000;
+const CETUS_POOL_TYPE_PREFIX = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool";
+const BLUEFIN_POOL_TYPE_PREFIX = "0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267::pool::Pool";
+const QUOTE_COINS = {
+  SUI: { type: "0x2::sui::SUI", decimals: 9 },
+  USDC: { type: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", decimals: 6 },
 };
+const POOL_ORACLE_SKIP = new Set(["SUI", "USDC", "USDT", "wUSDC"]);
+const SUI_PEGGED_SYMBOLS = new Set(["haSUI", "afSUI", "vSUI", "sSUI", "HASUI", "SPRING_SUI", "MSUI", "KSUI", "CERT", "stSUI"]);
+let poolAddressCache = {};
+let oraclePricesTs = 0;
 const COMMON_DECIMALS = {
   SUI: 9, USDC: 6, USDT: 6, DEEP: 6, WAL: 9, WBTC: 8, WETH: 8, ETH: 8,
   NAVX: 9, CETUS: 9, BLUE: 9, MSUI: 9, KSUI: 9, CERT: 9, stSUI: 9,
@@ -326,7 +332,6 @@ const DEEPBOOK_QUOTE_DECIMALS = 6; // USDC
 const DEEPBOOK_PRICE_LOOKBACK_VERSIONS = 12;
 const DEEPBOOK_PRICE_EVENTS_PER_TX = 30;
 const DEEPBOOK_SUI_PRICE_TTL_MS = 15 * 1000;
-const COINGECKO_PRICE_TTL_MS = 60 * 1000;
 const DEFI_ACTIVITY_TTL_MS = 25 * 1000;
 const DEFI_OVERVIEW_TTL_MS = 45 * 1000;
 const DEFI_DEX_TTL_MS = 30 * 1000;
@@ -359,7 +364,6 @@ const DEFI_WINDOW_SAMPLE_TTL_MS = 20 * 1000;
 const DEFI_WINDOW_SHARED_TTL_MS = 20 * 1000;
 const DASH_EPOCHS_TTL_MS = 60 * 1000;
 let deepbookSuiPriceTs = 0;
-let coinGeckoPricesTs = 0;
 let defiPricesInFlight = null;
 const LENDING_RATES_TTL_MS = 60 * 1000;
 let lendingRatesCache = { data: null, ts: 0 };
@@ -3706,18 +3710,201 @@ async function fetchSuiPriceFromDeepBook() {
   return bidPx != null ? bidPx : askPx;
 }
 
-async function fetchCoinGeckoPrices() {
-  const ids = [...new Set(Object.values(COINGECKO_IDS))].join(",");
-  const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
-  if (!res.ok) return null;
-  return res.json();
+// ── Pool Oracle: on-chain pricing via Cetus + Bluefin CLMM pools ──────
+async function discoverPoolAddresses(coinTypes) {
+  const now = Date.now();
+  const needed = coinTypes.filter(ct => {
+    const c = poolAddressCache[ct];
+    return !c || (now - c.ts > POOL_ORACLE_DISCOVERY_TTL_MS);
+  });
+  if (!needed.length) return;
+
+  const aliases = [];
+  const aliasMeta = []; // track { coinType, dex, quoteSymbol, ordering }
+  for (const ct of needed) {
+    for (const [qSym, qInfo] of Object.entries(QUOTE_COINS)) {
+      if (ct === qInfo.type) continue; // skip self-pairing
+      for (const [dex, prefix] of [["cetus", CETUS_POOL_TYPE_PREFIX], ["bluefin", BLUEFIN_POOL_TYPE_PREFIX]]) {
+        // TOKEN is A, quote is B
+        const ab = `${prefix}<${ct}, ${qInfo.type}>`;
+        const aliasAB = `a${aliases.length}`;
+        aliases.push(`${aliasAB}: objects(filter: { type: "${ab}" }, first: 5) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+        aliasMeta.push({ coinType: ct, dex, quoteSymbol: qSym, isTokenA: true });
+        // quote is A, TOKEN is B
+        const ba = `${prefix}<${qInfo.type}, ${ct}>`;
+        const aliasBA = `a${aliases.length}`;
+        aliases.push(`${aliasBA}: objects(filter: { type: "${ba}" }, first: 5) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+        aliasMeta.push({ coinType: ct, dex, quoteSymbol: qSym, isTokenA: false });
+      }
+    }
+  }
+  if (!aliases.length) return;
+
+  // Chunk into manageable GQL calls (6 aliases per call)
+  for (const chunk of chunkArray(aliases.map((a, i) => ({ alias: a, meta: aliasMeta[i] })), 6)) {
+    try {
+      const q = `{ ${chunk.map(c => c.alias).join("\n")} }`;
+      const data = await gql(q);
+      for (let i = 0; i < chunk.length; i++) {
+        const aliasKey = chunk[i].alias.split(":")[0];
+        const poolNodes = data?.[aliasKey]?.nodes || [];
+        const meta = chunk[i].meta;
+        if (!poolAddressCache[meta.coinType]) poolAddressCache[meta.coinType] = { pools: [], ts: 0 };
+        for (const node of poolNodes) {
+          const json = node.asMoveObject?.contents?.json;
+          const liq = Number(json?.liquidity || 0);
+          if (liq <= 0) continue; // skip dead pools
+          poolAddressCache[meta.coinType].pools.push({
+            address: node.address,
+            dex: meta.dex,
+            quoteSymbol: meta.quoteSymbol,
+            isTokenA: meta.isTokenA,
+            typeRepr: node.asMoveObject?.contents?.type?.repr || "",
+          });
+        }
+      }
+    } catch (e) { /* partial failure OK — pools just won't be priced */ }
+  }
+  // Update timestamps
+  for (const ct of needed) {
+    if (!poolAddressCache[ct]) poolAddressCache[ct] = { pools: [], ts: now };
+    poolAddressCache[ct].ts = now;
+  }
+}
+
+async function readPoolPrices(coinTypesBySymbol) {
+  // Collect all pool addresses we need to read
+  const addrToMeta = {}; // address → { coinType, symbol, dex, quoteSymbol, isTokenA }
+  for (const [sym, ct] of Object.entries(coinTypesBySymbol)) {
+    const cached = poolAddressCache[ct];
+    if (!cached) continue;
+    for (const pool of cached.pools) {
+      addrToMeta[pool.address] = { coinType: ct, symbol: sym, dex: pool.dex, quoteSymbol: pool.quoteSymbol, isTokenA: pool.isTokenA, typeRepr: pool.typeRepr };
+    }
+  }
+  const addresses = Object.keys(addrToMeta);
+  if (!addresses.length) return {};
+
+  const poolById = await multiGetObjectsTypeJsonByAddress(addresses);
+
+  // Compute prices per symbol, weighted by liquidity
+  const accum = {}; // symbol → { weightedSum, liqSum }
+  for (const addr of addresses) {
+    const obj = poolById[addr];
+    if (!obj) continue;
+    const json = obj.json;
+    const typeRepr = obj.type?.repr || addrToMeta[addr].typeRepr;
+    if (!json || !typeRepr) continue;
+
+    const sqrtPrice = json.current_sqrt_price;
+    const liquidity = Number(json.liquidity || 0);
+    if (!sqrtPrice || liquidity <= 0) continue;
+
+    const meta = addrToMeta[addr];
+
+    // Extract coin types from type repr: Pool<TypeA, TypeB>
+    const typeMatch = typeRepr.match(/Pool<(.+),\s*(.+)>/);
+    if (!typeMatch) continue;
+    const coinTypeA = typeMatch[1].trim();
+    const coinTypeB = typeMatch[2].trim();
+
+    // Resolve decimals
+    const resolvedA = resolveCoinType(coinTypeA);
+    const resolvedB = resolveCoinType(coinTypeB);
+
+    // sqrtPriceToHumanPrice gives price of A in terms of B
+    const priceAinB = sqrtPriceToHumanPrice(sqrtPrice, resolvedA.decimals, resolvedB.decimals);
+    if (!priceAinB || !Number.isFinite(priceAinB)) continue;
+
+    // Determine the USD price of our target token
+    let tokenPriceUsd;
+    if (meta.isTokenA) {
+      // Our token is A, quote is B → price = priceAinB * quoteUsdPrice
+      if (meta.quoteSymbol === "USDC") tokenPriceUsd = priceAinB;
+      else if (meta.quoteSymbol === "SUI") tokenPriceUsd = priceAinB * (defiPrices.SUI || 0);
+    } else {
+      // Our token is B, quote is A → price = (1/priceAinB) * quoteUsdPrice
+      if (priceAinB <= 0) continue;
+      const priceBinA = 1 / priceAinB;
+      if (meta.quoteSymbol === "USDC") tokenPriceUsd = priceBinA;
+      else if (meta.quoteSymbol === "SUI") tokenPriceUsd = priceBinA * (defiPrices.SUI || 0);
+    }
+
+    if (!tokenPriceUsd || !Number.isFinite(tokenPriceUsd) || tokenPriceUsd <= 0) continue;
+
+    if (!accum[meta.symbol]) accum[meta.symbol] = { weightedSum: 0, liqSum: 0 };
+    accum[meta.symbol].weightedSum += tokenPriceUsd * liquidity;
+    accum[meta.symbol].liqSum += liquidity;
+  }
+
+  const result = {};
+  for (const [sym, { weightedSum, liqSum }] of Object.entries(accum)) {
+    if (liqSum > 0) result[sym] = weightedSum / liqSum;
+  }
+  return result;
+}
+
+async function fetchPoolOraclePrices(specificCoinTypes) {
+  // Resolve which coin types to price
+  const entries = []; // { coinType, symbol, decimals }
+  const source = specificCoinTypes
+    ? specificCoinTypes
+    : Object.keys(KNOWN_COIN_TYPES);
+  for (const ct of source) {
+    const resolved = resolveCoinType(ct);
+    if (POOL_ORACLE_SKIP.has(resolved.symbol)) continue;
+    if (SUI_PEGGED_SYMBOLS.has(resolved.symbol)) continue;
+    entries.push({ coinType: ct, symbol: resolved.symbol, decimals: resolved.decimals });
+  }
+  if (!entries.length) return;
+
+  // Prefetch metadata for any unknown decimals
+  const unknownMeta = entries.filter(e => e.decimals === 9 && !COMMON_DECIMALS[e.symbol] && !KNOWN_COIN_TYPES[e.coinType]).map(e => e.coinType);
+  if (unknownMeta.length) await prefetchCoinMeta(unknownMeta);
+
+  // Discover pool addresses for any uncached coin types
+  const coinTypesToDiscover = entries.map(e => e.coinType);
+  await discoverPoolAddresses(coinTypesToDiscover);
+
+  // Read fresh prices from pools
+  const coinTypesBySymbol = {};
+  for (const e of entries) coinTypesBySymbol[e.symbol] = e.coinType;
+  const prices = await readPoolPrices(coinTypesBySymbol);
+
+  // Write into defiPrices
+  for (const [sym, usd] of Object.entries(prices)) {
+    if (usd > 0) defiPrices[sym] = usd;
+  }
+  oraclePricesTs = Date.now();
+}
+
+async function ensurePrices(coinTypes) {
+  if (!coinTypes || !coinTypes.length) return;
+  // Ensure SUI price exists first (needed for SUI-quoted pool conversions)
+  if (!defiPrices.SUI) {
+    try { const p = await fetchSuiPriceFromDeepBook(); if (p) { defiPrices.SUI = p; deepbookSuiPriceTs = Date.now(); } } catch (_) {}
+  }
+  // Find coin types that are missing prices
+  const needed = [];
+  for (const ct of coinTypes) {
+    const resolved = resolveCoinType(ct);
+    if (POOL_ORACLE_SKIP.has(resolved.symbol)) continue;
+    if (SUI_PEGGED_SYMBOLS.has(resolved.symbol)) {
+      if (defiPrices.SUI) defiPrices[resolved.symbol] = defiPrices.SUI;
+      continue;
+    }
+    if (defiPrices[resolved.symbol] > 0) continue;
+    needed.push(ct);
+  }
+  if (!needed.length) return;
+  await fetchPoolOraclePrices(needed);
 }
 
 async function fetchDefiPrices(force = false) {
   const now = Date.now();
   const needSui = force || !defiPrices.SUI || (now - deepbookSuiPriceTs > DEEPBOOK_SUI_PRICE_TTL_MS);
-  const needCoinGecko = force || (now - coinGeckoPricesTs > COINGECKO_PRICE_TTL_MS);
-  if (!needSui && !needCoinGecko) {
+  const needOracle = force || (now - oraclePricesTs > POOL_ORACLE_PRICE_TTL_MS);
+  if (!needSui && !needOracle) {
     notePerfCache(true);
     return;
   }
@@ -3725,42 +3912,28 @@ async function fetchDefiPrices(force = false) {
   notePerfCache(false);
 
   defiPricesInFlight = (async () => {
-    const [deepBookSuiPrice, coingeckoData] = await Promise.all([
-      needSui ? fetchSuiPriceFromDeepBook().catch(() => null) : Promise.resolve(defiPrices.SUI || null),
-      needCoinGecko ? fetchCoinGeckoPrices().catch(() => null) : Promise.resolve(null),
-    ]);
+    // DeepBook SUI price must resolve first (needed for SUI-quoted pool conversions)
+    const deepBookSuiPrice = needSui
+      ? await fetchSuiPriceFromDeepBook().catch(() => null)
+      : (defiPrices.SUI || null);
 
     if (deepBookSuiPrice && Number.isFinite(deepBookSuiPrice)) {
       defiPrices.SUI = deepBookSuiPrice;
       deepbookSuiPriceTs = Date.now();
     }
 
-    if (coingeckoData) {
-      for (const [symbol, cgId] of Object.entries(COINGECKO_IDS)) {
-        if (symbol === "SUI") continue;
-        if (cgId === "sui") continue; // use DeepBook SUI price for all SUI-pegged symbols
-        const usd = Number(coingeckoData?.[cgId]?.usd);
-        if (usd > 0) defiPrices[symbol] = usd;
-      }
-      coinGeckoPricesTs = Date.now();
+    // Pool oracle: price all known tokens from on-chain CLMM pools
+    if (needOracle && defiPrices.SUI) {
+      await fetchPoolOraclePrices().catch(() => null);
     }
 
-    // Keep SUI-derived symbols coherent with the on-chain DeepBook SUI quote.
+    // SUI-pegged symbols (LSTs): sync with DeepBook SUI price
     if (defiPrices.SUI) {
-      for (const [symbol, cgId] of Object.entries(COINGECKO_IDS)) {
-        if (cgId === "sui") defiPrices[symbol] = defiPrices.SUI;
-      }
-    } else {
-      // Fallback only if DeepBook data is temporarily unavailable.
-      const fallback = Number(coingeckoData?.sui?.usd);
-      if (fallback > 0) {
-        defiPrices.SUI = fallback;
-        deepbookSuiPriceTs = Date.now();
-        for (const [symbol, cgId] of Object.entries(COINGECKO_IDS)) {
-          if (cgId === "sui") defiPrices[symbol] = fallback;
-        }
-      }
+      for (const sym of SUI_PEGGED_SYMBOLS) defiPrices[sym] = defiPrices.SUI;
     }
+
+    // Stablecoin hardcodes
+    defiPrices.USDC = 1; defiPrices.USDT = 1; defiPrices.wUSDC = 1;
   })().finally(() => { defiPricesInFlight = null; });
 
   return defiPricesInFlight;
@@ -5460,6 +5633,8 @@ async function fetchDefiWalletBalances(addr) {
   // Prefetch on-chain CoinMetadata for unknown coin types → accurate decimals & symbols
   const unknownTypes = nonZero.map(b => b.coinType).filter(ct => !KNOWN_COIN_TYPES[ct] && !coinMetaCache[ct]);
   if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
+  // Ensure prices for all non-zero balances
+  await ensurePrices(nonZero.map(b => b.coinType));
   return nonZero
     .map(b => {
       const resolved = resolveCoinType(b.coinType);
@@ -5645,6 +5820,14 @@ async function fetchAlphaPositions(addr) {
     positions.push({ protocol: "Alpha", deposits: deps, borrows: loans, depositedUsd: finalDepUsd, borrowedUsd: finalBorUsd, healthFactor: finalBorUsd > 0 ? finalSafeUsd / finalBorUsd : Infinity, netUsd: finalDepUsd - finalBorUsd });
   }
   return positions;
+}
+
+function sqrtPriceToHumanPrice(sqrtPriceStr, decimalsA, decimalsB) {
+  const s = Number(sqrtPriceStr);
+  if (!s || !Number.isFinite(s)) return 0;
+  const ratio = s / (2 ** 64);
+  const p = ratio * ratio * Math.pow(10, decimalsA - decimalsB);
+  return Number.isFinite(p) && p > 0 ? p : 0;
 }
 
 function i32FromBits(val) { const n = Number(val?.bits ?? val); return n > 0x7FFFFFFF ? n - 0x100000000 : n; }
@@ -6188,6 +6371,21 @@ async function renderAddress(app, addr) {
     const bluefinSpotPos = bluefinSpot.status === "fulfilled" ? bluefinSpot.value : [];
     const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
     const afPerpsData = aftermathPerps.status === "fulfilled" ? aftermathPerps.value : { positions: [], collateral: 0 };
+
+    // Second pricing pass: price any tokens discovered by fetchers but missing from defiPrices
+    const allCoinTypes = new Set();
+    for (const b of walletBals) { if (b.coinType) allCoinTypes.add(b.coinType); }
+    for (const pos of [...suilendPos, ...naviPos, ...alphaPos, ...scallopPos]) {
+      if (pos.deposits) for (const d of pos.deposits) { if (d.coinType) allCoinTypes.add(d.coinType); }
+      if (pos.borrows) for (const b of pos.borrows) { if (b.coinType) allCoinTypes.add(b.coinType); }
+    }
+    await ensurePrices([...allCoinTypes]);
+    // Recompute wallet USD values with fresh prices
+    for (const b of walletBals) {
+      const lstRate = b.isLST ? (lstExchangeRates[b.symbol] || 1) : 1;
+      b.price = b.isLST ? (defiPrices.SUI || 0) * lstRate : (defiPrices[b.symbol] || 0);
+      b.usdValue = b.amount * b.price;
+    }
 
     // Separate LSTs from regular wallet holdings
     const lstBals = walletBals.filter(b => b.isLST);
@@ -8206,6 +8404,7 @@ const TRACKED_TOKENS = {
 
 async function renderTransfers(app) {
   await fetchDefiPrices();
+  await ensurePrices(Object.keys(TRACKED_TOKENS));
 
   const data = await gql(`{
     transactions(last: 50, filter: { kind: PROGRAMMABLE_TX }) {
