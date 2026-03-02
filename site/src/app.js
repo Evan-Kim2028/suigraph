@@ -2645,9 +2645,17 @@ function txListFormatTokenAmount(v) {
   return n.toExponential(2);
 }
 
-function txListBuildFlowSummary(balanceChanges, maxItems = 4) {
+function txListBuildFlowSummary(balanceChanges, opts = {}) {
+  const maxItems = Number.isFinite(opts?.maxItems) ? Math.max(1, Math.floor(opts.maxItems)) : 4;
+  const senderScoped = Object.prototype.hasOwnProperty.call(opts || {}, "ownerAddress");
+  const ownerNorm = normalizeSuiAddress(opts?.ownerAddress || "");
+  const partial = !!opts?.partial;
   const byCoin = {};
   for (const bc of (balanceChanges || [])) {
+    if (senderScoped) {
+      const bcOwner = normalizeSuiAddress(bc?.owner?.address || "");
+      if (!ownerNorm || bcOwner !== ownerNorm) continue;
+    }
     const coinType = String(bc?.coinType?.repr || "");
     const raw = Number(bc?.amount || 0);
     if (!coinType || !Number.isFinite(raw) || raw === 0) continue;
@@ -2672,18 +2680,21 @@ function txListBuildFlowSummary(balanceChanges, maxItems = 4) {
   if (!rows.length) {
     return {
       hasFlows: false,
-      text: "No net token flows",
+      text: senderScoped ? "No sender net token flows" : "No net token flows",
       csv: "",
+      partial,
     };
   }
 
   const partsAll = rows.map((r) => `${r.amount >= 0 ? "+" : "-"}${txListFormatTokenAmount(r.amount)} ${r.symbol}`);
   const partsShown = partsAll.slice(0, Math.max(1, maxItems));
   const more = partsAll.length > partsShown.length ? `, +${partsAll.length - partsShown.length} more` : "";
+  const partialSuffix = partial ? " (partial window)" : "";
   return {
     hasFlows: true,
-    text: partsShown.join(", ") + more,
-    csv: partsAll.join(" | "),
+    text: partsShown.join(", ") + more + partialSuffix,
+    csv: partsAll.join(" | ") + (partial ? " | [partial_window]" : ""),
+    partial,
   };
 }
 
@@ -2701,6 +2712,7 @@ function txListBuildCsv(rows) {
     "status",
     "summary",
     "token_amounts",
+    "partial_balance_window",
   ];
   const lines = [header.map(txListCsvCell).join(",")];
   for (const row of (rows || [])) {
@@ -2712,6 +2724,7 @@ function txListBuildCsv(rows) {
       row.tx?.effects?.status || "",
       row.summary || "",
       row.flow?.csv || "",
+      row.flow?.partial ? "true" : "false",
     ].map(txListCsvCell).join(","));
   }
   return lines.join("\n") + "\n";
@@ -2868,7 +2881,10 @@ async function renderTransactions(app, before = null, dateState = null) {
               status timestamp
               checkpoint { sequenceNumber }
               gasEffects { gasSummary { computationCost storageCost storageRebate } }
-              balanceChanges(first: 16) { nodes { amount coinType { repr } } }
+              balanceChanges(first: 50) {
+                pageInfo { hasNextPage }
+                nodes { owner { address } amount coinType { repr } }
+              }
             }
           }
         }
@@ -2882,7 +2898,11 @@ async function renderTransactions(app, before = null, dateState = null) {
 
   const txRows = txs.map((tx) => {
     const intent = analyzeTxIntent(tx);
-    const flow = txListBuildFlowSummary(tx?.effects?.balanceChanges?.nodes || []);
+    const balanceConn = tx?.effects?.balanceChanges;
+    const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
+      ownerAddress: tx?.sender?.address || "",
+      partial: !!balanceConn?.pageInfo?.hasNextPage,
+    });
     return {
       tx,
       intent,
@@ -2907,7 +2927,7 @@ async function renderTransactions(app, before = null, dateState = null) {
               <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
               <td class="tx-flow-cell">
                 <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
-                <div class="u-fs11-dim">${renderIntentChip(row.intent)}</div>
+                <div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>
               </td>
               <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
               <td><a class="hash-link" href="#/checkpoint/${row.tx.effects?.checkpoint?.sequenceNumber}">${fmtNumber(row.tx.effects?.checkpoint?.sequenceNumber)}</a></td>
@@ -6756,7 +6776,10 @@ async function renderAddress(app, addr) {
               effects {
                 status timestamp
                 checkpoint { sequenceNumber }
-                balanceChanges(first: 16) { nodes { amount coinType { repr } } }
+                balanceChanges(first: 50) {
+                  pageInfo { hasNextPage }
+                  nodes { owner { address } amount coinType { repr } }
+                }
               }
             }
           }
@@ -6782,7 +6805,11 @@ async function renderAddress(app, addr) {
     txs: () => {
       const txRows = allTxs.map((tx) => {
         const intent = analyzeTxIntent(tx);
-        const flow = txListBuildFlowSummary(tx?.effects?.balanceChanges?.nodes || []);
+        const balanceConn = tx?.effects?.balanceChanges;
+        const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
+          ownerAddress: tx?.sender?.address || "",
+          partial: !!balanceConn?.pageInfo?.hasNextPage,
+        });
         return {
           tx,
           intent,
@@ -6804,7 +6831,7 @@ async function renderAddress(app, addr) {
                 <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
                 <td class="tx-flow-cell">
                   <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
-                  <div class="u-fs11-dim">${renderIntentChip(row.intent)}</div>
+                  <div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>
                 </td>
                 <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
                 <td>${statusBadge(row.tx.effects?.status)}</td>
@@ -7297,7 +7324,11 @@ async function renderAddress(app, addr) {
       if (trigger.hasAttribute("disabled")) return;
       const txRows = allTxs.map((tx) => {
         const intent = analyzeTxIntent(tx);
-        const flow = txListBuildFlowSummary(tx?.effects?.balanceChanges?.nodes || []);
+        const balanceConn = tx?.effects?.balanceChanges;
+        const flow = txListBuildFlowSummary(balanceConn?.nodes || [], {
+          ownerAddress: tx?.sender?.address || "",
+          partial: !!balanceConn?.pageInfo?.hasNextPage,
+        });
         return {
           tx,
           intent,
