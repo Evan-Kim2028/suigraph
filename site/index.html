@@ -1351,6 +1351,9 @@ function startPagePerf(page) {
     resBytes: 0,
     cacheHits: 0,
     cacheMisses: 0,
+    dedupedGql: 0,
+    retriedGql: 0,
+    queryStats: Object.create(null),
     status: "loading",
   };
   applyPerfBadge();
@@ -1362,12 +1365,56 @@ function notePerfCache(hit) {
   else pagePerf.cacheMisses++;
 }
 
-function notePerfGql(elapsedMs, reqBytes, resBytes) {
+function notePerfGql(elapsedMs, reqBytes, resBytes, queryKey = "", ok = true) {
   if (!pagePerf) return;
   pagePerf.gqlCalls++;
   pagePerf.gqlMs += Number(elapsedMs) || 0;
   pagePerf.reqBytes += Number(reqBytes) || 0;
   pagePerf.resBytes += Number(resBytes) || 0;
+  const qk = String(queryKey || "").trim();
+  if (!qk) return;
+  if (!pagePerf.queryStats[qk]) {
+    pagePerf.queryStats[qk] = { calls: 0, errors: 0, ms: 0, samples: [] };
+  }
+  const row = pagePerf.queryStats[qk];
+  row.calls += 1;
+  row.ms += Number(elapsedMs) || 0;
+  if (!ok) row.errors += 1;
+  row.samples.push(Number(elapsedMs) || 0);
+  if (row.samples.length > 120) row.samples.shift();
+}
+
+function notePerfGqlDeduped() {
+  if (!pagePerf) return;
+  pagePerf.dedupedGql += 1;
+}
+
+function notePerfGqlRetry() {
+  if (!pagePerf) return;
+  pagePerf.retriedGql += 1;
+}
+
+function topPageQueryPerf(queryStats) {
+  const rows = Object.entries(queryStats || {});
+  if (!rows.length) return null;
+  let best = null;
+  for (const [key, stat] of rows) {
+    const samples = (stat?.samples || []).filter(Number.isFinite);
+    const p95 = samples.length ? quantile(samples, 0.95) : 0;
+    const totalMs = Number(stat?.ms || 0);
+    const score = Math.max(Number.isFinite(p95) ? p95 : 0, totalMs / Math.max(1, Number(stat?.calls || 1)));
+    if (!best || score > best.score) {
+      best = {
+        key,
+        calls: Number(stat?.calls || 0),
+        errors: Number(stat?.errors || 0),
+        totalMs,
+        p95: Number.isFinite(p95) ? p95 : 0,
+        score,
+      };
+    }
+  }
+  return best;
 }
 
 function finishPagePerf(status = "ok") {
@@ -1398,6 +1445,7 @@ function applyPerfBadge() {
     || (budgetGqlCalls > 0 && pagePerf.gqlCalls > budgetGqlCalls);
   el.style.color = warn ? "var(--yellow)" : "var(--text-dim)";
   el.style.borderColor = warn ? "var(--yellow)" : "var(--border)";
+  const topQuery = topPageQueryPerf(pagePerf.queryStats);
   el._perfRows = [
     { label: "Page",       value: pagePerf.page || "unknown" },
     { label: "Status",     value: pagePerf.status, warn: pagePerf.status === "error" },
@@ -1406,6 +1454,13 @@ function applyPerfBadge() {
     { label: "GQL time",   value: `${Math.round(pagePerf.gqlMs)}ms` },
     { label: "Req bytes",  value: fmtNumber(Math.round(pagePerf.reqBytes)) },
     { label: "Res bytes",  value: fmtNumber(Math.round(pagePerf.resBytes)) },
+    { label: "GQL dedupe", value: String(pagePerf.dedupedGql || 0) },
+    { label: "GQL retries", value: String(pagePerf.retriedGql || 0) },
+    ...(topQuery ? [{
+      label: "Top Query",
+      value: topQuery.key,
+      sub: `${Math.round(topQuery.totalMs)}ms total · p95 ${Math.round(topQuery.p95)}ms · calls ${topQuery.calls}${topQuery.errors ? ` · err ${topQuery.errors}` : ""}`,
+    }] : []),
     { label: "Cache",      value: `${pagePerf.cacheHits} hits / ${pagePerf.cacheMisses} misses` },
   ];
   initPerfTooltip(el);
@@ -2040,29 +2095,200 @@ const AF_PERPS_SIZE_EPS = 1e-12;
 const AF_PERPS_COLLATERAL_DUST = 1e-6;
 let afClearingHouseDiscoveryCache = { at: 0, rows: [], partial: false };
 
-async function gql(query, variables = {}) {
+const GQL_TIMEOUT_MS = 16_000;
+const GQL_RETRY_LIMIT = 2;
+const GQL_RETRY_BASE_MS = 220;
+const GQL_MAX_CONCURRENCY = 8;
+const gqlInFlight = new Map();
+let gqlActiveRequests = 0;
+const gqlWaiters = [];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function stableStringify(value) {
+  if (value == null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+}
+
+function gqlFingerprint(query) {
+  const text = String(query || "");
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (/t\d+\s*:\s*transaction\s*\(\s*digest\s*:/.test(compact)) return "batch:transactionByDigest";
+  if (/c\d+\s*:\s*coinMetadata\s*\(\s*coinType\s*:/.test(compact)) return "batch:coinMetadataByCoinType";
+  if (/ob\d+\s*:\s*object\s*\(\s*address\s*:/.test(compact)) return "batch:objectByAddress";
+  if (/a\d+\s*:\s*objects\s*\(\s*filter\s*:\s*\{\s*type\s*:/.test(compact)) return "batch:objectsByType";
+  const op = text.match(/\b(query|mutation)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  if (op) return `${op[1]}:${op[2]}`;
+  const root = text.match(/\{\s*([A-Za-z_][A-Za-z0-9_]*)/);
+  if (root) return `root:${root[1]}`;
+  return `anon:${compact.slice(0, 48) || "query"}`;
+}
+
+function gqlInFlightKey(query, variables) {
+  return `${String(query || "").trim()}\n${stableStringify(variables || {})}`;
+}
+
+function isRetriableStatus(status) {
+  const code = Number(status || 0);
+  return code === 408 || code === 425 || code === 429 || code === 500 || code === 502 || code === 503 || code === 504;
+}
+
+function isLikelyRetriableGraphqlError(errors) {
+  const rows = Array.isArray(errors) ? errors : [];
+  return rows.some((e) => {
+    const msg = String(e?.message || "").toLowerCase();
+    return msg.includes("timeout")
+      || msg.includes("temporar")
+      || msg.includes("rate")
+      || msg.includes("limit exceeded")
+      || msg.includes("internal")
+      || msg.includes("unavailable")
+      || msg.includes("deadline");
+  });
+}
+
+function isRetriableFetchError(err) {
+  const name = String(err?.name || "");
+  if (name === "AbortError") return true;
+  const msg = String(err?.message || "").toLowerCase();
+  return msg.includes("fetch")
+    || msg.includes("network")
+    || msg.includes("timed out")
+    || msg.includes("timeout")
+    || msg.includes("temporar")
+    || msg.includes("unavailable")
+    || msg.includes("503")
+    || msg.includes("502")
+    || msg.includes("504")
+    || msg.includes("429");
+}
+
+async function acquireGqlSlot() {
+  if (gqlActiveRequests < GQL_MAX_CONCURRENCY) {
+    gqlActiveRequests += 1;
+    return;
+  }
+  await new Promise((resolve) => gqlWaiters.push(resolve));
+}
+
+function releaseGqlSlot() {
+  const next = gqlWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  gqlActiveRequests = Math.max(0, gqlActiveRequests - 1);
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || GQL_TIMEOUT_MS));
+  try {
+    return await fetch(url, { ...(options || {}), signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function gql(query, variables = {}, opts = {}) {
   const payload = JSON.stringify({ query, variables });
   const reqBytes = payload.length;
-  const t0 = performance.now();
-  const res = await fetch(GQL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: payload,
-  });
-  const raw = await res.text();
-  const elapsed = performance.now() - t0;
-  notePerfGql(elapsed, reqBytes, raw.length);
-  let json = {};
+  const queryKey = gqlFingerprint(query);
+  const dedupeEnabled = opts?.dedupe !== false;
+  const inFlightKey = gqlInFlightKey(query, variables);
+  if (dedupeEnabled && gqlInFlight.has(inFlightKey)) {
+    notePerfGqlDeduped();
+    return gqlInFlight.get(inFlightKey);
+  }
+
+  const run = (async () => {
+    let lastErr = null;
+    for (let attempt = 0; attempt <= GQL_RETRY_LIMIT; attempt += 1) {
+      let acquired = false;
+      let attemptNoted = false;
+      const t0 = performance.now();
+      try {
+        await acquireGqlSlot();
+        acquired = true;
+        const res = await fetchWithTimeout(GQL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        }, GQL_TIMEOUT_MS);
+        const raw = await res.text();
+        const elapsed = performance.now() - t0;
+        let json = {};
+        try {
+          json = raw ? JSON.parse(raw) : {};
+        } catch (_) {
+          notePerfGql(elapsed, reqBytes, raw.length, queryKey, false);
+          attemptNoted = true;
+          throw new Error("Invalid GraphQL JSON response");
+        }
+
+        if (!res.ok) {
+          notePerfGql(elapsed, reqBytes, raw.length, queryKey, false);
+          attemptNoted = true;
+          const httpErr = new Error(json?.errors?.[0]?.message || `GraphQL request failed (${res.status})`);
+          if (attempt < GQL_RETRY_LIMIT && isRetriableStatus(res.status)) {
+            notePerfGqlRetry();
+            const waitMs = GQL_RETRY_BASE_MS * (2 ** attempt) + Math.floor(Math.random() * 120);
+            await sleep(waitMs);
+            continue;
+          }
+          throw httpErr;
+        }
+
+        if (json.errors) {
+          console.error("GQL errors:", json.errors);
+          if (!json.data) {
+            notePerfGql(elapsed, reqBytes, raw.length, queryKey, false);
+            attemptNoted = true;
+            const gqlErr = new Error(json.errors[0]?.message || "GraphQL query failed");
+            if (attempt < GQL_RETRY_LIMIT && isLikelyRetriableGraphqlError(json.errors)) {
+              notePerfGqlRetry();
+              const waitMs = GQL_RETRY_BASE_MS * (2 ** attempt) + Math.floor(Math.random() * 120);
+              await sleep(waitMs);
+              continue;
+            }
+            throw gqlErr;
+          }
+        }
+
+        notePerfGql(elapsed, reqBytes, raw.length, queryKey, true);
+        attemptNoted = true;
+        return json.data;
+      } catch (e) {
+        lastErr = e;
+        if (!attemptNoted) {
+          const elapsed = performance.now() - t0;
+          notePerfGql(elapsed, reqBytes, 0, queryKey, false);
+        }
+        const retriable = isRetriableFetchError(e);
+        if (attempt < GQL_RETRY_LIMIT && retriable) {
+          notePerfGqlRetry();
+          const waitMs = GQL_RETRY_BASE_MS * (2 ** attempt) + Math.floor(Math.random() * 120);
+          await sleep(waitMs);
+          continue;
+        }
+        throw e;
+      } finally {
+        if (acquired) releaseGqlSlot();
+      }
+    }
+    throw lastErr || new Error("GraphQL query failed");
+  })();
+
+  if (dedupeEnabled) gqlInFlight.set(inFlightKey, run);
   try {
-    json = raw ? JSON.parse(raw) : {};
-  } catch (e) {
-    throw new Error("Invalid GraphQL JSON response");
+    return await run;
+  } finally {
+    if (dedupeEnabled) gqlInFlight.delete(inFlightKey);
   }
-  if (json.errors) {
-    console.error("GQL errors:", json.errors);
-    if (!json.data) throw new Error(json.errors[0]?.message || "GraphQL query failed");
-  }
-  return json.data;
 }
 
 async function suiRpcCall(method, params = []) {
@@ -2512,34 +2738,113 @@ function intentConfidenceClass(confidence) {
   return "intent-low";
 }
 
-// Event-type keyword → action label (first match wins, checked against lowercased event type repr)
-// Uses regex with word-boundary-like matching (split on :: and _) to avoid "restake" matching "stake"
+// Event/command keyword -> normalized action tags for intent and coin flow typing.
 const EVENT_ACTION_TAGS = [
-  { re: /swap/,      label: "Swap" },
-  { re: /deposit/,   label: "Deposit" },
-  { re: /withdraw/,  label: "Withdraw" },
-  { re: /borrow/,    label: "Borrow" },
-  { re: /repay/,     label: "Repay" },
-  { re: /liquidat/,  label: "Liquidation" },
-  { re: /unstake/,   label: "Unstake" },
-  { re: /(?<![re])stake/, label: "Stake" },
-  { re: /claim/,     label: "Claim" },
-  { re: /\bmint/,    label: "Mint" },
-  { re: /\bburn/,    label: "Burn" },
-  { re: /flash/,     label: "Flash Loan" },
-  { re: /order/,     label: "Order" },
-  { re: /\bfill/,    label: "Fill" },
+  { key: "swap", re: /swap/, label: "Swap", priority: 120 },
+  { key: "fill", re: /\bfill/, label: "Fill", priority: 112 },
+  { key: "order", re: /order/, label: "Order", priority: 110 },
+  { key: "flash-loan", re: /flash/, label: "Flash Loan", priority: 102 },
+  { key: "liquidation", re: /liquidat/, label: "Liquidation", priority: 100 },
+  { key: "borrow", re: /borrow/, label: "Borrow", priority: 95 },
+  { key: "repay", re: /repay/, label: "Repay", priority: 95 },
+  { key: "deposit", re: /deposit/, label: "Deposit", priority: 92 },
+  { key: "withdraw", re: /withdraw/, label: "Withdraw", priority: 92 },
+  { key: "unstake", re: /unstake/, label: "Unstake", priority: 84 },
+  { key: "stake", re: /(?<![re])stake/, label: "Stake", priority: 82 },
+  { key: "claim", re: /claim/, label: "Claim", priority: 78 },
+  { key: "mint", re: /\bmint/, label: "Mint", priority: 40 },
+  { key: "burn", re: /\bburn/, label: "Burn", priority: 40 },
 ];
+
+function pickBestActionMatch(matches) {
+  const rows = [...(matches || new Map()).values()];
+  if (!rows.length) return null;
+  rows.sort((a, b) =>
+    (Number(b?.tag?.priority || 0) - Number(a?.tag?.priority || 0))
+    || ((b?.count || 0) - (a?.count || 0))
+    || String(a?.tag?.label || "").localeCompare(String(b?.tag?.label || ""))
+  );
+  return rows[0];
+}
 
 function classifyEventAction(events) {
   if (!events?.length) return null;
+  const matches = new Map();
   for (const ev of events) {
-    const repr = (ev?.contents?.type?.repr || "").toLowerCase();
+    const typeRepr = String(ev?.contents?.type?.repr || "");
+    const repr = typeRepr.toLowerCase();
     if (!repr) continue;
     for (const tag of EVENT_ACTION_TAGS) {
-      if (tag.re.test(repr)) return { label: tag.label, eventType: ev.contents.type.repr };
+      if (!tag.re.test(repr)) continue;
+      const prev = matches.get(tag.key);
+      if (prev) {
+        prev.count += 1;
+      } else {
+        matches.set(tag.key, { tag, count: 1, eventType: typeRepr });
+      }
     }
   }
+  const best = pickBestActionMatch(matches);
+  if (!best) return null;
+  return {
+    key: best.tag.key,
+    label: best.tag.label,
+    priority: Number(best.tag.priority || 0),
+    eventType: best.eventType || "",
+    source: "event",
+  };
+}
+
+function classifyMoveCallAction(commands) {
+  const matches = new Map();
+  for (const cmd of (commands || [])) {
+    if (cmd?.__typename !== "MoveCallCommand") continue;
+    const modName = String(cmd?.function?.module?.name || "");
+    const fnName = String(cmd?.function?.name || "");
+    const target = `${modName}::${fnName}`;
+    const text = target.toLowerCase();
+    if (!text || text === "::") continue;
+    for (const tag of EVENT_ACTION_TAGS) {
+      if (!tag.re.test(text)) continue;
+      const prev = matches.get(tag.key);
+      if (prev) {
+        prev.count += 1;
+      } else {
+        matches.set(tag.key, { tag, count: 1, commandTarget: target });
+      }
+    }
+  }
+  const best = pickBestActionMatch(matches);
+  if (!best) return null;
+  return {
+    key: best.tag.key,
+    label: best.tag.label,
+    priority: Number(best.tag.priority || 0),
+    commandTarget: best.commandTarget || "",
+    source: "command",
+  };
+}
+
+function classifyTransactionAction(tx) {
+  const eventAction = classifyEventAction(tx?.effects?.events?.nodes || []);
+  const moveAction = classifyMoveCallAction(tx?.kind?.commands?.nodes || []);
+  if (eventAction && moveAction) {
+    // Prefer swap call signatures when event-only tags would otherwise downgrade to mint/burn.
+    if (moveAction.key === "swap" && (eventAction.key === "mint" || eventAction.key === "burn")) {
+      return {
+        ...moveAction,
+        source: "event+command",
+        confidence: "high",
+        eventType: eventAction.eventType || "",
+      };
+    }
+    if ((eventAction.priority || 0) >= (moveAction.priority || 0)) {
+      return { ...eventAction, confidence: "high" };
+    }
+    return { ...moveAction, confidence: moveAction.key === "swap" ? "high" : "medium" };
+  }
+  if (eventAction) return { ...eventAction, confidence: "high" };
+  if (moveAction) return { ...moveAction, confidence: moveAction.key === "swap" ? "high" : "medium" };
   return null;
 }
 
@@ -2653,17 +2958,17 @@ function _analyzeTxIntentInner(tx) {
   const protocol = inferProtocolTag(movePkg);
 
   // Event-based action tagging (high confidence — protocol-authored events)
-  const events = tx?.effects?.events?.nodes || [];
-  const eventAction = classifyEventAction(events);
+  const txAction = classifyTransactionAction(tx);
 
   let label = "Programmable Tx";
   let confidence = "low";
   const evidence = [];
 
-  if (eventAction) {
-    label = eventAction.label;
-    confidence = "high";
-    evidence.push(`Event: ${eventAction.eventType}`);
+  if (txAction) {
+    label = txAction.label;
+    confidence = txAction.confidence || "medium";
+    if (txAction.eventType) evidence.push(`Event: ${txAction.eventType}`);
+    if (txAction.commandTarget) evidence.push(`MoveCall: ${txAction.commandTarget}`);
   } else if (counts.publish > 0) {
     label = counts.publish > 1 ? "Publish Batch" : "Publish";
     confidence = "high";
@@ -3067,6 +3372,8 @@ const coinMetaCache = {};
 const coinTotalSupplyRpcCache = {};
 const coinTxMetaDigestCache = {};
 const coinTxDetailDigestCache = {};
+const coinObjectDigestCache = {};
+const COIN_OBJECT_DIGEST_TTL_MS = 20 * 1000;
 
 function prunePlainObjectCache(obj, maxEntries = 2500) {
   const keys = Object.keys(obj || {});
@@ -3074,6 +3381,223 @@ function prunePlainObjectCache(obj, maxEntries = 2500) {
   const drop = Math.max(1, keys.length - maxEntries);
   for (let i = 0; i < drop; i += 1) delete obj[keys[i]];
 }
+
+function coinSearchSummarizeJson(value, maxLen = 180) {
+  try {
+    const raw = JSON.stringify(value);
+    if (!raw) return "";
+    return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
+  } catch (_) {
+    return "";
+  }
+}
+
+function coinSearchRenderAddressList(addrs, emptyLabel = "—") {
+  const rows = [...new Set((addrs || []).map((a) => normalizeSuiAddress(a)).filter(Boolean))];
+  if (!rows.length) return `<span class="u-c-dim">${escapeHtml(emptyLabel)}</span>`;
+  const first = rows[0];
+  const extra = rows.length > 1 ? ` <span class="u-fs11-dim">+${rows.length - 1}</span>` : "";
+  return `${hashLink(first, "/address/" + first)}${extra}`;
+}
+
+function coinSearchParseOwnerInfo(owner) {
+  if (owner?.initialSharedVersion != null) return { address: "", kind: "shared" };
+  if (owner?.__typename === "Immutable") return { address: "", kind: "immutable" };
+  const address = normalizeSuiAddress(owner?.address?.address || "");
+  if (address) return { address, kind: "address" };
+  return { address: "", kind: "" };
+}
+
+function coinSearchFmtCoinAbs(raw, decimals) {
+  const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+  if (bi <= 0n) return "0";
+  const approx = scaledBigIntAbsToApprox(bi, decimals, 8);
+  if (!Number.isFinite(approx) || approx > 1e15) return scaledBigIntToText(bi, decimals, 8);
+  if (approx >= 1000000) return fmtCompact(approx);
+  if (approx >= 1) return approx.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  if (approx >= 0.0001) return approx.toLocaleString(undefined, { maximumFractionDigits: 8 });
+  return approx.toExponential(2);
+}
+
+async function coinSearchFetchObjectDigestCandidates(coinTypeValue, { maxPages = 8, maxDigests = 280, force = false } = {}) {
+  const safePages = Math.max(1, Number(maxPages || 0));
+  const safeDigests = Math.max(1, Number(maxDigests || 0));
+  const keyBase = coinTypeKey(coinTypeValue) || normalizeCoinType(coinTypeValue) || String(coinTypeValue || "");
+  const cacheKey = `${keyBase}|p${safePages}|d${safeDigests}`;
+  const cacheState = getKeyedCacheState(coinObjectDigestCache, cacheKey);
+  return withTimedCache(cacheState, COIN_OBJECT_DIGEST_TTL_MS, !!force, async () => {
+    const coinObjectType = `0x2::coin::Coin<${coinTypeValue}>`;
+    let after = null;
+    let hasNext = true;
+    let pages = 0;
+    const rows = [];
+    while (hasNext && pages < safePages && rows.length < safeDigests * 2) {
+      const data = await gql(`query($type: String!, $after: String) {
+        objects(filter: { type: $type }, first: 50, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            version
+            previousTransaction { digest }
+          }
+        }
+      }`, { type: coinObjectType, after });
+      const conn = data?.objects;
+      const nodes = conn?.nodes || [];
+      for (const node of nodes) {
+        const digest = String(node?.previousTransaction?.digest || "");
+        if (!digest) continue;
+        rows.push({ digest, version: parseBigIntSafe(node?.version || 0) });
+      }
+      pages += 1;
+      hasNext = !!conn?.pageInfo?.hasNextPage;
+      after = conn?.pageInfo?.endCursor || null;
+      if (!nodes.length) break;
+    }
+    rows.sort((a, b) => (a.version === b.version ? 0 : (a.version < b.version ? 1 : -1)));
+    const deduped = [];
+    const seen = new Set();
+    for (const row of rows) {
+      if (!row.digest || seen.has(row.digest)) continue;
+      seen.add(row.digest);
+      deduped.push(row.digest);
+      if (deduped.length >= safeDigests) break;
+    }
+    return {
+      digests: deduped,
+      pages,
+      sampledObjects: rows.length,
+      hasNext,
+    };
+  });
+}
+
+async function coinSearchFetchTxMetaRowsByDigest(digests) {
+  const uniqueDigests = [...new Set((digests || []).filter(Boolean))];
+  const rows = [];
+  const missing = [];
+  for (const digest of uniqueDigests) {
+    const cached = coinTxMetaDigestCache[digest];
+    if (cached) rows.push(cached);
+    else missing.push(digest);
+  }
+  const chunkRows = await mapChunksWithLimit(missing, 30, 6, async (chunk) => {
+    if (!chunk.length) return [];
+    const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") { digest effects { status timestamp } }`);
+    const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
+    if (!data) return [];
+    const out = [];
+    for (let i = 0; i < chunk.length; i += 1) {
+      const tx = data?.[`t${i}`];
+      if (!tx?.digest) continue;
+      const row = {
+        digest: tx.digest,
+        timestamp: tx?.effects?.timestamp || "",
+        status: tx?.effects?.status || "",
+      };
+      out.push(row);
+      coinTxMetaDigestCache[row.digest] = row;
+    }
+    prunePlainObjectCache(coinTxMetaDigestCache, 4000);
+    return out;
+  });
+  rows.push(...chunkRows.flat());
+  return rows;
+}
+
+async function coinSearchFetchTxDetailsByDigest(digests) {
+  const uniqueDigests = [...new Set((digests || []).filter(Boolean))];
+  const rows = [];
+  const missing = [];
+  for (const digest of uniqueDigests) {
+    const cached = coinTxDetailDigestCache[digest];
+    if (cached) rows.push(cached);
+    else missing.push(digest);
+  }
+  // Keep payload below Sui GraphQL 5KB request cap.
+  const chunkRows = await mapChunksWithLimit(missing, 2, 4, async (chunk) => {
+    if (!chunk.length) return [];
+    const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") {
+      digest
+      sender { address }
+      kind {
+        __typename
+        ... on ProgrammableTransaction {
+          commands(first: 8) {
+            nodes {
+              __typename
+              ... on MoveCallCommand {
+                function { name module { name package { address } } }
+              }
+            }
+          }
+        }
+      }
+      effects {
+        status timestamp
+        balanceChanges(first: 50) {
+          pageInfo { hasNextPage }
+          nodes { owner { address } amount coinType { repr } }
+        }
+        events(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            contents { type { repr } json }
+            sender { address }
+            timestamp
+            transactionModule { name package { address } }
+          }
+        }
+        objectChanges(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            address idCreated idDeleted
+            inputState {
+              owner {
+                ... on AddressOwner { address { address } }
+                ... on ObjectOwner { address { address } }
+                ... on Shared { initialSharedVersion }
+                ... on Immutable { __typename }
+              }
+              asMoveObject { contents { type { repr } } }
+            }
+            outputState {
+              owner {
+                ... on AddressOwner { address { address } }
+                ... on ObjectOwner { address { address } }
+                ... on Shared { initialSharedVersion }
+                ... on Immutable { __typename }
+              }
+              asMoveObject { contents { type { repr } } }
+            }
+          }
+        }
+      }
+    }`);
+    const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
+    if (!data) return [];
+    const out = [];
+    for (let i = 0; i < chunk.length; i += 1) {
+      const tx = data?.[`t${i}`];
+      if (!tx?.digest) continue;
+      out.push(tx);
+      coinTxDetailDigestCache[tx.digest] = tx;
+    }
+    prunePlainObjectCache(coinTxDetailDigestCache, 1500);
+    return out;
+  });
+  rows.push(...chunkRows.flat());
+  return rows;
+}
+
+const CoinSearchData = Object.freeze({
+  summarizeJson: coinSearchSummarizeJson,
+  renderAddressList: coinSearchRenderAddressList,
+  parseOwnerInfo: coinSearchParseOwnerInfo,
+  fmtCoinAbs: coinSearchFmtCoinAbs,
+  fetchObjectDigestCandidates: coinSearchFetchObjectDigestCandidates,
+  fetchTxMetaRowsByDigest: coinSearchFetchTxMetaRowsByDigest,
+  fetchTxDetailsByDigest: coinSearchFetchTxDetailsByDigest,
+});
 
 async function fetchCoinObjectSupplySnapshot(coinType, { maxObjects = 1200, maxPages = 32 } = {}) {
   const coinObjType = `0x2::coin::Coin<${coinType}>`;
@@ -8961,7 +9485,7 @@ async function renderAddress(app, addr) {
             }
           }
         }
-      }`, { addr, before, filter: txFilterMeta.filter });
+      }`, { addr: addrNorm, before, filter: txFilterMeta.filter });
       const rows = (more?.address?.transactions?.nodes || [])
         .reverse()
         .filter((t) => txListWithinRange(t, txFilterMeta.fromMs, txFilterMeta.toMs));
@@ -9054,12 +9578,12 @@ async function renderAddress(app, addr) {
     const [, results] = await Promise.all([
       fetchPoolOraclePrices().catch(() => null),
       Promise.allSettled([
-        fetchSuilendPositions(addr), fetchNaviPositions(addr),
-        fetchAlphaPositions(addr), fetchScallopPositions(addr),
-        fetchCetusPositions(addr), fetchTurbosPositions(addr),
-        fetchDefiWalletBalances(addr), fetchDeepBookPositions(addr),
-        fetchBluefinSpotPositions(addr), fetchBluefinProPositions(addr),
-        fetchAftermathPerpsPositions(addr),
+      fetchSuilendPositions(addrNorm), fetchNaviPositions(addrNorm),
+      fetchAlphaPositions(addrNorm), fetchScallopPositions(addrNorm),
+      fetchCetusPositions(addrNorm), fetchTurbosPositions(addrNorm),
+      fetchDefiWalletBalances(addrNorm), fetchDeepBookPositions(addrNorm),
+      fetchBluefinSpotPositions(addrNorm), fetchBluefinProPositions(addrNorm),
+      fetchAftermathPerpsPositions(addrNorm),
       ]),
     ]);
     // Sync LSTs + stablecoins + BTC variants now that oracle is done
@@ -9503,7 +10027,7 @@ async function renderAddress(app, addr) {
             pageInfo { hasNextPage endCursor }
             nodes { address version digest contents { type { repr } json } }
           } }
-        }`, { addr, after: objPageInfo.endCursor });
+        }`, { addr: addrNorm, after: objPageInfo.endCursor });
         allObjects = [...allObjects, ...(more.address.objects.nodes || [])];
         objPageInfo = more.address.objects.pageInfo;
         renderTabs("objects");
@@ -9515,7 +10039,7 @@ async function renderAddress(app, addr) {
     <div class="page-title">
       Address <span class="type-tag">ACCOUNT</span>
       ${name ? `<span style="color:var(--green);font-size:14px">${name}</span>` : ""}
-      ${copyLinkBtn()}${viewQueryBtn('address_detail', { addr })}
+      ${copyLinkBtn()}${viewQueryBtn('address_detail', { addr: addrNorm })}
     </div>
     <div class="card u-mb16">
       <div class="card-body">
@@ -9573,7 +10097,7 @@ async function renderAddress(app, addr) {
       const txRows = txListBuildRows(allTxs);
       if (!txRows.length) return;
       const stamp = new Date().toISOString().slice(0, 10);
-      const idPart = normalizeSuiAddress(addr).slice(2, 10) || "address";
+      const idPart = addrNorm.slice(2, 10) || "address";
       txListDownloadCsv(`suigraph-address-${idPart}-${stamp}.csv`, txListBuildCsv(txRows));
       return;
     }
@@ -10078,7 +10602,7 @@ async function renderObjectDetail(app, id) {
             }
           }
         }
-      }`, { id, after: dynFieldsCursor });
+      }`, { id: idNorm, after: dynFieldsCursor });
       const conn = more?.object?.dynamicFields;
       const nextNodes = conn?.nodes || [];
       const seen = new Set(dynFields.map(df => JSON.stringify(df?.name?.json || "")));
@@ -10115,7 +10639,7 @@ async function renderObjectDetail(app, id) {
             }
           }
         }
-      }`, { id, after: modulesCursor });
+      }`, { id: idNorm, after: modulesCursor });
       const conn = more?.object?.asMovePackage?.modules;
       const existing = new Set(modules.map(m => m.name));
       for (const m of (conn?.nodes || [])) {
@@ -10495,7 +11019,7 @@ async function renderObjectDetail(app, id) {
           pageInfo { hasPreviousPage startCursor }
           nodes { address version digest previousTransaction { digest } asMoveObject { contents { type { repr } } } }
         }
-      }`, { id, before });
+      }`, { id: idNorm, before });
       const conn = hData?.objectVersions;
       const batch = conn?.nodes || [];
       const byKey = new Map(historyRows.map(v => [`${v.version}:${v.digest || ""}`, v]));
@@ -10535,7 +11059,7 @@ async function renderObjectDetail(app, id) {
       let html = `<div style="padding:12px 16px;font-size:13px;color:var(--text-dim)">${pkgVersionRows.length} version${pkgVersionRows.length > 1 ? 's' : ''} loaded</div>`;
       html += `<table><thead><tr><th>Version</th><th>Package Address</th><th>Publishing Transaction</th></tr></thead><tbody>`;
       for (const pv of pkgVersionRows) {
-        const isCurrent = pv.address === id;
+        const isCurrent = pv.address === idNorm;
         html += `<tr${isCurrent ? ' style="background:var(--bg-light)"' : ''}>
           <td style="font-family:var(--mono);font-size:12px;font-weight:${isCurrent ? '600' : '400'}">${pv.version}${isCurrent ? ' <span style="color:var(--accent);font-size:10px">current</span>' : ''}</td>
           <td>${isCurrent ? truncHash(pv.address) + ' ' + copyBtn(pv.address) : hashLink(pv.address, '/object/' + pv.address)}</td>
@@ -10566,7 +11090,7 @@ async function renderObjectDetail(app, id) {
             pageInfo { hasPreviousPage startCursor }
             nodes { address version previousTransaction { digest } }
           }
-        }`, { id, before });
+        }`, { id: idNorm, before });
         const conn = pvData?.packageVersions;
         const batch = conn?.nodes || [];
         const byKey = new Map(pkgVersionRows.map(v => [`${v.address}:${v.version}`, v]));
@@ -11332,192 +11856,13 @@ async function renderCoin(app, routeCoinType = "") {
   `;
   bindCoinSearchForm();
 
-  function summarizeCoinJson(value, maxLen = 180) {
-    try {
-      const raw = JSON.stringify(value);
-      if (!raw) return "";
-      return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
-    } catch (_) {
-      return "";
-    }
-  }
-
-  function renderAddressList(addrs, emptyLabel = "—") {
-    const rows = [...new Set((addrs || []).map(a => normalizeSuiAddress(a)).filter(Boolean))];
-    if (!rows.length) return `<span class="u-c-dim">${escapeHtml(emptyLabel)}</span>`;
-    const first = rows[0];
-    const extra = rows.length > 1 ? ` <span class="u-fs11-dim">+${rows.length - 1}</span>` : "";
-    return `${hashLink(first, "/address/" + first)}${extra}`;
-  }
-
-  function parseOwnerInfo(owner) {
-    if (owner?.initialSharedVersion != null) return { address: "", kind: "shared" };
-    if (owner?.__typename === "Immutable") return { address: "", kind: "immutable" };
-    const address = normalizeSuiAddress(owner?.address?.address || "");
-    if (address) return { address, kind: "address" };
-    return { address: "", kind: "" };
-  }
-
-  function fmtCoinAbs(raw, decimals) {
-    const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
-    if (bi <= 0n) return "0";
-    const approx = scaledBigIntAbsToApprox(bi, decimals, 8);
-    if (!Number.isFinite(approx) || approx > 1e15) return scaledBigIntToText(bi, decimals, 8);
-    if (approx >= 1000000) return fmtCompact(approx);
-    if (approx >= 1) return approx.toLocaleString(undefined, { maximumFractionDigits: 6 });
-    if (approx >= 0.0001) return approx.toLocaleString(undefined, { maximumFractionDigits: 8 });
-    return approx.toExponential(2);
-  }
-
-  async function fetchCoinObjectDigestCandidates(coinTypeValue, { maxPages = 8, maxDigests = 280 } = {}) {
-    const coinObjectType = `0x2::coin::Coin<${coinTypeValue}>`;
-    let after = null;
-    let hasNext = true;
-    let pages = 0;
-    const rows = [];
-    while (hasNext && pages < Math.max(1, Number(maxPages || 0)) && rows.length < Math.max(1, Number(maxDigests || 0)) * 2) {
-      const data = await gql(`query($type: String!, $after: String) {
-        objects(filter: { type: $type }, first: 50, after: $after) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            version
-            previousTransaction { digest }
-          }
-        }
-      }`, { type: coinObjectType, after });
-      const conn = data?.objects;
-      const nodes = conn?.nodes || [];
-      for (const node of nodes) {
-        const digest = String(node?.previousTransaction?.digest || "");
-        if (!digest) continue;
-        rows.push({ digest, version: parseBigIntSafe(node?.version || 0) });
-      }
-      pages += 1;
-      hasNext = !!conn?.pageInfo?.hasNextPage;
-      after = conn?.pageInfo?.endCursor || null;
-      if (!nodes.length) break;
-    }
-    rows.sort((a, b) => (a.version === b.version ? 0 : (a.version < b.version ? 1 : -1)));
-    const deduped = [];
-    const seen = new Set();
-    for (const row of rows) {
-      if (!row.digest || seen.has(row.digest)) continue;
-      seen.add(row.digest);
-      deduped.push(row.digest);
-      if (deduped.length >= Math.max(1, Number(maxDigests || 0))) break;
-    }
-    return {
-      digests: deduped,
-      pages,
-      sampledObjects: rows.length,
-      hasNext,
-    };
-  }
-
-  async function fetchCoinTxMetaRowsByDigest(digests) {
-    const uniqueDigests = [...new Set((digests || []).filter(Boolean))];
-    const rows = [];
-    const missing = [];
-    for (const digest of uniqueDigests) {
-      const cached = coinTxMetaDigestCache[digest];
-      if (cached) rows.push(cached);
-      else missing.push(digest);
-    }
-    const chunkRows = await mapChunksWithLimit(missing, 30, 6, async (chunk) => {
-      if (!chunk.length) return [];
-      const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") { digest effects { status timestamp } }`);
-      const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
-      if (!data) return [];
-      const out = [];
-      for (let i = 0; i < chunk.length; i += 1) {
-        const tx = data?.[`t${i}`];
-        if (!tx?.digest) continue;
-        const row = {
-          digest: tx.digest,
-          timestamp: tx?.effects?.timestamp || "",
-          status: tx?.effects?.status || "",
-        };
-        out.push(row);
-        coinTxMetaDigestCache[row.digest] = row;
-      }
-      prunePlainObjectCache(coinTxMetaDigestCache, 4000);
-      return out;
-    });
-    rows.push(...chunkRows.flat());
-    return rows;
-  }
-
-  async function fetchCoinTxDetailsByDigest(digests) {
-    const uniqueDigests = [...new Set((digests || []).filter(Boolean))];
-    const rows = [];
-    const missing = [];
-    for (const digest of uniqueDigests) {
-      const cached = coinTxDetailDigestCache[digest];
-      if (cached) rows.push(cached);
-      else missing.push(digest);
-    }
-    // Keep payload below Sui GraphQL 5KB request cap.
-    const chunkRows = await mapChunksWithLimit(missing, 2, 4, async (chunk) => {
-      if (!chunk.length) return [];
-      const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") {
-        digest
-        sender { address }
-        effects {
-          status timestamp
-          balanceChanges(first: 50) {
-            pageInfo { hasNextPage }
-            nodes { owner { address } amount coinType { repr } }
-          }
-          events(first: 50) {
-            pageInfo { hasNextPage }
-            nodes {
-              contents { type { repr } json }
-              sender { address }
-              timestamp
-              transactionModule { name package { address } }
-            }
-          }
-          objectChanges(first: 50) {
-            pageInfo { hasNextPage }
-            nodes {
-              address idCreated idDeleted
-              inputState {
-                owner {
-                  ... on AddressOwner { address { address } }
-                  ... on ObjectOwner { address { address } }
-                  ... on Shared { initialSharedVersion }
-                  ... on Immutable { __typename }
-                }
-                asMoveObject { contents { type { repr } } }
-              }
-              outputState {
-                owner {
-                  ... on AddressOwner { address { address } }
-                  ... on ObjectOwner { address { address } }
-                  ... on Shared { initialSharedVersion }
-                  ... on Immutable { __typename }
-                }
-                asMoveObject { contents { type { repr } } }
-              }
-            }
-          }
-        }
-      }`);
-      const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
-      if (!data) return [];
-      const out = [];
-      for (let i = 0; i < chunk.length; i += 1) {
-        const tx = data?.[`t${i}`];
-        if (!tx?.digest) continue;
-        out.push(tx);
-        coinTxDetailDigestCache[tx.digest] = tx;
-      }
-      prunePlainObjectCache(coinTxDetailDigestCache, 1500);
-      return out;
-    });
-    rows.push(...chunkRows.flat());
-    return rows;
-  }
+  const summarizeCoinJson = CoinSearchData.summarizeJson;
+  const renderAddressList = CoinSearchData.renderAddressList;
+  const parseOwnerInfo = CoinSearchData.parseOwnerInfo;
+  const fmtCoinAbs = CoinSearchData.fmtCoinAbs;
+  const fetchCoinObjectDigestCandidates = CoinSearchData.fetchObjectDigestCandidates;
+  const fetchCoinTxMetaRowsByDigest = CoinSearchData.fetchTxMetaRowsByDigest;
+  const fetchCoinTxDetailsByDigest = CoinSearchData.fetchTxDetailsByDigest;
 
   try {
     let coinMeta = await getCoinMeta(coinType).catch(() => null);
@@ -11567,16 +11912,22 @@ async function renderCoin(app, routeCoinType = "") {
     const structName = typeParts[2] || "";
     const targetKey = coinTypeKey(coinType);
 
-    const MAX_SCAN_TX = 220;
-    const PAGE_SIZE = 20;
     const RESULT_LIMIT = 50;
-    const EARLY_EMPTY_PAGE_THRESHOLD = 4;
+    const PAGE_SIZE = 20;
+    const GLOBAL_SCAN_MAX_TX = 80;
+    const GLOBAL_SCAN_EMPTY_PAGE_THRESHOLD = 2;
+    const OBJECT_SCAN_MAX_PAGES = 10;
+    const OBJECT_SCAN_MAX_DIGESTS = 320;
+    const OBJECT_TX_LOAD_LIMIT = 80;
     let scannedTx = 0;
     let scannedPages = 0;
     let before = null;
     let hasPreviousPage = true;
-    let stoppedForTargetedFallback = false;
+    let globalSupplementApplied = false;
+    let globalScanEarlyStop = false;
+    let objectDigestHasNext = false;
     const matchedTx = new Set();
+    const processedDigests = new Set();
     let truncatedBalances = false;
     let truncatedEvents = false;
     let truncatedObjects = false;
@@ -11591,10 +11942,13 @@ async function renderCoin(app, routeCoinType = "") {
     let objectFallbackLoadedTx = 0;
 
     function ingestCoinTransaction(tx) {
+      const txDigest = String(tx?.digest || "");
+      if (txDigest && processedDigests.has(txDigest)) return;
+      if (txDigest) processedDigests.add(txDigest);
       const eff = tx?.effects || {};
       const txEvents = eff?.events?.nodes || [];
-      const txEventAction = classifyEventAction(txEvents);
-      const txEventActionLabel = String(txEventAction?.label || "");
+      const txAction = classifyTransactionAction(tx);
+      const txEventActionLabel = String(txAction?.label || "");
       let txHasTransferMatch = false;
       let txHasObjectMatch = false;
       let txHasDirectEventMatch = false;
@@ -11628,7 +11982,7 @@ async function renderCoin(app, routeCoinType = "") {
         if (amountRaw > 0n) {
           const kind = classifyCoinFlowKindWithContext(eff, targetKey, sentRaw, recvRaw, txEventActionLabel);
           transferRows.push({
-            digest: tx?.digest || "",
+            digest: txDigest,
             timestamp: eff?.timestamp || "",
             status: eff?.status || "",
             fromRows,
@@ -11645,7 +11999,7 @@ async function renderCoin(app, routeCoinType = "") {
         const typeRepr = String(ev?.contents?.type?.repr || "");
         const json = ev?.contents?.json;
         const row = {
-          digest: tx?.digest || "",
+          digest: txDigest,
           timestamp: ev?.timestamp || eff?.timestamp || "",
           status: eff?.status || "",
           sender: normalizeSuiAddress(ev?.sender?.address || tx?.sender?.address || ""),
@@ -11676,7 +12030,7 @@ async function renderCoin(app, routeCoinType = "") {
         const objectId = normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || "");
         const typeRepr = outputType || inputType || "";
         objectRows.push({
-          digest: tx?.digest || "",
+          digest: txDigest,
           timestamp: eff?.timestamp || "",
           status: eff?.status || "",
           objectId,
@@ -11696,7 +12050,7 @@ async function renderCoin(app, routeCoinType = "") {
           const fromRows = inputOwner.address ? [inputOwner.address] : [];
           const toRows = outputOwner.address ? [outputOwner.address] : [];
           transferRows.push({
-            digest: tx?.digest || "",
+            digest: txDigest,
             timestamp: eff?.timestamp || "",
             status: eff?.status || "",
             fromRows,
@@ -11718,8 +12072,8 @@ async function renderCoin(app, routeCoinType = "") {
       }
 
       const txHasMatch = txHasTransferMatch || txHasObjectMatch || txHasDirectEventMatch || txHasContextEventMatch;
-      if (txHasMatch && tx?.digest) {
-        matchedTx.add(tx.digest);
+      if (txHasMatch && txDigest) {
+        matchedTx.add(txDigest);
         const signals = [];
         if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
         if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
@@ -11727,7 +12081,7 @@ async function renderCoin(app, routeCoinType = "") {
         if (txHasDirectEventMatch) signals.push("direct event");
         if (txHasContextEventMatch) signals.push("context events");
         matchedActivityRows.push({
-          digest: tx.digest,
+          digest: txDigest,
           timestamp: eff?.timestamp || "",
           status: eff?.status || "",
           sender: normalizeSuiAddress(tx?.sender?.address || ""),
@@ -11736,98 +12090,125 @@ async function renderCoin(app, routeCoinType = "") {
       }
     }
 
-    while (hasPreviousPage && scannedTx < MAX_SCAN_TX) {
-      const data = await gql(`query($before: String) {
-        transactions(last: ${PAGE_SIZE}, before: $before, filter: { kind: PROGRAMMABLE_TX }) {
-          pageInfo { hasPreviousPage startCursor }
-          nodes {
-            digest
-            sender { address }
-            effects {
-              status timestamp
-              balanceChanges(first: 50) {
-                pageInfo { hasNextPage }
-                nodes { owner { address } amount coinType { repr } }
-              }
-              events(first: 50) {
-                pageInfo { hasNextPage }
-                nodes {
-                  contents { type { repr } json }
-                  sender { address }
-                  timestamp
-                  transactionModule { name package { address } }
-                }
-              }
-              objectChanges(first: 50) {
-                pageInfo { hasNextPage }
-                nodes {
-                  address idCreated idDeleted
-                  inputState {
-                    owner {
-                      ... on AddressOwner { address { address } }
-                      ... on ObjectOwner { address { address } }
-                      ... on Shared { initialSharedVersion }
-                      ... on Immutable { __typename }
-                    }
-                    asMoveObject { contents { type { repr } } }
-                  }
-                  outputState {
-                    owner {
-                      ... on AddressOwner { address { address } }
-                      ... on ObjectOwner { address { address } }
-                      ... on Shared { initialSharedVersion }
-                      ... on Immutable { __typename }
-                    }
-                    asMoveObject { contents { type { repr } } }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }`, { before });
-
-      const conn = data?.transactions;
-      const txs = conn?.nodes || [];
-      if (!txs.length) break;
-
-      scannedTx += txs.length;
-      scannedPages += 1;
-
-      for (const tx of txs) ingestCoinTransaction(tx);
-
-      if (!matchedTx.size && scannedPages >= EARLY_EMPTY_PAGE_THRESHOLD) {
-        stoppedForTargetedFallback = true;
-        break;
-      }
-
-      hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
-      before = conn?.pageInfo?.startCursor || null;
-      if (transferRows.length >= RESULT_LIMIT && eventRows.length >= RESULT_LIMIT && objectRows.length >= RESULT_LIMIT) break;
-    }
-
     const sortRecent = (a, b) => {
       const diff = parseTsMs(b?.timestamp) - parseTsMs(a?.timestamp);
       if (diff !== 0) return diff;
       return String(b?.digest || "").localeCompare(String(a?.digest || ""));
     };
 
-    if (!transferRows.length && !eventRows.length && !objectRows.length) {
-      try {
-        const digestCandidates = await fetchCoinObjectDigestCandidates(coinType);
-        objectFallbackScannedObjects = digestCandidates?.sampledObjects || 0;
-        objectFallbackScannedPages = digestCandidates?.pages || 0;
-        const candidates = (digestCandidates?.digests || []).filter((d) => d && !matchedTx.has(d));
-        objectFallbackConsideredDigests = candidates.length;
-        if (candidates.length) {
-          const metaRows = await fetchCoinTxMetaRowsByDigest(candidates);
-          metaRows.sort(sortRecent);
-          const topDigests = metaRows.map((row) => row.digest).filter(Boolean).slice(0, 60);
-          const txRows = await fetchCoinTxDetailsByDigest(topDigests);
-          objectFallbackLoadedTx = txRows.length;
-          for (const tx of txRows) ingestCoinTransaction(tx);
+    try {
+      const digestCandidates = await fetchCoinObjectDigestCandidates(coinType, {
+        maxPages: OBJECT_SCAN_MAX_PAGES,
+        maxDigests: OBJECT_SCAN_MAX_DIGESTS,
+      });
+      objectFallbackScannedObjects = digestCandidates?.sampledObjects || 0;
+      objectFallbackScannedPages = digestCandidates?.pages || 0;
+      objectDigestHasNext = !!digestCandidates?.hasNext;
+      const candidates = (digestCandidates?.digests || []).filter(Boolean);
+      objectFallbackConsideredDigests = candidates.length;
+      if (candidates.length) {
+        const metaRows = await fetchCoinTxMetaRowsByDigest(candidates);
+        metaRows.sort(sortRecent);
+        const topDigests = metaRows.map((row) => row.digest).filter(Boolean).slice(0, OBJECT_TX_LOAD_LIMIT);
+        const txRows = await fetchCoinTxDetailsByDigest(topDigests);
+        objectFallbackLoadedTx = txRows.length;
+        for (const tx of txRows) ingestCoinTransaction(tx);
+      }
+    } catch (_) { /* ignore object-linked scan failures */ }
+
+    const shouldRunGlobalSupplement = (
+      objectDigestHasNext
+      || objectFallbackLoadedTx < 24
+      || matchedTx.size < 16
+    );
+
+    if (shouldRunGlobalSupplement) {
+      globalSupplementApplied = true;
+      let emptyPages = 0;
+      while (hasPreviousPage && scannedTx < GLOBAL_SCAN_MAX_TX) {
+        const data = await gql(`query($before: String) {
+          transactions(last: ${PAGE_SIZE}, before: $before, filter: { kind: PROGRAMMABLE_TX }) {
+            pageInfo { hasPreviousPage startCursor }
+            nodes {
+              digest
+              sender { address }
+              kind {
+                __typename
+                ... on ProgrammableTransaction {
+                  commands(first: 8) {
+                    nodes {
+                      __typename
+                      ... on MoveCallCommand {
+                        function { name module { name package { address } } }
+                      }
+                    }
+                  }
+                }
+              }
+              effects {
+                status timestamp
+                balanceChanges(first: 50) {
+                  pageInfo { hasNextPage }
+                  nodes { owner { address } amount coinType { repr } }
+                }
+                events(first: 50) {
+                  pageInfo { hasNextPage }
+                  nodes {
+                    contents { type { repr } json }
+                    sender { address }
+                    timestamp
+                    transactionModule { name package { address } }
+                  }
+                }
+                objectChanges(first: 50) {
+                  pageInfo { hasNextPage }
+                  nodes {
+                    address idCreated idDeleted
+                    inputState {
+                      owner {
+                        ... on AddressOwner { address { address } }
+                        ... on ObjectOwner { address { address } }
+                        ... on Shared { initialSharedVersion }
+                        ... on Immutable { __typename }
+                      }
+                      asMoveObject { contents { type { repr } } }
+                    }
+                    outputState {
+                      owner {
+                        ... on AddressOwner { address { address } }
+                        ... on ObjectOwner { address { address } }
+                        ... on Shared { initialSharedVersion }
+                        ... on Immutable { __typename }
+                      }
+                      asMoveObject { contents { type { repr } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }`, { before });
+
+        const conn = data?.transactions;
+        const txs = conn?.nodes || [];
+        if (!txs.length) break;
+
+        scannedTx += txs.length;
+        scannedPages += 1;
+        const matchedBefore = matchedTx.size;
+        for (const tx of txs) ingestCoinTransaction(tx);
+        const gainedMatches = matchedTx.size > matchedBefore;
+        emptyPages = gainedMatches ? 0 : (emptyPages + 1);
+
+        hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
+        before = conn?.pageInfo?.startCursor || null;
+
+        if (transferRows.length >= RESULT_LIMIT && eventRows.length >= RESULT_LIMIT && objectRows.length >= RESULT_LIMIT) break;
+        if (emptyPages >= GLOBAL_SCAN_EMPTY_PAGE_THRESHOLD && matchedTx.size > 0) {
+          globalScanEarlyStop = true;
+          break;
         }
-      } catch (_) { /* ignore fallback failures */ }
+      }
     }
 
     transferRows.sort(sortRecent);
@@ -11839,12 +12220,14 @@ async function renderCoin(app, routeCoinType = "") {
     const objects = objectRows.slice(0, RESULT_LIMIT);
     const matchedActivity = matchedActivityRows.slice(0, RESULT_LIMIT);
 
-    const scanLimitReached = scannedTx >= MAX_SCAN_TX && hasPreviousPage;
+    const scanLimitReached = scannedTx >= GLOBAL_SCAN_MAX_TX && hasPreviousPage;
     const notes = [];
-    if (scanLimitReached) notes.push(`Reached scan cap at ${fmtNumber(MAX_SCAN_TX)} transactions; older activity may exist.`);
-    if (stoppedForTargetedFallback) {
-      notes.push(`No matches in initial ${fmtNumber(scannedTx)}-tx fast scan; switched to object-linked fallback.`);
+    if (objectDigestHasNext) notes.push(`Object-linked scan hit cap at ${fmtNumber(objectFallbackScannedObjects)} Coin objects; older activity may exist.`);
+    if (scanLimitReached) notes.push(`Supplemental scan hit cap at ${fmtNumber(GLOBAL_SCAN_MAX_TX)} programmable transactions.`);
+    if (globalSupplementApplied && scannedTx > 0) {
+      notes.push(`Supplemental scan inspected ${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages.`);
     }
+    if (globalScanEarlyStop) notes.push("Supplemental scan stopped early after consecutive pages without new coin matches.");
     if (truncatedBalances || truncatedEvents || truncatedObjects) {
       const fields = [];
       if (truncatedBalances) fields.push("balanceChanges");
@@ -11852,20 +12235,20 @@ async function renderCoin(app, routeCoinType = "") {
       if (truncatedObjects) fields.push("objectChanges");
       notes.push(`Some matched transactions exceed per-query page size for ${fields.join(", ")}.`);
     }
-    const usedObjectFallback = objectFallbackLoadedTx > 0;
-    if (usedObjectFallback) {
-      notes.push(`Fallback sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects across ${fmtNumber(objectFallbackScannedPages)} pages and loaded ${fmtNumber(objectFallbackLoadedTx)} object-linked transactions.`);
+    const usedObjectScan = objectFallbackLoadedTx > 0;
+    if (usedObjectScan) {
+      notes.push(`Object-linked scan sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects across ${fmtNumber(objectFallbackScannedPages)} pages and loaded ${fmtNumber(objectFallbackLoadedTx)} transactions.`);
     } else if (!transferRows.length && !eventRows.length && !objectRows.length && objectFallbackScannedObjects > 0) {
-      notes.push(`Fallback sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects but did not find recent object-linked transactions in the sample.`);
+      notes.push(`Object-linked scan sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects but did not find recent transactions in the sample.`);
     }
     const directEventCount = events.filter((row) => row.matchSource === "direct").length;
     const contextEventCount = events.length - directEventCount;
     const transferEmptyLabel = matchedTx.size
-      ? "No balance-change or coin-object ownership transfers found in scanned transactions. Recent activity can still appear in events/object changes below."
-      : "No recent transfers found for this coin type in scanned transactions.";
+      ? "No balance-change or coin-object ownership transfers found in sampled data. Recent activity can still appear in events/object changes below."
+      : "No recent transfers found for this coin type in sampled data.";
     const eventEmptyLabel = matchedTx.size
-      ? "No events directly referenced this coin type in scanned transactions."
-      : "No recent events referencing this coin type in scanned transactions.";
+      ? "No events directly referenced this coin type in sampled data."
+      : "No recent events referencing this coin type in sampled data.";
 
     app.innerHTML = `
       <div class="page-title">Coin Search <span class="type-tag">${escapeHtml(symbol)}</span></div>
@@ -11893,7 +12276,7 @@ async function renderCoin(app, routeCoinType = "") {
             <div class="stat-box">
               <div class="stat-label">Matched Tx</div>
               <div class="stat-value">${fmtNumber(matchedTx.size)}</div>
-              <div class="stat-sub">from ${fmtNumber(scannedTx)} scanned txs${usedObjectFallback ? ` + ${fmtNumber(objectFallbackLoadedTx)} object-linked txs` : ""}</div>
+              <div class="stat-sub">from ${fmtNumber(objectFallbackLoadedTx)} object-linked txs${scannedTx ? ` + ${fmtNumber(scannedTx)} supplemental txs` : ""}</div>
             </div>
             <div class="stat-box">
               <div class="stat-label">Transfers</div>
@@ -11931,8 +12314,8 @@ async function renderCoin(app, routeCoinType = "") {
             <div class="detail-row">
               <div class="detail-key">Scan Scope</div>
               <div class="detail-val">
-                ${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages
-                ${objectFallbackScannedObjects ? `; fallback sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects (${fmtNumber(objectFallbackConsideredDigests)} candidate tx digests)` : ""}
+                ${fmtNumber(objectFallbackScannedObjects)} Coin objects across ${fmtNumber(objectFallbackScannedPages)} pages (${fmtNumber(objectFallbackConsideredDigests)} candidate tx digests, ${fmtNumber(objectFallbackLoadedTx)} loaded txs)
+                ${scannedTx ? `; supplemental programmable scan ${fmtNumber(scannedTx)} txs across ${fmtNumber(scannedPages)} pages` : ""}
               </div>
             </div>
           </div>
@@ -12016,7 +12399,7 @@ async function renderCoin(app, routeCoinType = "") {
                   </tr>`;
                 }).join("")}
               </tbody>
-            </table>` : renderEmpty("No recent object changes containing this coin type in scanned transactions.")}
+            </table>` : renderEmpty("No recent object changes containing this coin type in sampled data.")}
           </div>
         </div>
 
@@ -12034,7 +12417,7 @@ async function renderCoin(app, routeCoinType = "") {
                   <td>${timeTag(row.timestamp)}</td>
                 </tr>`).join("")}
               </tbody>
-            </table>` : renderEmpty("No matched transactions found for this coin type in scanned transactions.")}
+            </table>` : renderEmpty("No matched transactions found for this coin type in sampled data.")}
           </div>
         </div>
       </div>
@@ -12766,8 +13149,14 @@ async function renderEvents(app) {
 
   async function loadEvents() {
     const filters = [];
-    if (eventTypeFilter) filters.push(`type: "${eventTypeFilter}"`);
-    if (senderFilter) filters.push(`sender: "${senderFilter}"`);
+    if (eventTypeFilter) filters.push(`type: ${JSON.stringify(String(eventTypeFilter || ""))}`);
+    const senderNorm = senderFilter ? normalizeSuiAddress(senderFilter) : "";
+    if (senderFilter && !senderNorm) {
+      eventsData = [];
+      fetchedAt = new Date().toISOString();
+      return;
+    }
+    if (senderNorm) filters.push(`sender: ${JSON.stringify(senderNorm)}`);
     const filterArg = filters.length ? `filter: { ${filters.join(", ")} }` : "";
     const data = await gql(`{ events(last: 50 ${filterArg}) { nodes { contents { type { repr } json } sender { address } timestamp transaction { digest } transactionModule { name package { address } } } } }`);
     eventsData = data?.events?.nodes || [];

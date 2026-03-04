@@ -14,7 +14,7 @@ file with all CSS and JS inlined.
 
 | Field | Value |
 |-------|-------|
-| Object ID | `0xab8338106e896d9145353a27d773a3dfa5086492c9c262dec274b023c602f4b4` |
+| Object ID | `0xa1248f83831fd952680649e461899a59647f6f1fefc6397a77d387dc01a7d732` |
 | Site Name | `suigraph block explorer` |
 | Single-page app | Yes (`/*` → `/index.html`) |
 
@@ -34,32 +34,23 @@ This runs `node scripts/build-single-file.mjs` which:
 4. Writes the result to both `index.html` and `dist/index.html`
 5. Outputs a sha256 hash for verification
 
-## Deploy (First Time)
+## Deploy / Update
 
 ```bash
 cd site
-site-builder publish --epochs 5 dist
+site-builder --context=mainnet deploy ./dist --epochs 10 --ws-resources ./ws-resources.json
 ```
 
-This creates a new site object on Sui. Save the returned object ID.
-
-## Update (Subsequent Deploys)
-
-```bash
-cd site
-site-builder update --epochs 1 dist 0xab8338106e896d9145353a27d773a3dfa5086492c9c262dec274b023c602f4b4
-```
-
-The `--epochs 1` flag extends blob storage by 1 epoch. Use `--epochs max` for maximum
-storage duration if you want long-term persistence.
+Using `--ws-resources` ensures the canonical site object (`object_id` in
+`site/ws-resources.json`) is updated in place.
 
 ### What `update` does
 
-1. Parses `dist/` directory and `dist/ws-resources.json`
+1. Parses `dist/` directory and `site/ws-resources.json`
 2. Uploads changed files as Walrus quilts (blob storage)
 3. Updates the on-chain site object with new resource references
 4. Deletes old quilt patches that are no longer needed
-5. Updates `ws-resources.json` with new quilt patch IDs
+5. Updates `site/ws-resources.json` with any `object_id`/resource revisions
 
 ## Site Configuration
 
@@ -82,7 +73,7 @@ The `ws-resources.json` file controls routing, headers, and metadata:
     "creator": "Sui Community"
   },
   "site_name": "suigraph block explorer",
-  "object_id": "0xab8338106e896d9145353a27d773a3dfa5086492c9c262dec274b023c602f4b4"
+  "object_id": "0xa1248f83831fd952680649e461899a59647f6f1fefc6397a77d387dc01a7d732"
 }
 ```
 
@@ -123,7 +114,7 @@ python3 -m http.server 8080
 # Full deploy workflow
 cd site
 npm run build                    # Build single-file site
-site-builder update --epochs 1 dist 0xab8338106e896d9145353a27d773a3dfa5086492c9c262dec274b023c602f4b4
+site-builder --context=mainnet deploy ./dist --epochs 10 --ws-resources ./ws-resources.json
 
 # Verify
 git add -A && git status         # Check what changed

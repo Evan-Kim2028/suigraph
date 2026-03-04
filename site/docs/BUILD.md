@@ -7,6 +7,7 @@
 - `npm run build`
 - `npm run build:check`
 - `npm run baseline`
+- `npm run smoke:coin`
 - `npm run gql:surface`
 - `npm run perf:budgets`
 - `npm run schema:refresh`
@@ -21,6 +22,7 @@
 2. Run `npm run build` to generate `index.html` and `dist/index.html`.
 3. Run `npm run validate` before commit.
 4. Use `dist/index.html` as the explicit deployment artifact target.
+5. Run `npm run smoke:coin` (or pass custom `--coin`) when touching coin-search logic.
 
 `npm run validate` includes:
 - build-output parity check (`build:check`)
@@ -41,3 +43,15 @@
 - `docs/perf-budgets.md`: per-route runtime query/render budgets.
 - `docs/schema-root-fields.json`: introspected root-field snapshot from Sui GraphQL.
 - `docs/schema-coverage.md`: static query-root coverage report from `src/app.js`.
+
+## Coin Smoke Check
+- Default run: `npm run smoke:coin`
+- Custom coin run: `npm run smoke:coin -- --coin 0x...::module::Type`
+- Tuning: `--max-object-pages`, `--max-digests`, `--tx-limit`
+
+This command does a live mainnet sanity check for:
+- supply availability via `coinMetadata` and RPC `suix_getTotalSupply`
+- object-linked coin activity sampling
+- transfer/event/object match counts
+- action/transfer-kind distributions
+- `swapAsMintSignals` (should be `0` in healthy classification windows)
