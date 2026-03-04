@@ -11318,7 +11318,8 @@ async function renderCoin(app, routeCoinType = "") {
 
   async function fetchCoinTxDetailsByDigest(digests) {
     const rows = [];
-    for (const chunk of chunkArray(digests || [], 3)) {
+    // Keep payload below Sui GraphQL 5KB request cap.
+    for (const chunk of chunkArray(digests || [], 2)) {
       if (!chunk.length) continue;
       const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") {
         digest
