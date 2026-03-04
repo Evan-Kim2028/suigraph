@@ -719,6 +719,7 @@
     .coin-transfer-kind-transfer { color: var(--accent); }
     .coin-transfer-kind-mint { color: var(--green); }
     .coin-transfer-kind-burn { color: var(--yellow); }
+    .coin-transfer-kind-swap { color: var(--blue); }
     .tx-filter-note {
       padding: 8px 16px;
       font-size: 11px;

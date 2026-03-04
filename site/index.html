@@ -727,6 +727,7 @@
     .coin-transfer-kind-transfer { color: var(--accent); }
     .coin-transfer-kind-mint { color: var(--green); }
     .coin-transfer-kind-burn { color: var(--yellow); }
+    .coin-transfer-kind-swap { color: var(--blue); }
     .tx-filter-note {
       padding: 8px 16px;
       font-size: 11px;
@@ -2409,6 +2410,24 @@ function chunkArray(arr, size) {
   return out;
 }
 
+async function mapChunksWithLimit(items, chunkSize, concurrency, worker) {
+  const chunks = chunkArray(items || [], chunkSize);
+  if (!chunks.length) return [];
+  const limit = Math.max(1, Math.floor(Number(concurrency || 1)));
+  const out = new Array(chunks.length);
+  let cursor = 0;
+  async function run() {
+    while (cursor < chunks.length) {
+      const idx = cursor;
+      cursor += 1;
+      out[idx] = await worker(chunks[idx], idx);
+    }
+  }
+  const runners = Array.from({ length: Math.min(limit, chunks.length) }, () => run());
+  await Promise.all(runners);
+  return out;
+}
+
 function parseHistoryNumericValue(v) {
   if (v == null) return null;
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -2522,6 +2541,58 @@ function classifyEventAction(events) {
     }
   }
   return null;
+}
+
+const COIN_TRANSFER_KIND_META = {
+  transfer: { label: "Transfer", css: "transfer", fromFallback: "—", toFallback: "—" },
+  mint: { label: "Mint/Inflow", css: "mint", fromFallback: "mint/system", toFallback: "—" },
+  burn: { label: "Burn/Outflow", css: "burn", fromFallback: "—", toFallback: "burn/sink" },
+  swap: { label: "Swap", css: "swap", fromFallback: "swap router/pool", toFallback: "swap router/pool" },
+  "swap-in": { label: "Swap In", css: "swap", fromFallback: "swap router/pool", toFallback: "—" },
+  "swap-out": { label: "Swap Out", css: "swap", fromFallback: "—", toFallback: "swap router/pool" },
+  "object-transfer": { label: "Object Transfer", css: "transfer", fromFallback: "—", toFallback: "—" },
+};
+
+function classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel = "") {
+  const sent = parseBigIntSafe(sentRaw);
+  const recv = parseBigIntSafe(recvRaw);
+  const hasSent = sent > 0n;
+  const hasRecv = recv > 0n;
+  const action = String(eventActionLabel || "");
+  if (action === "Swap") {
+    if (hasSent && hasRecv) return "swap";
+    if (hasRecv) return "swap-in";
+    if (hasSent) return "swap-out";
+  }
+  if (hasSent && hasRecv) return "transfer";
+  if (hasRecv) return "mint";
+  if (hasSent) return "burn";
+  return "transfer";
+}
+
+function classifyCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, eventActionLabel = "") {
+  const base = classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel);
+  if (base !== "mint" && base !== "burn") return base;
+  const allRows = effects?.balanceChanges?.nodes || [];
+  const hasOppositeNonTarget = allRows.some((bc) => {
+    const ct = coinTypeKey(bc?.coinType?.repr || "");
+    if (!ct || ct === targetKey) return false;
+    const raw = parseBigIntSafe(bc?.amount || 0);
+    if (base === "mint") return raw < 0n;
+    return raw > 0n;
+  });
+  if (!hasOppositeNonTarget) return base;
+  return base === "mint" ? "swap-in" : "swap-out";
+}
+
+function getCoinTransferKindMeta(kind, row = null) {
+  const fallback = COIN_TRANSFER_KIND_META[kind] || COIN_TRANSFER_KIND_META.transfer;
+  return {
+    kindClass: fallback.css || "transfer",
+    kindLabel: fallback.label || "Transfer",
+    fromFallback: row?.fromHint || fallback.fromFallback || "—",
+    toFallback: row?.toHint || fallback.toFallback || "—",
+  };
 }
 
 const _intentCache = new Map();
@@ -11297,12 +11368,12 @@ async function renderCoin(app, routeCoinType = "") {
   }
 
   async function fetchCoinTxMetaRowsByDigest(digests) {
-    const rows = [];
-    for (const chunk of chunkArray(digests || [], 30)) {
-      if (!chunk.length) continue;
+    const chunkRows = await mapChunksWithLimit(digests || [], 30, 4, async (chunk) => {
+      if (!chunk.length) return [];
       const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") { digest effects { status timestamp } }`);
       const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
-      if (!data) continue;
+      if (!data) return [];
+      const rows = [];
       for (let i = 0; i < chunk.length; i += 1) {
         const tx = data?.[`t${i}`];
         if (!tx?.digest) continue;
@@ -11312,21 +11383,20 @@ async function renderCoin(app, routeCoinType = "") {
           status: tx?.effects?.status || "",
         });
       }
-    }
-    return rows;
+      return rows;
+    });
+    return chunkRows.flat();
   }
 
   async function fetchCoinTxDetailsByDigest(digests) {
-    const rows = [];
     // Keep payload below Sui GraphQL 5KB request cap.
-    for (const chunk of chunkArray(digests || [], 2)) {
-      if (!chunk.length) continue;
+    const chunkRows = await mapChunksWithLimit(digests || [], 2, 3, async (chunk) => {
+      if (!chunk.length) return [];
       const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") {
         digest
         sender { address }
         effects {
           status timestamp
-          checkpoint { sequenceNumber }
           balanceChanges(first: 50) {
             pageInfo { hasNextPage }
             nodes { owner { address } amount coinType { repr } }
@@ -11345,7 +11415,6 @@ async function renderCoin(app, routeCoinType = "") {
             nodes {
               address idCreated idDeleted
               inputState {
-                version
                 owner {
                   ... on AddressOwner { address { address } }
                   ... on ObjectOwner { address { address } }
@@ -11355,7 +11424,6 @@ async function renderCoin(app, routeCoinType = "") {
                 asMoveObject { contents { type { repr } } }
               }
               outputState {
-                version
                 owner {
                   ... on AddressOwner { address { address } }
                   ... on ObjectOwner { address { address } }
@@ -11369,13 +11437,15 @@ async function renderCoin(app, routeCoinType = "") {
         }
       }`);
       const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
-      if (!data) continue;
+      if (!data) return [];
+      const rows = [];
       for (let i = 0; i < chunk.length; i += 1) {
         const tx = data?.[`t${i}`];
         if (tx?.digest) rows.push(tx);
       }
-    }
-    return rows;
+      return rows;
+    });
+    return chunkRows.flat();
   }
 
   try {
@@ -11449,6 +11519,9 @@ async function renderCoin(app, routeCoinType = "") {
 
     function ingestCoinTransaction(tx) {
       const eff = tx?.effects || {};
+      const txEvents = eff?.events?.nodes || [];
+      const txEventAction = classifyEventAction(txEvents);
+      const txEventActionLabel = String(txEventAction?.label || "");
       let txHasTransferMatch = false;
       let txHasObjectMatch = false;
       let txHasDirectEventMatch = false;
@@ -11480,7 +11553,7 @@ async function renderCoin(app, routeCoinType = "") {
         }
         const amountRaw = sentRaw > recvRaw ? sentRaw : recvRaw;
         if (amountRaw > 0n) {
-          const kind = sentRaw > 0n && recvRaw > 0n ? "transfer" : (recvRaw > 0n ? "mint" : "burn");
+          const kind = classifyCoinFlowKindWithContext(eff, targetKey, sentRaw, recvRaw, txEventActionLabel);
           transferRows.push({
             digest: tx?.digest || "",
             timestamp: eff?.timestamp || "",
@@ -11489,12 +11562,13 @@ async function renderCoin(app, routeCoinType = "") {
             toRows,
             amountRaw,
             kind,
+            actionLabel: txEventActionLabel,
           });
         }
       }
 
       if (eff?.events?.pageInfo?.hasNextPage) truncatedEvents = true;
-      for (const ev of (eff?.events?.nodes || [])) {
+      for (const ev of txEvents) {
         const typeRepr = String(ev?.contents?.type?.repr || "");
         const json = ev?.contents?.json;
         const row = {
@@ -11558,6 +11632,7 @@ async function renderCoin(app, routeCoinType = "") {
             kind: "object-transfer",
             fromHint: !fromRows.length ? (inputOwner.kind || "") : "",
             toHint: !toRows.length ? (outputOwner.kind || "") : "",
+            actionLabel: txEventActionLabel,
           });
         }
       }
@@ -11575,6 +11650,7 @@ async function renderCoin(app, routeCoinType = "") {
         const signals = [];
         if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
         if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
+        if (txEventActionLabel) signals.push(txEventActionLabel.toLowerCase());
         if (txHasDirectEventMatch) signals.push("direct event");
         if (txHasContextEventMatch) signals.push("context events");
         matchedActivityRows.push({
@@ -11596,7 +11672,6 @@ async function renderCoin(app, routeCoinType = "") {
             sender { address }
             effects {
               status timestamp
-              checkpoint { sequenceNumber }
               balanceChanges(first: 50) {
                 pageInfo { hasNextPage }
                 nodes { owner { address } amount coinType { repr } }
@@ -11615,7 +11690,6 @@ async function renderCoin(app, routeCoinType = "") {
                 nodes {
                   address idCreated idDeleted
                   inputState {
-                    version
                     owner {
                       ... on AddressOwner { address { address } }
                       ... on ObjectOwner { address { address } }
@@ -11625,7 +11699,6 @@ async function renderCoin(app, routeCoinType = "") {
                     asMoveObject { contents { type { repr } } }
                   }
                   outputState {
-                    version
                     owner {
                       ... on AddressOwner { address { address } }
                       ... on ObjectOwner { address { address } }
@@ -11792,25 +11865,16 @@ async function renderCoin(app, routeCoinType = "") {
           <div class="card-header">Most Recent Transfers</div>
           <div class="card-body">
             ${transfers.length ? `<table>
-              <thead><tr><th>Kind</th><th class="u-ta-right">Amount</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
+              <thead><tr><th>Kind</th><th>Action</th><th class="u-ta-right">Amount</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
               <tbody>
                 ${transfers.map((row) => {
-                  const fromFallback = row.kind === "mint"
-                    ? "mint/system"
-                    : (row.fromHint ? row.fromHint : "—");
-                  const toFallback = row.kind === "burn"
-                    ? "burn/sink"
-                    : (row.toHint ? row.toHint : "—");
-                  const kindLabel = row.kind === "transfer"
-                    ? "Transfer"
-                    : (row.kind === "mint"
-                      ? "Mint/Inflow"
-                      : (row.kind === "burn" ? "Burn/Outflow" : "Object Transfer"));
+                  const kindMeta = getCoinTransferKindMeta(row.kind, row);
                   return `<tr>
-                    <td><span class="coin-transfer-kind coin-transfer-kind-${row.kind}">${kindLabel}</span></td>
+                    <td><span class="coin-transfer-kind coin-transfer-kind-${kindMeta.kindClass}">${kindMeta.kindLabel}</span></td>
+                    <td>${row.actionLabel ? `<span class="badge badge-success">${escapeHtml(row.actionLabel)}</span>` : '<span class="u-c-dim">—</span>'}</td>
                     <td class="u-ta-right-mono">${row.amountRaw == null ? '<span class="u-c-dim">Unknown</span>' : fmtCoinAbs(row.amountRaw, decimals)}</td>
-                    <td>${renderAddressList(row.fromRows, fromFallback)}</td>
-                    <td>${renderAddressList(row.toRows, toFallback)}</td>
+                    <td>${renderAddressList(row.fromRows, kindMeta.fromFallback)}</td>
+                    <td>${renderAddressList(row.toRows, kindMeta.toFallback)}</td>
                     <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
                     <td>${timeTag(row.timestamp)}</td>
                   </tr>`;
