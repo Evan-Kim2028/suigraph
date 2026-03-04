@@ -1867,6 +1867,44 @@ function viewQueryBtn(queryKey, params = {}) {
 // ── Coin Metadata Cache ─────────────────────────────────────────────────
 const coinMetaCache = {};
 const coinTotalSupplyRpcCache = {};
+async function fetchCoinObjectSupplySnapshot(coinType, { maxObjects = 1200, maxPages = 32 } = {}) {
+  const coinObjType = `0x2::coin::Coin<${coinType}>`;
+  let after = null;
+  let hasNext = true;
+  let pages = 0;
+  let objectCount = 0;
+  let total = 0n;
+  while (hasNext && pages < Math.max(1, Number(maxPages || 0)) && objectCount < Math.max(1, Number(maxObjects || 0))) {
+    const data = await gql(`query($type: String!, $after: String) {
+      objects(filter: { type: $type }, first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { asMoveObject { contents { json } } }
+      }
+    }`, { type: coinObjType, after });
+    const conn = data?.objects;
+    const nodes = conn?.nodes || [];
+    for (const node of nodes) {
+      const balRaw = node?.asMoveObject?.contents?.json?.balance;
+      total += parseBigIntSafe(balRaw ?? 0);
+      objectCount += 1;
+      if (objectCount >= Math.max(1, Number(maxObjects || 0))) break;
+    }
+    pages += 1;
+    hasNext = !!conn?.pageInfo?.hasNextPage;
+    after = conn?.pageInfo?.endCursor || null;
+    if (!nodes.length) break;
+  }
+  const complete = !hasNext;
+  return {
+    value: complete ? String(total) : null,
+    partialValue: String(total),
+    objectCount,
+    pages,
+    complete,
+    hasNext,
+  };
+}
+
 async function getCoinMeta(coinType) {
   if (!coinType) return null;
   if (coinMetaCache[coinType]) return coinMetaCache[coinType];
@@ -1891,16 +1929,53 @@ async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {
       try {
         const result = await suiRpcCall("suix_getTotalSupply", [ct]);
         if (result?.value != null) {
-          return { value: String(result.value), source: "suix_getTotalSupply", note: "" };
+          return { value: String(result.value), source: "suix_getTotalSupply", note: "", estimated: false };
         }
       } catch (e) {
         lastErr = e?.message || String(e);
       }
     }
+    let registryNote = "";
+    try {
+      const md = await suiRpcCall("suix_getCoinMetadata", [candidates[0]]);
+      const mdId = normalizeSuiAddress(md?.id || "");
+      if (mdId) {
+        const mdObj = await suiRpcCall("sui_getObject", [mdId, { showContent: true }]).catch(() => null);
+        const variant = String(mdObj?.data?.content?.fields?.supply?.variant || "");
+        if (variant) {
+          if (variant.toLowerCase() === "unknown") registryNote = "Coin registry marks supply state as Unknown.";
+          else registryNote = `Coin registry supply state is ${variant}.`;
+        }
+      }
+    } catch (_) { /* ignore */ }
+
+    try {
+      const objectSupply = await fetchCoinObjectSupplySnapshot(candidates[0], { maxObjects: 1200, maxPages: 32 });
+      if (objectSupply?.value != null) {
+        const countLabel = fmtNumber(objectSupply.objectCount || 0);
+        const noteParts = [
+          `Derived from ${countLabel} live Coin objects.`,
+          "May exclude balances wrapped as Balance<T> in shared objects.",
+        ];
+        return {
+          value: String(objectSupply.value),
+          source: "coinObjects.sum",
+          note: noteParts.join(" "),
+          estimated: true,
+        };
+      }
+      if (!registryNote && objectSupply?.hasNext) {
+        registryNote = `Coin-object scan hit cap at ${fmtNumber(objectSupply.objectCount || 0)} objects before completion.`;
+      }
+    } catch (_) { /* ignore */ }
+
+    const reason = formatSupplyUnavailableReason(lastErr);
+    const mergedNote = [registryNote, reason].filter(Boolean).join(" ");
     return {
       value: null,
       source: "suix_getTotalSupply",
-      note: formatSupplyUnavailableReason(lastErr),
+      note: mergedNote || reason,
+      estimated: false,
     };
   })();
   if (cacheKey) coinTotalSupplyRpcCache[cacheKey] = run;
@@ -10049,6 +10124,132 @@ async function renderCoin(app, routeCoinType = "") {
     return approx.toExponential(2);
   }
 
+  async function fetchCoinObjectDigestCandidates(coinTypeValue, { maxPages = 12, maxDigests = 600 } = {}) {
+    const coinObjectType = `0x2::coin::Coin<${coinTypeValue}>`;
+    let after = null;
+    let hasNext = true;
+    let pages = 0;
+    const rows = [];
+    while (hasNext && pages < Math.max(1, Number(maxPages || 0)) && rows.length < Math.max(1, Number(maxDigests || 0)) * 2) {
+      const data = await gql(`query($type: String!, $after: String) {
+        objects(filter: { type: $type }, first: 50, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            version
+            previousTransaction { digest }
+          }
+        }
+      }`, { type: coinObjectType, after });
+      const conn = data?.objects;
+      const nodes = conn?.nodes || [];
+      for (const node of nodes) {
+        const digest = String(node?.previousTransaction?.digest || "");
+        if (!digest) continue;
+        rows.push({ digest, version: parseBigIntSafe(node?.version || 0) });
+      }
+      pages += 1;
+      hasNext = !!conn?.pageInfo?.hasNextPage;
+      after = conn?.pageInfo?.endCursor || null;
+      if (!nodes.length) break;
+    }
+    rows.sort((a, b) => (a.version === b.version ? 0 : (a.version < b.version ? 1 : -1)));
+    const deduped = [];
+    const seen = new Set();
+    for (const row of rows) {
+      if (!row.digest || seen.has(row.digest)) continue;
+      seen.add(row.digest);
+      deduped.push(row.digest);
+      if (deduped.length >= Math.max(1, Number(maxDigests || 0))) break;
+    }
+    return {
+      digests: deduped,
+      pages,
+      sampledObjects: rows.length,
+      hasNext,
+    };
+  }
+
+  async function fetchCoinTxMetaRowsByDigest(digests) {
+    const rows = [];
+    for (const chunk of chunkArray(digests || [], 30)) {
+      if (!chunk.length) continue;
+      const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") { digest effects { status timestamp } }`);
+      const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
+      if (!data) continue;
+      for (let i = 0; i < chunk.length; i += 1) {
+        const tx = data?.[`t${i}`];
+        if (!tx?.digest) continue;
+        rows.push({
+          digest: tx.digest,
+          timestamp: tx?.effects?.timestamp || "",
+          status: tx?.effects?.status || "",
+        });
+      }
+    }
+    return rows;
+  }
+
+  async function fetchCoinTxDetailsByDigest(digests) {
+    const rows = [];
+    for (const chunk of chunkArray(digests || [], 3)) {
+      if (!chunk.length) continue;
+      const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") {
+        digest
+        sender { address }
+        effects {
+          status timestamp
+          checkpoint { sequenceNumber }
+          balanceChanges(first: 50) {
+            pageInfo { hasNextPage }
+            nodes { owner { address } amount coinType { repr } }
+          }
+          events(first: 50) {
+            pageInfo { hasNextPage }
+            nodes {
+              contents { type { repr } json }
+              sender { address }
+              timestamp
+              transactionModule { name package { address } }
+            }
+          }
+          objectChanges(first: 50) {
+            pageInfo { hasNextPage }
+            nodes {
+              address idCreated idDeleted
+              inputState {
+                version
+                owner {
+                  ... on AddressOwner { address { address } }
+                  ... on ObjectOwner { address { address } }
+                  ... on Shared { initialSharedVersion }
+                  ... on Immutable { __typename }
+                }
+                asMoveObject { contents { type { repr } } }
+              }
+              outputState {
+                version
+                owner {
+                  ... on AddressOwner { address { address } }
+                  ... on ObjectOwner { address { address } }
+                  ... on Shared { initialSharedVersion }
+                  ... on Immutable { __typename }
+                }
+                asMoveObject { contents { type { repr } } }
+              }
+            }
+          }
+        }
+      }`);
+      const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
+      if (!data) continue;
+      for (let i = 0; i < chunk.length; i += 1) {
+        const tx = data?.[`t${i}`];
+        if (tx?.digest) rows.push(tx);
+      }
+    }
+    return rows;
+  }
+
   try {
     let coinMeta = await getCoinMeta(coinType).catch(() => null);
     const shortCoinType = normalizeCoinType(coinType);
@@ -10065,6 +10266,8 @@ async function renderCoin(app, routeCoinType = "") {
     const iconUrl = String(coinMeta?.iconUrl || "");
     let supplySource = "";
     let supplyUnavailableReason = "";
+    let supplySourceNote = "";
+    let supplyIsEstimated = false;
     let supplyRaw = 0n;
     let hasSupply = false;
     if (coinMeta?.supply != null) {
@@ -10076,6 +10279,8 @@ async function renderCoin(app, routeCoinType = "") {
       if (rpcSupply?.value != null) {
         hasSupply = true;
         supplyRaw = parseBigIntSafe(rpcSupply.value);
+        supplyIsEstimated = !!rpcSupply?.estimated;
+        supplySourceNote = String(rpcSupply?.note || "");
       } else {
         supplyUnavailableReason = rpcSupply?.note || "coinMetadata.supply unavailable";
       }
@@ -10108,6 +10313,151 @@ async function renderCoin(app, routeCoinType = "") {
     const eventRows = [];
     const objectRows = [];
     const matchedActivityRows = [];
+    const MAX_CONTEXT_EVENTS_PER_TX = 8;
+    let objectFallbackScannedObjects = 0;
+    let objectFallbackScannedPages = 0;
+    let objectFallbackConsideredDigests = 0;
+    let objectFallbackLoadedTx = 0;
+
+    function ingestCoinTransaction(tx) {
+      const eff = tx?.effects || {};
+      let txHasTransferMatch = false;
+      let txHasObjectMatch = false;
+      let txHasDirectEventMatch = false;
+      let txHasContextEventMatch = false;
+      let txObjectMatchCount = 0;
+      let txBalanceMatchCount = 0;
+      const contextualEventCandidates = [];
+
+      const coinBalanceRows = (eff?.balanceChanges?.nodes || [])
+        .filter((bc) => coinTypeKey(bc?.coinType?.repr || "") === targetKey);
+      if (coinBalanceRows.length) {
+        txHasTransferMatch = true;
+        txBalanceMatchCount = coinBalanceRows.length;
+        if (eff?.balanceChanges?.pageInfo?.hasNextPage) truncatedBalances = true;
+        let sentRaw = 0n;
+        let recvRaw = 0n;
+        const fromRows = [];
+        const toRows = [];
+        for (const bc of coinBalanceRows) {
+          const raw = parseBigIntSafe(bc?.amount || 0);
+          const owner = normalizeSuiAddress(bc?.owner?.address || "");
+          if (raw < 0n) {
+            sentRaw += -raw;
+            if (owner) fromRows.push(owner);
+          } else if (raw > 0n) {
+            recvRaw += raw;
+            if (owner) toRows.push(owner);
+          }
+        }
+        const amountRaw = sentRaw > recvRaw ? sentRaw : recvRaw;
+        if (amountRaw > 0n) {
+          const kind = sentRaw > 0n && recvRaw > 0n ? "transfer" : (recvRaw > 0n ? "mint" : "burn");
+          transferRows.push({
+            digest: tx?.digest || "",
+            timestamp: eff?.timestamp || "",
+            status: eff?.status || "",
+            fromRows,
+            toRows,
+            amountRaw,
+            kind,
+          });
+        }
+      }
+
+      if (eff?.events?.pageInfo?.hasNextPage) truncatedEvents = true;
+      for (const ev of (eff?.events?.nodes || [])) {
+        const typeRepr = String(ev?.contents?.type?.repr || "");
+        const json = ev?.contents?.json;
+        const row = {
+          digest: tx?.digest || "",
+          timestamp: ev?.timestamp || eff?.timestamp || "",
+          status: eff?.status || "",
+          sender: normalizeSuiAddress(ev?.sender?.address || tx?.sender?.address || ""),
+          typeRepr,
+          moduleName: ev?.transactionModule?.name || "",
+          modulePackage: normalizeSuiAddress(ev?.transactionModule?.package?.address || ""),
+          jsonPreview: summarizeCoinJson(json),
+        };
+        if (moveTypeStringHasCoinType(typeRepr, targetKey) || valueHasCoinType(json, targetKey)) {
+          txHasDirectEventMatch = true;
+          eventRows.push({ ...row, matchSource: "direct" });
+        } else {
+          contextualEventCandidates.push(row);
+        }
+      }
+
+      if (eff?.objectChanges?.pageInfo?.hasNextPage) truncatedObjects = true;
+      for (const oc of (eff?.objectChanges?.nodes || [])) {
+        const inputType = String(oc?.inputState?.asMoveObject?.contents?.type?.repr || "");
+        const outputType = String(oc?.outputState?.asMoveObject?.contents?.type?.repr || "");
+        if (!moveTypeStringHasCoinType(inputType, targetKey) && !moveTypeStringHasCoinType(outputType, targetKey)) continue;
+        txHasObjectMatch = true;
+        txObjectMatchCount += 1;
+        const inputOwner = parseOwnerInfo(oc?.inputState?.owner);
+        const outputOwner = parseOwnerInfo(oc?.outputState?.owner);
+        const ownerAddress = outputOwner.address;
+        const ownerKind = outputOwner.kind;
+        const objectId = normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || "");
+        const typeRepr = outputType || inputType || "";
+        objectRows.push({
+          digest: tx?.digest || "",
+          timestamp: eff?.timestamp || "",
+          status: eff?.status || "",
+          objectId,
+          changeKind: oc?.idCreated ? "Created" : (oc?.idDeleted ? "Deleted" : "Mutated"),
+          typeRepr,
+          ownerAddress,
+          ownerKind,
+        });
+
+        const ownerChanged = (
+          (inputOwner.address || outputOwner.address || inputOwner.kind || outputOwner.kind) &&
+          (inputOwner.address !== outputOwner.address || inputOwner.kind !== outputOwner.kind)
+        );
+        const isCoinObject = /::coin::Coin\s*</.test(typeRepr);
+        if (ownerChanged && isCoinObject) {
+          txHasTransferMatch = true;
+          const fromRows = inputOwner.address ? [inputOwner.address] : [];
+          const toRows = outputOwner.address ? [outputOwner.address] : [];
+          transferRows.push({
+            digest: tx?.digest || "",
+            timestamp: eff?.timestamp || "",
+            status: eff?.status || "",
+            fromRows,
+            toRows,
+            amountRaw: null,
+            kind: "object-transfer",
+            fromHint: !fromRows.length ? (inputOwner.kind || "") : "",
+            toHint: !toRows.length ? (outputOwner.kind || "") : "",
+          });
+        }
+      }
+
+      if (!txHasDirectEventMatch && contextualEventCandidates.length && (txHasTransferMatch || txHasObjectMatch)) {
+        const contextRows = contextualEventCandidates.slice(0, MAX_CONTEXT_EVENTS_PER_TX);
+        if (contextualEventCandidates.length > MAX_CONTEXT_EVENTS_PER_TX) truncatedEvents = true;
+        for (const row of contextRows) eventRows.push({ ...row, matchSource: "context" });
+        if (contextRows.length) txHasContextEventMatch = true;
+      }
+
+      const txHasMatch = txHasTransferMatch || txHasObjectMatch || txHasDirectEventMatch || txHasContextEventMatch;
+      if (txHasMatch && tx?.digest) {
+        matchedTx.add(tx.digest);
+        const signals = [];
+        if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
+        if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
+        if (txHasDirectEventMatch) signals.push("direct event");
+        if (txHasContextEventMatch) signals.push("context events");
+        matchedActivityRows.push({
+          digest: tx.digest,
+          timestamp: eff?.timestamp || "",
+          status: eff?.status || "",
+          sender: normalizeSuiAddress(tx?.sender?.address || ""),
+          signals: signals.join(" · "),
+        });
+      }
+    }
 
     while (hasPreviousPage && scannedTx < MAX_SCAN_TX) {
       const data = await gql(`query($before: String) {
@@ -10170,146 +10520,7 @@ async function renderCoin(app, routeCoinType = "") {
       scannedTx += txs.length;
       scannedPages += 1;
 
-      for (const tx of txs) {
-        const eff = tx?.effects || {};
-        let txHasTransferMatch = false;
-        let txHasObjectMatch = false;
-        let txHasDirectEventMatch = false;
-        let txHasContextEventMatch = false;
-        let txObjectMatchCount = 0;
-        let txBalanceMatchCount = 0;
-        const contextualEventCandidates = [];
-
-        const coinBalanceRows = (eff?.balanceChanges?.nodes || [])
-          .filter((bc) => coinTypeKey(bc?.coinType?.repr || "") === targetKey);
-        if (coinBalanceRows.length) {
-          txHasTransferMatch = true;
-          txBalanceMatchCount = coinBalanceRows.length;
-          if (eff?.balanceChanges?.pageInfo?.hasNextPage) truncatedBalances = true;
-          let sentRaw = 0n;
-          let recvRaw = 0n;
-          const fromRows = [];
-          const toRows = [];
-          for (const bc of coinBalanceRows) {
-            const raw = parseBigIntSafe(bc?.amount || 0);
-            const owner = normalizeSuiAddress(bc?.owner?.address || "");
-            if (raw < 0n) {
-              sentRaw += -raw;
-              if (owner) fromRows.push(owner);
-            } else if (raw > 0n) {
-              recvRaw += raw;
-              if (owner) toRows.push(owner);
-            }
-          }
-          const amountRaw = sentRaw > recvRaw ? sentRaw : recvRaw;
-          if (amountRaw > 0n) {
-            const kind = sentRaw > 0n && recvRaw > 0n ? "transfer" : (recvRaw > 0n ? "mint" : "burn");
-            transferRows.push({
-              digest: tx?.digest || "",
-              timestamp: eff?.timestamp || "",
-              status: eff?.status || "",
-              fromRows,
-              toRows,
-              amountRaw,
-              kind,
-            });
-          }
-        }
-
-        if (eff?.events?.pageInfo?.hasNextPage) truncatedEvents = true;
-        for (const ev of (eff?.events?.nodes || [])) {
-          const typeRepr = String(ev?.contents?.type?.repr || "");
-          const json = ev?.contents?.json;
-          const row = {
-            digest: tx?.digest || "",
-            timestamp: ev?.timestamp || eff?.timestamp || "",
-            status: eff?.status || "",
-            sender: normalizeSuiAddress(ev?.sender?.address || tx?.sender?.address || ""),
-            typeRepr,
-            moduleName: ev?.transactionModule?.name || "",
-            modulePackage: normalizeSuiAddress(ev?.transactionModule?.package?.address || ""),
-            jsonPreview: summarizeCoinJson(json),
-          };
-          if (moveTypeStringHasCoinType(typeRepr, targetKey) || valueHasCoinType(json, targetKey)) {
-            txHasDirectEventMatch = true;
-            eventRows.push({ ...row, matchSource: "direct" });
-          } else {
-            contextualEventCandidates.push(row);
-          }
-        }
-
-        if (eff?.objectChanges?.pageInfo?.hasNextPage) truncatedObjects = true;
-        for (const oc of (eff?.objectChanges?.nodes || [])) {
-          const inputType = String(oc?.inputState?.asMoveObject?.contents?.type?.repr || "");
-          const outputType = String(oc?.outputState?.asMoveObject?.contents?.type?.repr || "");
-          if (!moveTypeStringHasCoinType(inputType, targetKey) && !moveTypeStringHasCoinType(outputType, targetKey)) continue;
-          txHasObjectMatch = true;
-          txObjectMatchCount += 1;
-          const inputOwner = parseOwnerInfo(oc?.inputState?.owner);
-          const outputOwner = parseOwnerInfo(oc?.outputState?.owner);
-          const ownerAddress = outputOwner.address;
-          const ownerKind = outputOwner.kind;
-          const objectId = normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || "");
-          const typeRepr = outputType || inputType || "";
-          objectRows.push({
-            digest: tx?.digest || "",
-            timestamp: eff?.timestamp || "",
-            status: eff?.status || "",
-            objectId,
-            changeKind: oc?.idCreated ? "Created" : (oc?.idDeleted ? "Deleted" : "Mutated"),
-            typeRepr,
-            ownerAddress,
-            ownerKind,
-          });
-
-          const ownerChanged = (
-            (inputOwner.address || outputOwner.address || inputOwner.kind || outputOwner.kind) &&
-            (inputOwner.address !== outputOwner.address || inputOwner.kind !== outputOwner.kind)
-          );
-          const isCoinObject = /::coin::Coin\s*</.test(typeRepr);
-          if (ownerChanged && isCoinObject) {
-            txHasTransferMatch = true;
-            const fromRows = inputOwner.address ? [inputOwner.address] : [];
-            const toRows = outputOwner.address ? [outputOwner.address] : [];
-            transferRows.push({
-              digest: tx?.digest || "",
-              timestamp: eff?.timestamp || "",
-              status: eff?.status || "",
-              fromRows,
-              toRows,
-              amountRaw: null,
-              kind: "object-transfer",
-              fromHint: !fromRows.length ? (inputOwner.kind || "") : "",
-              toHint: !toRows.length ? (outputOwner.kind || "") : "",
-            });
-          }
-        }
-
-        if (!txHasDirectEventMatch && contextualEventCandidates.length && (txHasTransferMatch || txHasObjectMatch)) {
-          const maxContextRows = 8;
-          const contextRows = contextualEventCandidates.slice(0, maxContextRows);
-          if (contextualEventCandidates.length > maxContextRows) truncatedEvents = true;
-          for (const row of contextRows) eventRows.push({ ...row, matchSource: "context" });
-          if (contextRows.length) txHasContextEventMatch = true;
-        }
-
-        const txHasMatch = txHasTransferMatch || txHasObjectMatch || txHasDirectEventMatch || txHasContextEventMatch;
-        if (txHasMatch && tx?.digest) {
-          matchedTx.add(tx.digest);
-          const signals = [];
-          if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
-          if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
-          if (txHasDirectEventMatch) signals.push("direct event");
-          if (txHasContextEventMatch) signals.push("context events");
-          matchedActivityRows.push({
-            digest: tx.digest,
-            timestamp: eff?.timestamp || "",
-            status: eff?.status || "",
-            sender: normalizeSuiAddress(tx?.sender?.address || ""),
-            signals: signals.join(" · "),
-          });
-        }
-      }
+      for (const tx of txs) ingestCoinTransaction(tx);
 
       hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
       before = conn?.pageInfo?.startCursor || null;
@@ -10321,6 +10532,25 @@ async function renderCoin(app, routeCoinType = "") {
       if (diff !== 0) return diff;
       return String(b?.digest || "").localeCompare(String(a?.digest || ""));
     };
+
+    if (!transferRows.length && !eventRows.length && !objectRows.length) {
+      try {
+        const digestCandidates = await fetchCoinObjectDigestCandidates(coinType, { maxPages: 12, maxDigests: 600 });
+        objectFallbackScannedObjects = digestCandidates?.sampledObjects || 0;
+        objectFallbackScannedPages = digestCandidates?.pages || 0;
+        const candidates = (digestCandidates?.digests || []).filter((d) => d && !matchedTx.has(d));
+        objectFallbackConsideredDigests = candidates.length;
+        if (candidates.length) {
+          const metaRows = await fetchCoinTxMetaRowsByDigest(candidates);
+          metaRows.sort(sortRecent);
+          const topDigests = metaRows.map((row) => row.digest).filter(Boolean).slice(0, 90);
+          const txRows = await fetchCoinTxDetailsByDigest(topDigests);
+          objectFallbackLoadedTx = txRows.length;
+          for (const tx of txRows) ingestCoinTransaction(tx);
+        }
+      } catch (_) { /* ignore fallback failures */ }
+    }
+
     transferRows.sort(sortRecent);
     eventRows.sort(sortRecent);
     objectRows.sort(sortRecent);
@@ -10339,6 +10569,12 @@ async function renderCoin(app, routeCoinType = "") {
       if (truncatedEvents) fields.push("events");
       if (truncatedObjects) fields.push("objectChanges");
       notes.push(`Some matched transactions exceed per-query page size for ${fields.join(", ")}.`);
+    }
+    const usedObjectFallback = objectFallbackLoadedTx > 0;
+    if (usedObjectFallback) {
+      notes.push(`Fallback sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects across ${fmtNumber(objectFallbackScannedPages)} pages and loaded ${fmtNumber(objectFallbackLoadedTx)} object-linked transactions.`);
+    } else if (!transferRows.length && !eventRows.length && !objectRows.length && objectFallbackScannedObjects > 0) {
+      notes.push(`Fallback sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects but did not find recent object-linked transactions in the sample.`);
     }
     const directEventCount = events.filter((row) => row.matchSource === "direct").length;
     const contextEventCount = events.length - directEventCount;
@@ -10370,12 +10606,12 @@ async function renderCoin(app, routeCoinType = "") {
             <div class="stat-box">
               <div class="stat-label">Supply</div>
               <div class="stat-value">${hasSupply ? escapeHtml(supplyDisplay) : "—"}</div>
-              <div class="stat-sub">${hasSupply ? `${escapeHtml(symbol)} units (${escapeHtml(supplySource || "metadata")})` : escapeHtml(supplyUnavailableReason || "coinMetadata.supply unavailable")}</div>
+              <div class="stat-sub">${hasSupply ? `${escapeHtml(symbol)} units (${escapeHtml(supplySource || "metadata")}${supplyIsEstimated ? ", derived" : ""})` : escapeHtml(supplyUnavailableReason || "coinMetadata.supply unavailable")}</div>
             </div>
             <div class="stat-box">
               <div class="stat-label">Matched Tx</div>
               <div class="stat-value">${fmtNumber(matchedTx.size)}</div>
-              <div class="stat-sub">from ${fmtNumber(scannedTx)} scanned txs</div>
+              <div class="stat-sub">from ${fmtNumber(scannedTx)} scanned txs${usedObjectFallback ? ` + ${fmtNumber(objectFallbackLoadedTx)} object-linked txs` : ""}</div>
             </div>
             <div class="stat-box">
               <div class="stat-label">Transfers</div>
@@ -10408,11 +10644,14 @@ async function renderCoin(app, routeCoinType = "") {
             </div>
             <div class="detail-row">
               <div class="detail-key">Supply Source</div>
-              <div class="detail-val">${hasSupply ? escapeHtml(supplySource || "coinMetadata.supply") : `<span class="u-c-dim">${escapeHtml(supplyUnavailableReason || "Unavailable")}</span>`}</div>
+              <div class="detail-val">${hasSupply ? `${escapeHtml(supplySource || "coinMetadata.supply")}${supplySourceNote ? ` <span class="u-fs11-dim">${escapeHtml(supplySourceNote)}</span>` : ""}` : `<span class="u-c-dim">${escapeHtml(supplyUnavailableReason || "Unavailable")}</span>`}</div>
             </div>
             <div class="detail-row">
               <div class="detail-key">Scan Scope</div>
-              <div class="detail-val">${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages</div>
+              <div class="detail-val">
+                ${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages
+                ${objectFallbackScannedObjects ? `; fallback sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects (${fmtNumber(objectFallbackConsideredDigests)} candidate tx digests)` : ""}
+              </div>
             </div>
           </div>
           ${iconUrl ? `<div class="u-fs12-dim u-mt8">Icon: <a class="hash-link" href="${escapeAttr(iconUrl)}" target="_blank" rel="noopener">coinMetadata.iconUrl</a></div>` : ""}
