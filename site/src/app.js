@@ -11056,7 +11056,7 @@ async function renderCoin(app, routeCoinType = "") {
   const requestedRaw = String(routeCoinType || routeParams.get("type") || "").trim();
   const scanMode = getCoinActivityScanMode(routeParams.get("mode"));
   const scanParam = String(routeParams.get("scan") || "").trim();
-  const shouldScanActivity = scanParam ? scanParam === "1" : true;
+  const shouldScanActivity = scanParam !== "0";
   const shouldResolveSupply = shouldScanActivity || routeParams.get("supply") === "1";
 
   function renderSearchCard(currentValue = "", error = "") {
