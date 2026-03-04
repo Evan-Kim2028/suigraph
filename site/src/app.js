@@ -196,6 +196,7 @@ const PAGE_PERF_BUDGETS = Object.freeze({
   congestion: { gqlCalls: 12, renderMs: 1900 },
   validators: { gqlCalls: 3, renderMs: 1200 },
   events: { gqlCalls: 4, renderMs: 1500 },
+  coin: { gqlCalls: 20, renderMs: 2600 },
   "defi-overview": { gqlCalls: 20, renderMs: 2500 },
   "defi-rates": { gqlCalls: 20, renderMs: 2500 },
   "defi-dex": { gqlCalls: 20, renderMs: 2500 },
@@ -477,6 +478,56 @@ function normalizeCoinType(coinType) {
   const hex = addr.startsWith("0x") ? addr.slice(2) : addr;
   const short = "0x" + (hex.replace(/^0+/, "") || "0");
   return short + rest;
+}
+
+const MOVE_TYPE_TOKEN_RE = /0x[0-9a-fA-F]+::[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*/g;
+const COIN_TYPE_PREFIX_RE = /^(0x[0-9a-fA-F]+)::([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)(.*)$/;
+
+function normalizeCoinTypeQueryInput(raw) {
+  const input = String(raw || "").trim();
+  if (!input) return "";
+  const prefixed = input.startsWith("0x") ? input : `0x${input}`;
+  const match = prefixed.match(COIN_TYPE_PREFIX_RE);
+  if (!match) return "";
+  const suffix = String(match[4] || "").trim();
+  if (suffix && !suffix.startsWith("<")) return "";
+  const addr = normalizeSuiAddress(match[1]);
+  if (!addr) return "";
+  return `${addr}::${match[2]}::${match[3]}${suffix}`;
+}
+
+function moveTypeStringHasCoinType(value, targetKey) {
+  if (!targetKey) return false;
+  const text = String(value || "");
+  if (!text) return false;
+  const tokens = text.match(MOVE_TYPE_TOKEN_RE) || [];
+  for (const token of tokens) {
+    if (coinTypeKey(token) === targetKey) return true;
+  }
+  return false;
+}
+
+function valueHasCoinType(value, targetKey, depth = 0) {
+  if (!targetKey || value == null || depth > 6) return false;
+  if (typeof value === "string") {
+    if (moveTypeStringHasCoinType(value, targetKey)) return true;
+    const normalized = normalizeCoinTypeQueryInput(value);
+    return normalized ? coinTypeKey(normalized) === targetKey : false;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < Math.min(value.length, 24); i += 1) {
+      if (valueHasCoinType(value[i], targetKey, depth + 1)) return true;
+    }
+    return false;
+  }
+  if (typeof value === "object") {
+    const vals = Object.values(value);
+    for (let i = 0; i < Math.min(vals.length, 24); i += 1) {
+      if (valueHasCoinType(vals[i], targetKey, depth + 1)) return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 // Resolve a full coin type string to { symbol, decimals } (sync, fast path)
@@ -1922,7 +1973,9 @@ function setRouteParams(updates = {}, opts = {}) {
 }
 
 function parseRoute(route) {
-  const cleanRoute = splitRouteAndParams(route).path;
+  const routeParts = splitRouteAndParams(route);
+  const cleanRoute = routeParts.path;
+  const routeParams = routeParts.params;
   if (cleanRoute === "/" || cleanRoute === "") return { page: "home" };
   const parts = cleanRoute.split("/").filter(Boolean);
   if (parts[0] === "checkpoint" && parts[1]) return { page: "checkpoint", id: parts[1] };
@@ -1931,6 +1984,7 @@ function parseRoute(route) {
   if (parts[0] === "txs") return { page: "txs" };
   if (parts[0] === "address" && parts[1]) return { page: "address", addr: parts[1] };
   if (parts[0] === "object" && parts[1]) return { page: "object", id: parts[1] };
+  if (parts[0] === "coin") return { page: "coin", coinType: routeParams.get("type") || "" };
   if (parts[0] === "graphql") return { page: "graphql" };
   if (parts[0] === "epoch" && parts[1]) return { page: "epoch", id: parts[1] };
   if (parts[0] === "transfers") return { page: "transfers" };
@@ -1954,7 +2008,7 @@ async function routeTo(route) {
   const r = parseRoute(route);
   startPagePerf(r.page);
   // Update active nav — handle flat links and dropdown items
-  const networkPages = ["transfers","congestion","events","protocol","validators"];
+  const networkPages = ["transfers","congestion","events","protocol","validators","coin"];
   const defiPages = ["defi-overview","defi-rates","defi-dex","defi-stablecoins","defi-lst","defi-flows"];
   const devtoolsPages = ["graphql","simulate"];
   document.querySelectorAll(".topbar nav > a").forEach(a => {
@@ -1986,6 +2040,7 @@ async function routeTo(route) {
       case "tx": await renderTxDetail(app, r.digest); break;
       case "address": await renderAddress(app, r.addr); break;
       case "object": await renderObjectDetail(app, r.id); break;
+      case "coin": await renderCoin(app, r.coinType); break;
       case "graphql": await renderGraphQLPlayground(app); break;
       case "epoch": await renderEpochDetail(app, r.id); break;
       case "transfers": await renderTransfers(app); break;
@@ -2024,7 +2079,14 @@ document.getElementById("searchForm").addEventListener("submit", async (evt) => 
   input.blur();
 
   // Detect type by format
-  if (/^\d+$/.test(q)) {
+  const coinTypeQuery = normalizeCoinTypeQueryInput(q);
+  if (coinTypeQuery) {
+    navigate("/coin?type=" + encodeURIComponent(coinTypeQuery));
+  } else if (q.startsWith("0x") && q.includes("::")) {
+    // Keep invalid/edge coin-type-like input on the coin page instead of
+    // sending it to /object and failing SuiAddress parsing.
+    navigate("/coin?type=" + encodeURIComponent(q));
+  } else if (/^\d+$/.test(q)) {
     navigate("/checkpoint/" + q);
   } else if (/^0x[0-9a-fA-F]{64}$/.test(q)) {
     // Could be an address or an object (package). Query GQL to find out.
@@ -9786,6 +9848,492 @@ const QUERIES = {
     variables: {},
   },
 };
+
+async function renderCoin(app, routeCoinType = "") {
+  const routeParams = splitRouteAndParams(getRoute()).params;
+  const requestedRaw = String(routeCoinType || routeParams.get("type") || "").trim();
+
+  function renderSearchCard(currentValue = "", error = "") {
+    return `
+      <div class="card u-mb16">
+        <div class="card-header">Coin Search</div>
+        <div class="card-body">
+          <form id="coin-search-form" class="coin-search-bar">
+            <input
+              id="coin-search-input"
+              class="ui-control coin-search-input"
+              type="search"
+              value="${escapeAttr(currentValue)}"
+              placeholder="0x...::module::Type"
+              enterkeyhint="search"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
+            <button type="submit" class="btn-accent-sm">Load Coin</button>
+          </form>
+          <div id="coin-search-error" class="coin-search-error">${error ? escapeHtml(error) : ""}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function bindCoinSearchForm() {
+    const form = document.getElementById("coin-search-form");
+    if (!form) return;
+    form.onsubmit = (ev) => {
+      ev.preventDefault();
+      const inputEl = document.getElementById("coin-search-input");
+      const nextRaw = String(inputEl?.value || "").trim();
+      if (!nextRaw) return;
+      const nextCoinType = normalizeCoinTypeQueryInput(nextRaw);
+      if (!nextCoinType) {
+        const errEl = document.getElementById("coin-search-error");
+        if (errEl) errEl.textContent = "Use full coin type format: 0x...::module::Type";
+        return;
+      }
+      const nextHash = "#/coin?type=" + encodeURIComponent(nextCoinType);
+      if (window.location.hash === nextHash) routeTo(getRoute());
+      else navigate("/coin?type=" + encodeURIComponent(nextCoinType));
+    };
+  }
+
+  if (!requestedRaw) {
+    app.innerHTML = `
+      <div class="page-title">Coin Search</div>
+      ${renderSearchCard()}
+      <div class="card">
+        <div class="card-body">
+          ${renderEmpty("Enter a full coin type (0x...::module::Type) to inspect supply and recent activity.")}
+        </div>
+      </div>
+    `;
+    bindCoinSearchForm();
+    return;
+  }
+
+  const coinType = normalizeCoinTypeQueryInput(requestedRaw);
+  if (!coinType) {
+    app.innerHTML = `
+      <div class="page-title">Coin Search</div>
+      ${renderSearchCard(requestedRaw, "Invalid coin type format. Expected 0x...::module::Type")}
+      <div class="card">
+        <div class="card-body">
+          ${renderEmpty("Coin type could not be parsed.")}
+        </div>
+      </div>
+    `;
+    bindCoinSearchForm();
+    return;
+  }
+
+  if ((routeParams.get("type") || "") !== coinType) setRouteParams({ type: coinType });
+
+  app.innerHTML = `
+    <div class="page-title">Coin Search</div>
+    ${renderSearchCard(coinType)}
+    <div class="card">
+      <div class="card-body">${renderLoading()}</div>
+    </div>
+  `;
+  bindCoinSearchForm();
+
+  function summarizeCoinJson(value, maxLen = 180) {
+    try {
+      const raw = JSON.stringify(value);
+      if (!raw) return "";
+      return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function renderAddressList(addrs, emptyLabel = "—") {
+    const rows = [...new Set((addrs || []).map(a => normalizeSuiAddress(a)).filter(Boolean))];
+    if (!rows.length) return `<span class="u-c-dim">${escapeHtml(emptyLabel)}</span>`;
+    const first = rows[0];
+    const extra = rows.length > 1 ? ` <span class="u-fs11-dim">+${rows.length - 1}</span>` : "";
+    return `${hashLink(first, "/address/" + first)}${extra}`;
+  }
+
+  function fmtCoinAbs(raw, decimals) {
+    const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
+    if (bi <= 0n) return "0";
+    const approx = scaledBigIntAbsToApprox(bi, decimals, 8);
+    if (!Number.isFinite(approx) || approx > 1e15) return scaledBigIntToText(bi, decimals, 8);
+    if (approx >= 1000000) return fmtCompact(approx);
+    if (approx >= 1) return approx.toLocaleString(undefined, { maximumFractionDigits: 6 });
+    if (approx >= 0.0001) return approx.toLocaleString(undefined, { maximumFractionDigits: 8 });
+    return approx.toExponential(2);
+  }
+
+  try {
+    let coinMeta = await getCoinMeta(coinType).catch(() => null);
+    const shortCoinType = normalizeCoinType(coinType);
+    if (!coinMeta && shortCoinType && shortCoinType !== coinType) {
+      coinMeta = await getCoinMeta(shortCoinType).catch(() => null);
+    }
+
+    const resolved = resolveCoinType(coinType);
+    const symbol = String(coinMeta?.symbol || resolved?.symbol || coinType.split("::").pop() || "?");
+    const name = String(coinMeta?.name || symbol);
+    const decimals = Number.isFinite(Number(coinMeta?.decimals))
+      ? Number(coinMeta.decimals)
+      : Number(resolved?.decimals || 9);
+    const iconUrl = String(coinMeta?.iconUrl || "");
+    const supplyRaw = parseBigIntSafe(coinMeta?.supply ?? 0);
+    const hasSupply = coinMeta?.supply != null;
+    const supplyExact = hasSupply ? scaledBigIntToText(supplyRaw, decimals, 8) : "—";
+    const supplyApprox = hasSupply ? scaledBigIntAbsToApprox(supplyRaw, decimals, 8) : NaN;
+    const supplyDisplay = hasSupply
+      ? (Number.isFinite(supplyApprox) ? fmtCompact(supplyApprox) : supplyExact)
+      : "—";
+
+    const typeParts = coinType.split("::");
+    const packageAddr = normalizeSuiAddress(typeParts[0] || "");
+    const moduleName = typeParts[1] || "";
+    const structName = typeParts[2] || "";
+    const targetKey = coinTypeKey(coinType);
+
+    const MAX_SCAN_TX = 220;
+    const PAGE_SIZE = 20;
+    const RESULT_LIMIT = 50;
+    let scannedTx = 0;
+    let scannedPages = 0;
+    let before = null;
+    let hasPreviousPage = true;
+    const matchedTx = new Set();
+    let truncatedBalances = false;
+    let truncatedEvents = false;
+    let truncatedObjects = false;
+    const transferRows = [];
+    const eventRows = [];
+    const objectRows = [];
+
+    while (hasPreviousPage && scannedTx < MAX_SCAN_TX) {
+      const data = await gql(`query($before: String) {
+        transactions(last: ${PAGE_SIZE}, before: $before, filter: { kind: PROGRAMMABLE_TX }) {
+          pageInfo { hasPreviousPage startCursor }
+          nodes {
+            digest
+            sender { address }
+            effects {
+              status timestamp
+              checkpoint { sequenceNumber }
+              balanceChanges(first: 50) {
+                pageInfo { hasNextPage }
+                nodes { owner { address } amount coinType { repr } }
+              }
+              events(first: 50) {
+                pageInfo { hasNextPage }
+                nodes {
+                  contents { type { repr } json }
+                  sender { address }
+                  timestamp
+                  transactionModule { name package { address } }
+                }
+              }
+              objectChanges(first: 50) {
+                pageInfo { hasNextPage }
+                nodes {
+                  address idCreated idDeleted
+                  inputState { version asMoveObject { contents { type { repr } } } }
+                  outputState {
+                    version
+                    owner {
+                      ... on AddressOwner { address { address } }
+                      ... on ObjectOwner { address { address } }
+                      ... on Shared { initialSharedVersion }
+                      ... on Immutable { __typename }
+                    }
+                    asMoveObject { contents { type { repr } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`, { before });
+
+      const conn = data?.transactions;
+      const txs = conn?.nodes || [];
+      if (!txs.length) break;
+
+      scannedTx += txs.length;
+      scannedPages += 1;
+
+      for (const tx of txs) {
+        const eff = tx?.effects || {};
+        let txHasMatch = false;
+
+        const coinBalanceRows = (eff?.balanceChanges?.nodes || [])
+          .filter((bc) => coinTypeKey(bc?.coinType?.repr || "") === targetKey);
+        if (coinBalanceRows.length) {
+          txHasMatch = true;
+          if (eff?.balanceChanges?.pageInfo?.hasNextPage) truncatedBalances = true;
+          let sentRaw = 0n;
+          let recvRaw = 0n;
+          const fromRows = [];
+          const toRows = [];
+          for (const bc of coinBalanceRows) {
+            const raw = parseBigIntSafe(bc?.amount || 0);
+            const owner = normalizeSuiAddress(bc?.owner?.address || "");
+            if (raw < 0n) {
+              sentRaw += -raw;
+              if (owner) fromRows.push(owner);
+            } else if (raw > 0n) {
+              recvRaw += raw;
+              if (owner) toRows.push(owner);
+            }
+          }
+          const amountRaw = sentRaw > recvRaw ? sentRaw : recvRaw;
+          if (amountRaw > 0n) {
+            const kind = sentRaw > 0n && recvRaw > 0n ? "transfer" : (recvRaw > 0n ? "mint" : "burn");
+            transferRows.push({
+              digest: tx?.digest || "",
+              timestamp: eff?.timestamp || "",
+              status: eff?.status || "",
+              fromRows,
+              toRows,
+              amountRaw,
+              kind,
+            });
+          }
+        }
+
+        if (eff?.events?.pageInfo?.hasNextPage) truncatedEvents = true;
+        for (const ev of (eff?.events?.nodes || [])) {
+          const typeRepr = String(ev?.contents?.type?.repr || "");
+          const json = ev?.contents?.json;
+          if (!moveTypeStringHasCoinType(typeRepr, targetKey) && !valueHasCoinType(json, targetKey)) continue;
+          txHasMatch = true;
+          eventRows.push({
+            digest: tx?.digest || "",
+            timestamp: ev?.timestamp || eff?.timestamp || "",
+            status: eff?.status || "",
+            sender: normalizeSuiAddress(ev?.sender?.address || tx?.sender?.address || ""),
+            typeRepr,
+            moduleName: ev?.transactionModule?.name || "",
+            modulePackage: normalizeSuiAddress(ev?.transactionModule?.package?.address || ""),
+            jsonPreview: summarizeCoinJson(json),
+          });
+        }
+
+        if (eff?.objectChanges?.pageInfo?.hasNextPage) truncatedObjects = true;
+        for (const oc of (eff?.objectChanges?.nodes || [])) {
+          const inputType = String(oc?.inputState?.asMoveObject?.contents?.type?.repr || "");
+          const outputType = String(oc?.outputState?.asMoveObject?.contents?.type?.repr || "");
+          if (!moveTypeStringHasCoinType(inputType, targetKey) && !moveTypeStringHasCoinType(outputType, targetKey)) continue;
+          txHasMatch = true;
+          const ownerAddress = normalizeSuiAddress(oc?.outputState?.owner?.address?.address || "");
+          let ownerKind = "";
+          if (oc?.outputState?.owner?.initialSharedVersion != null) ownerKind = "shared";
+          else if (oc?.outputState?.owner?.__typename === "Immutable") ownerKind = "immutable";
+          objectRows.push({
+            digest: tx?.digest || "",
+            timestamp: eff?.timestamp || "",
+            status: eff?.status || "",
+            objectId: normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || ""),
+            changeKind: oc?.idCreated ? "Created" : (oc?.idDeleted ? "Deleted" : "Mutated"),
+            typeRepr: outputType || inputType || "",
+            ownerAddress,
+            ownerKind,
+          });
+        }
+
+        if (txHasMatch && tx?.digest) matchedTx.add(tx.digest);
+      }
+
+      hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
+      before = conn?.pageInfo?.startCursor || null;
+      if (transferRows.length >= RESULT_LIMIT && eventRows.length >= RESULT_LIMIT && objectRows.length >= RESULT_LIMIT) break;
+    }
+
+    const sortRecent = (a, b) => {
+      const diff = parseTsMs(b?.timestamp) - parseTsMs(a?.timestamp);
+      if (diff !== 0) return diff;
+      return String(b?.digest || "").localeCompare(String(a?.digest || ""));
+    };
+    transferRows.sort(sortRecent);
+    eventRows.sort(sortRecent);
+    objectRows.sort(sortRecent);
+    const transfers = transferRows.slice(0, RESULT_LIMIT);
+    const events = eventRows.slice(0, RESULT_LIMIT);
+    const objects = objectRows.slice(0, RESULT_LIMIT);
+
+    const scanLimitReached = scannedTx >= MAX_SCAN_TX && hasPreviousPage;
+    const notes = [];
+    if (scanLimitReached) notes.push(`Reached scan cap at ${fmtNumber(MAX_SCAN_TX)} transactions; older activity may exist.`);
+    if (truncatedBalances || truncatedEvents || truncatedObjects) {
+      const fields = [];
+      if (truncatedBalances) fields.push("balanceChanges");
+      if (truncatedEvents) fields.push("events");
+      if (truncatedObjects) fields.push("objectChanges");
+      notes.push(`Some matched transactions exceed per-query page size for ${fields.join(", ")}.`);
+    }
+
+    app.innerHTML = `
+      <div class="page-title">Coin Search <span class="type-tag">${escapeHtml(symbol)}</span></div>
+      ${renderSearchCard(coinType)}
+
+      <div class="card u-mb16">
+        <div class="card-header">Coin Overview</div>
+        <div class="card-body">
+          <div class="stats-grid u-mb16">
+            <div class="stat-box">
+              <div class="stat-label">Symbol</div>
+              <div class="stat-value">${escapeHtml(symbol)}</div>
+              <div class="stat-sub">${escapeHtml(name)}</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Decimals</div>
+              <div class="stat-value">${fmtNumber(decimals)}</div>
+              <div class="stat-sub">from CoinMetadata/registry</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Supply</div>
+              <div class="stat-value">${hasSupply ? escapeHtml(supplyDisplay) : "—"}</div>
+              <div class="stat-sub">${hasSupply ? `${escapeHtml(symbol)} units` : "coinMetadata.supply unavailable"}</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Matched Tx</div>
+              <div class="stat-value">${fmtNumber(matchedTx.size)}</div>
+              <div class="stat-sub">from ${fmtNumber(scannedTx)} scanned txs</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Transfers</div>
+              <div class="stat-value">${fmtNumber(transfers.length)}</div>
+              <div class="stat-sub">recent rows</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Events / Objects</div>
+              <div class="stat-value">${fmtNumber(events.length)} / ${fmtNumber(objects.length)}</div>
+              <div class="stat-sub">recent rows</div>
+            </div>
+          </div>
+
+          <div class="detail-grid">
+            <div class="detail-row">
+              <div class="detail-key">Coin Type</div>
+              <div class="detail-val">
+                <span class="coin-type-text">${escapeHtml(coinType)}</span> ${copyBtn(coinType)}
+              </div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-key">Package / Module / Struct</div>
+              <div class="detail-val">
+                ${packageAddr ? hashLink(packageAddr, "/object/" + packageAddr) : "—"} :: ${escapeHtml(moduleName || "—")} :: ${escapeHtml(structName || "—")}
+              </div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-key">Exact Supply</div>
+              <div class="detail-val">${hasSupply ? `${escapeHtml(supplyExact)} ${escapeHtml(symbol)}` : '<span class="u-c-dim">Unavailable</span>'}</div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-key">Scan Scope</div>
+              <div class="detail-val">${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages</div>
+            </div>
+          </div>
+          ${iconUrl ? `<div class="u-fs12-dim u-mt8">Icon: <a class="hash-link" href="${escapeAttr(iconUrl)}" target="_blank" rel="noopener">coinMetadata.iconUrl</a></div>` : ""}
+          ${notes.length ? `<div class="coin-scan-note">${notes.map(n => escapeHtml(n)).join(" ")}</div>` : ""}
+        </div>
+      </div>
+
+      <div class="coin-activity-grid">
+        <div class="card">
+          <div class="card-header">Most Recent Transfers</div>
+          <div class="card-body">
+            ${transfers.length ? `<table>
+              <thead><tr><th>Kind</th><th class="u-ta-right">Amount</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
+              <tbody>
+                ${transfers.map((row) => {
+                  const fromFallback = row.kind === "mint" ? "mint/system" : "—";
+                  const toFallback = row.kind === "burn" ? "burn/sink" : "—";
+                  const kindLabel = row.kind === "transfer" ? "Transfer" : (row.kind === "mint" ? "Mint/Inflow" : "Burn/Outflow");
+                  return `<tr>
+                    <td><span class="coin-transfer-kind coin-transfer-kind-${row.kind}">${kindLabel}</span></td>
+                    <td class="u-ta-right-mono">${fmtCoinAbs(row.amountRaw, decimals)}</td>
+                    <td>${renderAddressList(row.fromRows, fromFallback)}</td>
+                    <td>${renderAddressList(row.toRows, toFallback)}</td>
+                    <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
+                    <td>${timeTag(row.timestamp)}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>` : renderEmpty("No recent transfers found for this coin type in scanned transactions.")}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">Most Recent Events</div>
+          <div class="card-body">
+            ${events.length ? `<table>
+              <thead><tr><th>Event Type</th><th>Sender</th><th>Module</th><th>Tx</th><th>Time</th><th>Payload</th></tr></thead>
+              <tbody>
+                ${events.map((row) => {
+                  const typeLabel = shortType(row.typeRepr) || row.typeRepr || "—";
+                  const moduleLabel = row.modulePackage
+                    ? `${hashLink(row.modulePackage, "/object/" + row.modulePackage)}::${escapeHtml(row.moduleName || "—")}`
+                    : escapeHtml(row.moduleName || "—");
+                  return `<tr>
+                    <td class="coin-type-cell" title="${escapeAttr(row.typeRepr || "")}">${escapeHtml(typeLabel)}</td>
+                    <td>${row.sender ? hashLink(row.sender, "/address/" + row.sender) : '<span class="u-c-dim">—</span>'}</td>
+                    <td>${moduleLabel}</td>
+                    <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
+                    <td>${timeTag(row.timestamp)}</td>
+                    <td class="coin-json-preview">${row.jsonPreview ? escapeHtml(row.jsonPreview) : '<span class="u-c-dim">—</span>'}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>` : renderEmpty("No recent events referencing this coin type in scanned transactions.")}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">Most Recent Object Changes</div>
+          <div class="card-body">
+            ${objects.length ? `<table>
+              <thead><tr><th>Object</th><th>Change</th><th>Type</th><th>Owner</th><th>Tx</th><th>Time</th></tr></thead>
+              <tbody>
+                ${objects.map((row) => {
+                  const ownerLabel = row.ownerKind === "shared"
+                    ? '<span class="badge">Shared</span>'
+                    : (row.ownerKind === "immutable"
+                      ? '<span class="badge">Immutable</span>'
+                      : (row.ownerAddress ? hashLink(row.ownerAddress, "/address/" + row.ownerAddress) : '<span class="u-c-dim">—</span>'));
+                  const changeClass = row.changeKind === "Created"
+                    ? "badge-success"
+                    : (row.changeKind === "Deleted" ? "badge-fail" : "");
+                  return `<tr>
+                    <td>${row.objectId ? hashLink(row.objectId, "/object/" + row.objectId) : '<span class="u-c-dim">—</span>'}</td>
+                    <td><span class="badge ${changeClass}">${escapeHtml(row.changeKind)}</span></td>
+                    <td class="coin-type-cell" title="${escapeAttr(row.typeRepr || "")}">${escapeHtml(shortType(row.typeRepr) || row.typeRepr || "—")}</td>
+                    <td>${ownerLabel}</td>
+                    <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
+                    <td>${timeTag(row.timestamp)}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>` : renderEmpty("No recent object changes containing this coin type in scanned transactions.")}
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    app.innerHTML = `
+      <div class="page-title">Coin Search</div>
+      ${renderSearchCard(coinType)}
+      <div class="card">
+        <div class="card-body">
+          ${renderEmpty(`Failed to load coin activity: ${escapeHtml(e?.message || String(e))}`)}
+        </div>
+      </div>
+    `;
+  }
+
+  bindCoinSearchForm();
+}
 
 // ── Top Token Transfers ────────────────────────────────────────────────
 const TRACKED_TOKENS = {

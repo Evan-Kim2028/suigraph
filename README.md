@@ -16,6 +16,7 @@ This repo is designed to be deployable on [Walrus Sites](https://docs.wal.app/) 
   - addresses
   - transaction digests
   - checkpoints
+  - coin types (`0x...::module::Type`)
   - packages/objects
 - Core chain pages:
   - overview dashboard
