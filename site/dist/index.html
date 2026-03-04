@@ -2102,6 +2102,10 @@ const GQL_MAX_CONCURRENCY = 8;
 const gqlInFlight = new Map();
 let gqlActiveRequests = 0;
 const gqlWaiters = [];
+let routeRequestController = null;
+let routeRenderToken = 0;
+const ROUTE_VIEW_CACHE_TTL_MS = 20 * 1000;
+const routeViewCache = {};
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -2184,13 +2188,37 @@ function releaseGqlSlot() {
   gqlActiveRequests = Math.max(0, gqlActiveRequests - 1);
 }
 
+function makeAbortError(message = "Request canceled") {
+  const err = new Error(String(message || "Request canceled"));
+  err.name = "AbortError";
+  return err;
+}
+
+function isAbortError(err) {
+  if (!err) return false;
+  if (String(err?.name || "") === "AbortError") return true;
+  const msg = String(err?.message || "").toLowerCase();
+  return msg.includes("aborted") || msg.includes("canceled") || msg.includes("cancelled");
+}
+
+function getRouteSignal() {
+  return routeRequestController?.signal || null;
+}
+
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
+  const upstream = options?.signal || null;
+  const onUpstreamAbort = () => controller.abort();
+  if (upstream) {
+    if (upstream.aborted) controller.abort();
+    else upstream.addEventListener("abort", onUpstreamAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || GQL_TIMEOUT_MS));
   try {
     return await fetch(url, { ...(options || {}), signal: controller.signal });
   } finally {
     clearTimeout(timer);
+    if (upstream) upstream.removeEventListener("abort", onUpstreamAbort);
   }
 }
 
@@ -2199,6 +2227,8 @@ async function gql(query, variables = {}, opts = {}) {
   const reqBytes = payload.length;
   const queryKey = gqlFingerprint(query);
   const dedupeEnabled = opts?.dedupe !== false;
+  const routeSignal = opts?.routeSignal === false ? null : getRouteSignal();
+  const effectiveSignal = opts?.signal || routeSignal;
   const inFlightKey = gqlInFlightKey(query, variables);
   if (dedupeEnabled && gqlInFlight.has(inFlightKey)) {
     notePerfGqlDeduped();
@@ -2218,6 +2248,7 @@ async function gql(query, variables = {}, opts = {}) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: payload,
+          signal: effectiveSignal || undefined,
         }, GQL_TIMEOUT_MS);
         const raw = await res.text();
         const elapsed = performance.now() - t0;
@@ -2267,6 +2298,9 @@ async function gql(query, variables = {}, opts = {}) {
         if (!attemptNoted) {
           const elapsed = performance.now() - t0;
           notePerfGql(elapsed, reqBytes, 0, queryKey, false);
+        }
+        if (isAbortError(e) || effectiveSignal?.aborted) {
+          throw isAbortError(e) ? e : makeAbortError("Request canceled");
         }
         const retriable = isRetriableFetchError(e);
         if (attempt < GQL_RETRY_LIMIT && retriable) {
@@ -3361,6 +3395,34 @@ function initUiEnhancements() {
   scheduleUiEnhancements();
 }
 
+function runWhenVisible(target, task, opts = {}) {
+  const rootMargin = String(opts?.rootMargin || "280px 0px");
+  const timeoutMs = Math.max(0, Number(opts?.timeoutMs ?? 2500));
+  const el = typeof target === "string" ? document.getElementById(target) : target;
+  if (!el || typeof task !== "function") return;
+  let done = false;
+  let observer = null;
+  let timer = null;
+  const run = () => {
+    if (done) return;
+    done = true;
+    if (observer) observer.disconnect();
+    observer = null;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    Promise.resolve().then(task).catch(() => null);
+  };
+  if (typeof IntersectionObserver !== "function") {
+    run();
+    return;
+  }
+  observer = new IntersectionObserver((entries) => {
+    if ((entries || []).some((entry) => entry?.isIntersecting)) run();
+  }, { root: null, rootMargin, threshold: 0.01 });
+  observer.observe(el);
+  if (timeoutMs > 0) timer = setTimeout(run, timeoutMs);
+}
+
 function viewQueryBtn(queryKey, params = {}) {
   const qs = Object.entries(params).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join("&");
   const href = `#/graphql?q=${queryKey}${qs ? '&' + qs : ''}`;
@@ -3373,7 +3435,223 @@ const coinTotalSupplyRpcCache = {};
 const coinTxMetaDigestCache = {};
 const coinTxDetailDigestCache = {};
 const coinObjectDigestCache = {};
+const coinActivityScanCache = {};
 const COIN_OBJECT_DIGEST_TTL_MS = 20 * 1000;
+const COIN_ACTIVITY_SCAN_TTL_MS = 25 * 1000;
+const COIN_ACTIVITY_SCAN_CACHE_MAX = 120;
+const COIN_ACTIVITY_SCAN_MODE_CONFIG = Object.freeze({
+  fast: {
+    label: "Fast",
+    pageSize: 20,
+    resultLimit: 50,
+    globalScanMaxTx: 60,
+    globalScanEmptyPageThreshold: 2,
+    objectScanMaxPages: 6,
+    objectScanMaxDigests: 160,
+    objectTxLoadLimit: 48,
+  },
+  full: {
+    label: "Full",
+    pageSize: 20,
+    resultLimit: 50,
+    globalScanMaxTx: 220,
+    globalScanEmptyPageThreshold: 3,
+    objectScanMaxPages: 12,
+    objectScanMaxDigests: 420,
+    objectTxLoadLimit: 120,
+  },
+});
+
+function getCoinActivityScanMode(rawMode) {
+  return String(rawMode || "").toLowerCase() === "full" ? "full" : "fast";
+}
+
+function coinSearchPackTransferRows(rows) {
+  return (rows || []).map((row) => ([
+    String(row?.digest || ""),
+    String(row?.timestamp || ""),
+    String(row?.status || ""),
+    Array.isArray(row?.fromRows) ? row.fromRows.filter(Boolean) : [],
+    Array.isArray(row?.toRows) ? row.toRows.filter(Boolean) : [],
+    row?.amountRaw == null ? "" : String(row.amountRaw),
+    String(row?.kind || ""),
+    String(row?.fromHint || ""),
+    String(row?.toHint || ""),
+    String(row?.actionLabel || ""),
+  ]));
+}
+
+function coinSearchUnpackTransferRows(rows) {
+  return (rows || []).map((row) => ({
+    digest: String(row?.[0] || ""),
+    timestamp: String(row?.[1] || ""),
+    status: String(row?.[2] || ""),
+    fromRows: Array.isArray(row?.[3]) ? row[3] : [],
+    toRows: Array.isArray(row?.[4]) ? row[4] : [],
+    amountRaw: row?.[5] ? parseBigIntSafe(row[5]) : null,
+    kind: String(row?.[6] || ""),
+    fromHint: String(row?.[7] || ""),
+    toHint: String(row?.[8] || ""),
+    actionLabel: String(row?.[9] || ""),
+  }));
+}
+
+function coinSearchPackEventRows(rows) {
+  return (rows || []).map((row) => ([
+    String(row?.digest || ""),
+    String(row?.timestamp || ""),
+    String(row?.status || ""),
+    String(row?.sender || ""),
+    String(row?.typeRepr || ""),
+    String(row?.moduleName || ""),
+    String(row?.modulePackage || ""),
+    String(row?.jsonPreview || ""),
+    String(row?.matchSource || ""),
+  ]));
+}
+
+function coinSearchUnpackEventRows(rows) {
+  return (rows || []).map((row) => ({
+    digest: String(row?.[0] || ""),
+    timestamp: String(row?.[1] || ""),
+    status: String(row?.[2] || ""),
+    sender: String(row?.[3] || ""),
+    typeRepr: String(row?.[4] || ""),
+    moduleName: String(row?.[5] || ""),
+    modulePackage: String(row?.[6] || ""),
+    jsonPreview: String(row?.[7] || ""),
+    matchSource: String(row?.[8] || ""),
+  }));
+}
+
+function coinSearchPackObjectRows(rows) {
+  return (rows || []).map((row) => ([
+    String(row?.digest || ""),
+    String(row?.timestamp || ""),
+    String(row?.status || ""),
+    String(row?.objectId || ""),
+    String(row?.changeKind || ""),
+    String(row?.typeRepr || ""),
+    String(row?.ownerAddress || ""),
+    String(row?.ownerKind || ""),
+  ]));
+}
+
+function coinSearchUnpackObjectRows(rows) {
+  return (rows || []).map((row) => ({
+    digest: String(row?.[0] || ""),
+    timestamp: String(row?.[1] || ""),
+    status: String(row?.[2] || ""),
+    objectId: String(row?.[3] || ""),
+    changeKind: String(row?.[4] || ""),
+    typeRepr: String(row?.[5] || ""),
+    ownerAddress: String(row?.[6] || ""),
+    ownerKind: String(row?.[7] || ""),
+  }));
+}
+
+function coinSearchPackMatchedActivityRows(rows) {
+  return (rows || []).map((row) => ([
+    String(row?.digest || ""),
+    String(row?.timestamp || ""),
+    String(row?.status || ""),
+    String(row?.sender || ""),
+    String(row?.signals || ""),
+  ]));
+}
+
+function coinSearchUnpackMatchedActivityRows(rows) {
+  return (rows || []).map((row) => ({
+    digest: String(row?.[0] || ""),
+    timestamp: String(row?.[1] || ""),
+    status: String(row?.[2] || ""),
+    sender: String(row?.[3] || ""),
+    signals: String(row?.[4] || ""),
+  }));
+}
+
+function coinSearchPackActivityScanResult(data) {
+  if (!data) return data;
+  return {
+    mode: String(data.scanMode || "fast"),
+    r: Number(data.resultLimit || 50),
+    s: [
+      Number(data.scannedTx || 0),
+      Number(data.scannedPages || 0),
+      Number(data.objectFallbackScannedObjects || 0),
+      Number(data.objectFallbackScannedPages || 0),
+      Number(data.objectFallbackConsideredDigests || 0),
+      Number(data.objectFallbackLoadedTx || 0),
+      Number(data.directEventCount || 0),
+      Number(data.contextEventCount || 0),
+      Number(data.matchedTxCount || 0),
+    ],
+    f: [
+      data.objectDigestHasNext ? 1 : 0,
+      data.globalSupplementApplied ? 1 : 0,
+      data.globalScanEarlyStop ? 1 : 0,
+      data.truncatedBalances ? 1 : 0,
+      data.truncatedEvents ? 1 : 0,
+      data.truncatedObjects ? 1 : 0,
+      data.scanLimitReached ? 1 : 0,
+      data.usedObjectScan ? 1 : 0,
+    ],
+    n: Array.isArray(data.notes) ? data.notes.map((row) => String(row || "")) : [],
+    l: [
+      String(data.transferEmptyLabel || ""),
+      String(data.eventEmptyLabel || ""),
+    ],
+    t: coinSearchPackTransferRows(data.transfers || []),
+    e: coinSearchPackEventRows(data.events || []),
+    o: coinSearchPackObjectRows(data.objects || []),
+    m: coinSearchPackMatchedActivityRows(data.matchedActivity || []),
+  };
+}
+
+function coinSearchUnpackActivityScanResult(data) {
+  if (!data) return data;
+  const s = Array.isArray(data?.s) ? data.s : [];
+  const f = Array.isArray(data?.f) ? data.f : [];
+  const l = Array.isArray(data?.l) ? data.l : [];
+  return {
+    scanMode: getCoinActivityScanMode(data?.mode),
+    resultLimit: Number(data?.r || 50),
+    scannedTx: Number(s[0] || 0),
+    scannedPages: Number(s[1] || 0),
+    objectFallbackScannedObjects: Number(s[2] || 0),
+    objectFallbackScannedPages: Number(s[3] || 0),
+    objectFallbackConsideredDigests: Number(s[4] || 0),
+    objectFallbackLoadedTx: Number(s[5] || 0),
+    directEventCount: Number(s[6] || 0),
+    contextEventCount: Number(s[7] || 0),
+    matchedTxCount: Number(s[8] || 0),
+    objectDigestHasNext: !!Number(f[0] || 0),
+    globalSupplementApplied: !!Number(f[1] || 0),
+    globalScanEarlyStop: !!Number(f[2] || 0),
+    truncatedBalances: !!Number(f[3] || 0),
+    truncatedEvents: !!Number(f[4] || 0),
+    truncatedObjects: !!Number(f[5] || 0),
+    scanLimitReached: !!Number(f[6] || 0),
+    usedObjectScan: !!Number(f[7] || 0),
+    notes: Array.isArray(data?.n) ? data.n.map((row) => String(row || "")) : [],
+    transferEmptyLabel: String(l[0] || ""),
+    eventEmptyLabel: String(l[1] || ""),
+    transfers: coinSearchUnpackTransferRows(data?.t || []),
+    events: coinSearchUnpackEventRows(data?.e || []),
+    objects: coinSearchUnpackObjectRows(data?.o || []),
+    matchedActivity: coinSearchUnpackMatchedActivityRows(data?.m || []),
+  };
+}
+
+async function coinSearchLoadActivityScanCached(cacheKey, { force = false, ttlMs = COIN_ACTIVITY_SCAN_TTL_MS } = {}, loader) {
+  const state = getKeyedCacheState(coinActivityScanCache, cacheKey);
+  const packed = await withTimedCache(state, ttlMs, !!force, async () => {
+    const raw = await loader();
+    return coinSearchPackActivityScanResult(raw);
+  });
+  prunePlainObjectCache(coinActivityScanCache, COIN_ACTIVITY_SCAN_CACHE_MAX);
+  return coinSearchUnpackActivityScanResult(packed);
+}
 
 function prunePlainObjectCache(obj, maxEntries = 2500) {
   const keys = Object.keys(obj || {});
@@ -3852,6 +4130,28 @@ function setRouteParams(updates = {}, opts = {}) {
   if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
 }
 
+function routeCacheKey(route) {
+  const split = splitRouteAndParams(route || "/");
+  const pairs = [];
+  for (const [k, v] of split.params.entries()) pairs.push([k, v]);
+  pairs.sort((a, b) => String(a[0]).localeCompare(String(b[0])) || String(a[1]).localeCompare(String(b[1])));
+  const qs = pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+  return `${split.path || "/"}${qs ? "?" + qs : ""}`;
+}
+
+function getRouteViewCacheEntry(cacheKey) {
+  const row = routeViewCache[cacheKey];
+  if (!row) return null;
+  if ((Date.now() - Number(row.ts || 0)) > ROUTE_VIEW_CACHE_TTL_MS) return null;
+  return row;
+}
+
+function setRouteViewCacheEntry(cacheKey, html) {
+  if (!cacheKey || !html) return;
+  routeViewCache[cacheKey] = { html: String(html), ts: Date.now() };
+  prunePlainObjectCache(routeViewCache, 120);
+}
+
 function parseRoute(route) {
   const routeParts = splitRouteAndParams(route);
   const cleanRoute = routeParts.path;
@@ -3891,6 +4191,9 @@ function parseRoute(route) {
 
 async function routeTo(route) {
   const r = parseRoute(route);
+  if (routeRequestController) routeRequestController.abort();
+  routeRequestController = new AbortController();
+  const localRouteToken = ++routeRenderToken;
   startPagePerf(r.page);
   // Update active nav — handle flat links and dropdown items
   const networkPages = ["transfers","congestion","events","protocol","validators","coin"];
@@ -3914,7 +4217,15 @@ async function routeTo(route) {
   if (dashboardTimer && r.page !== "home") { clearInterval(dashboardTimer); dashboardTimer = null; }
 
   const app = document.getElementById("app");
-  app.innerHTML = renderLoading();
+  const cacheKey = routeCacheKey(route);
+  const cacheEntry = getRouteViewCacheEntry(cacheKey);
+  if (cacheEntry?.html) {
+    notePerfCache(true);
+    app.innerHTML = cacheEntry.html;
+  } else {
+    notePerfCache(false);
+    app.innerHTML = renderLoading();
+  }
 
   try {
     switch (r.page) {
@@ -3944,12 +4255,17 @@ async function routeTo(route) {
       case "docs": await renderDocs(app); break;
       default: app.innerHTML = renderEmpty("Page not found.");
     }
+    if (localRouteToken !== routeRenderToken) return;
+    setRouteViewCacheEntry(cacheKey, app.innerHTML);
     finishPagePerf("ok");
   } catch (e) {
+    if (localRouteToken !== routeRenderToken) return;
+    if (isAbortError(e)) return;
     console.error(e);
     app.innerHTML = renderEmpty("Error loading page: " + escapeHtml(e.message));
     finishPagePerf("error");
   }
+  if (localRouteToken !== routeRenderToken) return;
   scheduleUiEnhancements();
 }
 
@@ -4077,49 +4393,21 @@ async function fetchDashboardEpochTrends(force = false) {
 }
 
 async function renderDashboard(app) {
-  const dashData = await gql(`{
+  const dashHead = await gql(`{
     checkpoint {
       sequenceNumber digest timestamp
       networkTotalTransactions
-      rollingGasSummary { computationCost storageCost storageRebate }
     }
     epoch {
       epochId referenceGasPrice startTimestamp
       totalCheckpoints totalTransactions
     }
-    transactions(last: 10, filter: {}) {
-      nodes {
-        digest
-        sender { address }
-        kind {
-          __typename
-          ... on ProgrammableTransaction {
-            commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
-          }
-        }
-        effects {
-          status timestamp
-          gasEffects { gasSummary { computationCost storageCost storageRebate } }
-          events(first: 3) { nodes { contents { type { repr } } } }
-        }
-      }
-    }
-    checkpoints(last: 6) {
-      nodes { sequenceNumber digest timestamp networkTotalTransactions rollingGasSummary { computationCost storageCost storageRebate } }
-    }
   }`);
-
-  const cp = dashData.checkpoint;
-  const ep = dashData.epoch;
-  const txs = dashData.transactions.nodes.reverse();
-  const cpList = dashData.checkpoints.nodes.reverse();
-  const checkpointTxDeltas = [];
-  for (let i = 1; i < cpList.length; i++) {
-    const prev = Number(cpList[i - 1]?.networkTotalTransactions || 0);
-    const cur = Number(cpList[i]?.networkTotalTransactions || 0);
-    if (Number.isFinite(prev) && Number.isFinite(cur) && cur >= prev) checkpointTxDeltas.push(cur - prev);
-  }
-
+  const cp = dashHead?.checkpoint || {};
+  const ep = dashHead?.epoch || {};
+  let lastHeadSeq = Number(cp?.sequenceNumber || 0);
+  let activityInFlight = null;
+  let latestCheckpointRows = [];
   const categoryColors = { "Lending": "var(--green)", "Dexes": "var(--blue)", "Dexs": "var(--blue)", "Liquid Staking": "var(--purple)", "CDP": "var(--yellow)", "Yield": "var(--accent)", "Other": "var(--text-dim)" };
 
   function dashGas(t) {
@@ -4130,10 +4418,22 @@ async function renderDashboard(app) {
     return fmtSui(gas);
   }
 
-  // Checkpoint row: compute tx count from networkTotalTransactions delta
+  function checkpointTxDeltas(cps) {
+    const deltas = [];
+    for (let i = 1; i < cps.length; i += 1) {
+      const prev = Number(cps[i - 1]?.networkTotalTransactions || 0);
+      const cur = Number(cps[i]?.networkTotalTransactions || 0);
+      if (Number.isFinite(prev) && Number.isFinite(cur) && cur >= prev) deltas.push(cur - prev);
+    }
+    return deltas;
+  }
+
   function renderCpRows(cps) {
+    if (!Array.isArray(cps) || !cps.length) {
+      return `<tr><td colspan="4" class="u-fs12-dim">Loading checkpoint activity...</td></tr>`;
+    }
     return cps.map((c, i) => {
-      const prev = cps[i + 1]; // older checkpoint
+      const prev = cps[i + 1];
       const txCount = prev ? (Number(c.networkTotalTransactions) - Number(prev.networkTotalTransactions)) : null;
       const gs = c.rollingGasSummary;
       const gasTotal = gs ? Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate) : 0;
@@ -4142,21 +4442,24 @@ async function renderDashboard(app) {
       const gasUsed = prev ? gasTotal - prevGasTotal : 0;
       return `<tr>
         <td><a class="hash-link" href="#/checkpoint/${c.sequenceNumber}">${fmtNumber(c.sequenceNumber)}</a></td>
-        <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${txCount != null ? txCount + ' txns' : '—'}</td>
-        <td class="u-mono-11-dim">${gasUsed > 0 ? fmtSui(gasUsed) : '—'}</td>
+        <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${txCount != null ? txCount + " txns" : "—"}</td>
+        <td class="u-mono-11-dim">${gasUsed > 0 ? fmtSui(gasUsed) : "—"}</td>
         <td>${timeTag(c.timestamp)}</td>
       </tr>`;
-    }).slice(0, -1).join(""); // drop the last one (only used for delta)
+    }).slice(0, -1).join("");
   }
 
   function renderTxRows(txList) {
-    return txList.filter(t => t.kind?.__typename !== "ConsensusCommitPrologueTransaction").slice(0, 8).map(t => {
+    if (!Array.isArray(txList) || !txList.length) {
+      return `<tr><td colspan="6" class="u-fs12-dim">Loading transaction activity...</td></tr>`;
+    }
+    return txList.filter((t) => t.kind?.__typename !== "ConsensusCommitPrologueTransaction").slice(0, 8).map((t) => {
       const sender = t.sender?.address;
       const intent = analyzeTxIntent(t);
       return `<tr>
-        <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
+        <td>${hashLink(t.digest, "/tx/" + t.digest)}</td>
         <td class="u-fs12">${renderIntentChip(intent)}</td>
-        <td>${sender ? hashLink(sender, '/address/' + sender) : '<span class="u-c-dim">system</span>'}</td>
+        <td>${sender ? hashLink(sender, "/address/" + sender) : '<span class="u-c-dim">system</span>'}</td>
         <td>${statusBadge(t.effects?.status)}</td>
         <td class="u-mono-11-dim">${dashGas(t)}</td>
         <td>${timeTag(t.effects?.timestamp)}</td>
@@ -4164,246 +4467,25 @@ async function renderDashboard(app) {
     }).join("");
   }
 
-  app.innerHTML = `
-    <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Live dashboard snapshot · Source: Sui GraphQL Mainnet · Auto-refresh every 5s</div>
-    <div class="card u-mb16">
-      <div class="card-header">Start Here</div>
-      <div class="card-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;padding:12px 16px">
-        <a href="#/txs" class="hash-link u-panel-block">
-          <div style="font-weight:600;color:var(--text);margin-bottom:4px">Track Network Activity</div>
-          <div class="u-fs12-dim">Recent transactions, checkpoints, and validator health.</div>
-        </a>
-        <a href="#/defi-overview" class="hash-link u-panel-block">
-          <div style="font-weight:600;color:var(--text);margin-bottom:4px">Analyze DeFi</div>
-          <div class="u-fs12-dim">Rates, DEX activity, flows, and risk in one place.</div>
-        </a>
-      </div>
-    </div>
-    <!-- Section 1: Network Pulse -->
-    <div class="dash-grid-6">
-      <div class="stat-box">
-        <div class="stat-label">Latest Checkpoint</div>
-        <div class="stat-value" data-stat="checkpoint">${fmtNumber(cp.sequenceNumber)}</div>
-        <div class="stat-sub" data-stat-sub="cp-time" title="${fmtTime(cp.timestamp)}" style="cursor:help">${timeAgo(cp.timestamp)}</div>
-      </div>
-      <a class="stat-box" href="#/epoch/${ep.epochId}" style="display:block;cursor:pointer;text-decoration:none;color:inherit">
-        <div class="stat-label">Current Epoch</div>
-        <div class="stat-value u-c-accent" data-stat="epoch">${fmtNumber(ep.epochId)}</div>
-        <div class="stat-sub">Started ${fmtTime(ep.startTimestamp)}</div>
-      </a>
-      <div class="stat-box">
-        <div class="stat-label">Total Transactions</div>
-        <div class="stat-value" data-stat="total-txns">${fmtCompact(cp.networkTotalTransactions)}</div>
-        <div class="stat-sub">Epoch: ${fmtCompact(ep.totalTransactions)}</div>
-        <div class="sparkline-wrap">${renderSparkline(checkpointTxDeltas, { prefix: "Δ ", suffix: " tx/checkpoint", color: "var(--blue)" })}</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-label">Gas Price</div>
-        <div class="stat-value">${fmtNumber(ep.referenceGasPrice)} <span class="u-fs12-dim">MIST</span></div>
-        <div class="stat-sub">${fmtNumber(ep.totalCheckpoints)} checkpoints</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-label">SUI Price</div>
-        <div class="stat-value u-c-green" data-stat="sui-price">...</div>
-        <div class="stat-sub">DeepBook SUI/USDC</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-label">Total TVL</div>
-        <div class="stat-value" data-stat="tvl">...</div>
-        <div class="stat-sub">DeFiLlama</div>
-      </div>
-    </div>
-
-    <!-- Section 2: Epoch Trends -->
-    <div class="card u-mb16" id="epoch-trends-card">
-      <div class="card-header">
-        <span>Epoch Trends</span>
-        <span class="u-fs12-dim">GraphQL: epochs(last:8)</span>
-      </div>
-      <div class="card-body"><div class="loading u-p24">Loading epoch trends...</div></div>
-    </div>
-
-    <!-- Section 3: Stablecoin Supply + TVL Breakdown -->
-    <div class="two-col u-mb16">
-      <div class="card" id="stablecoin-card">
-        <div class="card-header">Stablecoin Supply</div>
-        <div class="card-body"><div class="loading u-p24">Loading supply data...</div></div>
-      </div>
-      <div class="card" id="tvl-breakdown-card">
-        <div class="card-header">DeFi TVL Breakdown</div>
-        <div class="card-body"><div class="loading u-p24">Loading TVL data...</div></div>
-      </div>
-    </div>
-
-    <!-- Section 4: Activity Feeds -->
-    <div class="two-col u-mb16">
-      <div class="card">
-        <div class="card-header">Latest Checkpoints</div>
-        <div class="card-body">
-          <table>
-            <thead><tr><th>Checkpoint</th><th>Txns</th><th>Gas</th><th>Time</th></tr></thead>
-            <tbody id="dash-cp-tbody">${renderCpRows(cpList)}</tbody>
-          </table>
-          <a class="view-more" href="#/checkpoints">View all checkpoints</a>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header">Recent Transactions</div>
-        <div class="card-body">
-          <table>
-            <thead><tr><th>Digest</th><th>Action</th><th>Sender</th><th>Status</th><th>Gas</th><th>Time</th></tr></thead>
-            <tbody id="dash-tx-tbody">${renderTxRows(txs)}</tbody>
-          </table>
-          <a class="view-more" href="#/txs">View all transactions</a>
-        </div>
-      </div>
-    </div>
-
-    <!-- Section 5: Protocol Rankings -->
-    <div class="card" id="protocol-rankings">
-      <div class="card-header">Sui Protocol Rankings</div>
-      <div class="card-body"><div class="loading" style="padding:16px">Loading protocols...</div></div>
-    </div>
-  `;
-
-  // ── Lazy-load: Epoch Trends (GraphQL epochs root) ──
-  fetchDashboardEpochTrends().then((trendData) => {
-    const el = document.getElementById("epoch-trends-card");
-    if (!el) return;
-    const rowsAsc = trendData?.rows || [];
-    if (!rowsAsc.length) {
-      el.querySelector(".card-body").innerHTML = '<div class="empty">Epoch trend data unavailable</div>';
-      return;
+  function applyDashboardActivity(txs, cpRows) {
+    latestCheckpointRows = cpRows || [];
+    const cpBody = document.getElementById("dash-cp-tbody");
+    if (cpBody) cpBody.innerHTML = renderCpRows(cpRows);
+    const txBody = document.getElementById("dash-tx-tbody");
+    if (txBody) txBody.innerHTML = renderTxRows(txs);
+    const sparkWrap = document.getElementById("dash-tx-delta-spark");
+    if (sparkWrap) {
+      const deltas = checkpointTxDeltas(cpRows || []);
+      sparkWrap.innerHTML = deltas.length
+        ? renderSparkline(deltas, { prefix: "Δ ", suffix: " tx/checkpoint", color: "var(--blue)" })
+        : '<span class="u-fs11-dim">loading...</span>';
     }
-    const rows = [...rowsAsc].sort((a, b) => b.epochId - a.epochId);
-    const txSeries = rowsAsc.map((r) => r.txCount);
-    const tpsSeries = rowsAsc.map((r) => r.avgTps);
-    const latest = rows[0];
-    const sourceTs = trendData?.sourceTimestamp || "";
-    el.querySelector(".card-body").innerHTML = `
-      <div style="padding:12px 16px 6px">
-        <div class="u-fs12-dim">
-          Epoch-level throughput and gas trend from on-chain epoch aggregates.
-          ${sourceTs ? `Updated ${timeAgo(sourceTs)}.` : ""}
-        </div>
-        <div class="two-col" style="margin:8px 0 0">
-          <div>
-            <div class="u-fs11-dim">Transactions per Epoch</div>
-            <div class="sparkline-wrap">${renderSparkline(txSeries, { prefix: "", suffix: " tx/epoch", color: "var(--accent)" })}</div>
-          </div>
-          <div>
-            <div class="u-fs11-dim">Average TPS per Epoch</div>
-            <div class="sparkline-wrap">${renderSparkline(tpsSeries, { prefix: "", suffix: " TPS", color: "var(--green)" })}</div>
-          </div>
-        </div>
-      </div>
-      <table>
-        <thead><tr><th>Epoch</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Avg TPS</th><th class="u-ta-right">Ref Gas (MIST)</th><th class="u-ta-right">Checkpoints</th><th>Duration</th><th>End</th></tr></thead>
-        <tbody>
-          ${rows.map((r) => `<tr>
-            <td><a class="hash-link" href="#/epoch/${r.epochId}">${fmtNumber(r.epochId)}</a>${r.isLive ? ' <span class="badge badge-success">Live</span>' : ''}</td>
-            <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
-            <td class="u-ta-right-mono">${r.avgTps.toFixed(2)}</td>
-            <td class="u-ta-right-mono">${fmtNumber(r.gasPrice)}</td>
-            <td class="u-ta-right-mono">${fmtNumber(r.checkpointCount)}</td>
-            <td>${fmtDurationCompact(r.durationMs)}</td>
-            <td>${r.isLive ? '<span class="u-c-dim">in progress</span>' : timeTag(r.endMs)}</td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-      <div class="u-fs12-dim u-p12-16">Latest epoch ${fmtNumber(latest.epochId)}: ${fmtNumber(latest.txCount)} tx, ${latest.avgTps.toFixed(2)} TPS, gas ${fmtNumber(latest.gasPrice)} MIST.</div>
-    `;
-  });
+  }
 
-  // ── Lazy-load: Stablecoin Supply ──
-  fetchStablecoinSupply().then(data => {
-    const el = document.getElementById("stablecoin-card");
-    if (!el) return;
-    if (!data || !data.coins.length) { el.querySelector(".card-body").innerHTML = '<div class="empty">Supply data unavailable</div>'; return; }
-    el.querySelector(".card-body").innerHTML = `
-      <div class="stablecoin-layout">
-        ${renderDonutChart(data.coins, data.totalSupply)}
-        <ul class="stablecoin-legend">
-          ${data.coins.map(c => `<li>
-            <span class="dot" style="background:${c.color}"></span>
-            <span>${c.symbol}</span>
-            <span class="val">$${fmtCompact(c.supply)}</span>
-            <span class="pct">${c.pct.toFixed(1)}%</span>
-          </li>`).join("")}
-        </ul>
-      </div>`;
-  });
-
-  // ── Lazy-load: DeFi TVL Breakdown + Protocol Rankings + stat boxes ──
-  fetchEcosystemStats().then(stats => {
-    // Populate TVL stat box
-    const tvlBox = document.querySelector('[data-stat="tvl"]');
-    if (tvlBox && stats) tvlBox.textContent = '$' + fmtCompact(stats.totalTvl);
-
-    // TVL Breakdown card
-    const tvlEl = document.getElementById("tvl-breakdown-card");
-    if (tvlEl && stats) {
-      const otherTvl = Math.max(0, stats.totalTvl - stats.lendingTvl - stats.dexTvl - stats.lstTvl);
-      const pctL = stats.totalTvl > 0 ? (stats.lendingTvl / stats.totalTvl * 100) : 0;
-      const pctD = stats.totalTvl > 0 ? (stats.dexTvl / stats.totalTvl * 100) : 0;
-      const pctS = stats.totalTvl > 0 ? (stats.lstTvl / stats.totalTvl * 100) : 0;
-      const pctO = Math.max(0, 100 - pctL - pctD - pctS);
-      tvlEl.querySelector(".card-body").innerHTML = `
-        <div style="padding:16px 16px 0">
-          <div style="font-size:24px;font-weight:700">$${fmtCompact(stats.totalTvl)}</div>
-          <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Total Value Locked</div>
-          <div class="tvl-bar">
-            <div style="width:${pctL.toFixed(1)}%;background:var(--green)" title="Lending ${pctL.toFixed(1)}%"></div>
-            <div style="width:${pctD.toFixed(1)}%;background:var(--blue)" title="DEX ${pctD.toFixed(1)}%"></div>
-            <div style="width:${pctS.toFixed(1)}%;background:var(--purple)" title="Liquid Staking ${pctS.toFixed(1)}%"></div>
-            <div style="width:${pctO.toFixed(1)}%;background:var(--text-dim)" title="Other ${pctO.toFixed(1)}%"></div>
-          </div>
-        </div>
-        <div style="padding:0 16px 12px">
-          <div class="tvl-row"><span class="dot" style="background:var(--green)"></span> Lending <span class="tvl-val u-c-green">$${fmtCompact(stats.lendingTvl)} <span style="color:var(--text-dim);font-size:11px">${pctL.toFixed(1)}%</span></span></div>
-          <div class="tvl-row"><span class="dot" style="background:var(--blue)"></span> DEX <span class="tvl-val u-c-blue">$${fmtCompact(stats.dexTvl)} <span style="color:var(--text-dim);font-size:11px">${pctD.toFixed(1)}%</span></span></div>
-          <div class="tvl-row"><span class="dot" style="background:var(--purple)"></span> Liquid Staking <span class="tvl-val u-c-purple">$${fmtCompact(stats.lstTvl)} <span style="color:var(--text-dim);font-size:11px">${pctS.toFixed(1)}%</span></span></div>
-          <div class="tvl-row"><span class="dot" style="background:var(--text-dim)"></span> Other <span class="tvl-val">$${fmtCompact(otherTvl)} <span style="color:var(--text-dim);font-size:11px">${pctO.toFixed(1)}%</span></span></div>
-          <div class="tvl-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px"><span class="u-c-accent">24h DEX Volume</span> <span class="tvl-val u-c-accent">$${fmtCompact(stats.dexVolume24h)}</span></div>
-        </div>`;
-    }
-
-    // Protocol Rankings card
-    const prEl = document.getElementById("protocol-rankings");
-    if (prEl && stats) {
-      prEl.querySelector(".card-body").innerHTML = `<table>
-        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="u-ta-right">TVL</th><th class="u-ta-right">24h Change</th></tr></thead>
-        <tbody>
-          ${stats.protocols.slice(0, 10).map((p, i) => {
-            const catColor = categoryColors[p.category] || "var(--text-dim)";
-            const changeStr = p.change24h != null ? `${p.change24h >= 0 ? "+" : ""}${p.change24h.toFixed(2)}%` : "—";
-            const changeColor = p.change24h > 0 ? "var(--green)" : p.change24h < 0 ? "var(--red)" : "var(--text-dim)";
-            return `<tr>
-              <td style="color:var(--text-dim);font-size:12px">${i + 1}</td>
-              <td style="font-weight:500">${p.name}</td>
-              <td><span class="badge" style="background:${catColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${p.category}</span></td>
-              <td class="u-ta-right-mono">$${fmtCompact(p.tvl)}</td>
-              <td style="text-align:right;color:${changeColor};font-family:var(--mono)">${changeStr}</td>
-            </tr>`;
-          }).join("")}
-        </tbody>
-      </table>`;
-    }
-  });
-
-  // ── Lazy-load: SUI Price ──
-  fetchDefiPrices().then(() => {
-    const priceBox = document.querySelector('[data-stat="sui-price"]');
-    if (priceBox && defiPrices.SUI) priceBox.textContent = '$' + defiPrices.SUI.toFixed(2);
-  });
-
-  // ── Auto-refresh every 5s (uses data-stat selectors + element IDs) ──
-  if (dashboardTimer) clearInterval(dashboardTimer);
-  dashboardTimer = setInterval(async () => {
-    if (parseRoute(getRoute()).page !== "home") { clearInterval(dashboardTimer); dashboardTimer = null; return; }
-    try {
-      const fresh = await gql(`{
-        checkpoint { sequenceNumber digest timestamp networkTotalTransactions }
+  async function loadDashboardActivity(force = false) {
+    if (!force && activityInFlight) return activityInFlight;
+    activityInFlight = (async () => {
+      const data = await gql(`{
         transactions(last: 10, filter: {}) {
           nodes {
             digest
@@ -4425,22 +4507,272 @@ async function renderDashboard(app) {
           nodes { sequenceNumber digest timestamp networkTotalTransactions rollingGasSummary { computationCost storageCost storageRebate } }
         }
       }`);
-      const fcp = fresh.checkpoint;
-      const ftxs = fresh.transactions.nodes.reverse();
-      const fcps = fresh.checkpoints.nodes.reverse();
-      // Update stat boxes by data-stat attribute
+      const txRows = (data?.transactions?.nodes || []).reverse();
+      const cpRows = (data?.checkpoints?.nodes || []).reverse();
+      applyDashboardActivity(txRows, cpRows);
+    })().finally(() => { activityInFlight = null; });
+    return activityInFlight;
+  }
+
+  app.innerHTML = `
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Live dashboard snapshot · Source: Sui GraphQL Mainnet · Auto-refresh every 5s</div>
+    <div class="card u-mb16">
+      <div class="card-header">Start Here</div>
+      <div class="card-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;padding:12px 16px">
+        <a href="#/txs" class="hash-link u-panel-block">
+          <div style="font-weight:600;color:var(--text);margin-bottom:4px">Track Network Activity</div>
+          <div class="u-fs12-dim">Recent transactions, checkpoints, and validator health.</div>
+        </a>
+        <a href="#/defi-overview" class="hash-link u-panel-block">
+          <div style="font-weight:600;color:var(--text);margin-bottom:4px">Analyze DeFi</div>
+          <div class="u-fs12-dim">Rates, DEX activity, flows, and risk in one place.</div>
+        </a>
+      </div>
+    </div>
+    <div class="dash-grid-6">
+      <div class="stat-box">
+        <div class="stat-label">Latest Checkpoint</div>
+        <div class="stat-value" data-stat="checkpoint">${fmtNumber(cp.sequenceNumber)}</div>
+        <div class="stat-sub" data-stat-sub="cp-time" title="${fmtTime(cp.timestamp)}" style="cursor:help">${timeAgo(cp.timestamp)}</div>
+      </div>
+      <a class="stat-box" href="#/epoch/${ep.epochId}" style="display:block;cursor:pointer;text-decoration:none;color:inherit">
+        <div class="stat-label">Current Epoch</div>
+        <div class="stat-value u-c-accent" data-stat="epoch">${fmtNumber(ep.epochId)}</div>
+        <div class="stat-sub">Started ${fmtTime(ep.startTimestamp)}</div>
+      </a>
+      <div class="stat-box">
+        <div class="stat-label">Total Transactions</div>
+        <div class="stat-value" data-stat="total-txns">${fmtCompact(cp.networkTotalTransactions)}</div>
+        <div class="stat-sub">Epoch: ${fmtCompact(ep.totalTransactions)}</div>
+        <div class="sparkline-wrap" id="dash-tx-delta-spark"><span class="u-fs11-dim">loading...</span></div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Gas Price</div>
+        <div class="stat-value">${fmtNumber(ep.referenceGasPrice)} <span class="u-fs12-dim">MIST</span></div>
+        <div class="stat-sub">${fmtNumber(ep.totalCheckpoints)} checkpoints</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">SUI Price</div>
+        <div class="stat-value u-c-green" data-stat="sui-price">...</div>
+        <div class="stat-sub">DeepBook SUI/USDC</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Total TVL</div>
+        <div class="stat-value" data-stat="tvl">...</div>
+        <div class="stat-sub">DeFiLlama</div>
+      </div>
+    </div>
+
+    <div class="card u-mb16" id="epoch-trends-card">
+      <div class="card-header">
+        <span>Epoch Trends</span>
+        <span class="u-fs12-dim">GraphQL: epochs(last:8)</span>
+      </div>
+      <div class="card-body"><div class="loading u-p24">Loading epoch trends...</div></div>
+    </div>
+
+    <div class="two-col u-mb16">
+      <div class="card" id="stablecoin-card">
+        <div class="card-header">Stablecoin Supply</div>
+        <div class="card-body"><div class="loading u-p24">Loading supply data...</div></div>
+      </div>
+      <div class="card" id="tvl-breakdown-card">
+        <div class="card-header">DeFi TVL Breakdown</div>
+        <div class="card-body"><div class="loading u-p24">Loading TVL data...</div></div>
+      </div>
+    </div>
+
+    <div class="two-col u-mb16">
+      <div class="card">
+        <div class="card-header">Latest Checkpoints</div>
+        <div class="card-body">
+          <table>
+            <thead><tr><th>Checkpoint</th><th>Txns</th><th>Gas</th><th>Time</th></tr></thead>
+            <tbody id="dash-cp-tbody">${renderCpRows([])}</tbody>
+          </table>
+          <a class="view-more" href="#/checkpoints">View all checkpoints</a>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">Recent Transactions</div>
+        <div class="card-body">
+          <table>
+            <thead><tr><th>Digest</th><th>Action</th><th>Sender</th><th>Status</th><th>Gas</th><th>Time</th></tr></thead>
+            <tbody id="dash-tx-tbody">${renderTxRows([])}</tbody>
+          </table>
+          <a class="view-more" href="#/txs">View all transactions</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="protocol-rankings">
+      <div class="card-header">Sui Protocol Rankings</div>
+      <div class="card-body"><div class="loading" style="padding:16px">Loading protocols...</div></div>
+    </div>
+  `;
+
+  loadDashboardActivity().catch(() => null);
+
+  runWhenVisible("epoch-trends-card", () => {
+    return fetchDashboardEpochTrends().then((trendData) => {
+      const el = document.getElementById("epoch-trends-card");
+      if (!el) return;
+      const rowsAsc = trendData?.rows || [];
+      if (!rowsAsc.length) {
+        el.querySelector(".card-body").innerHTML = '<div class="empty">Epoch trend data unavailable</div>';
+        return;
+      }
+      const rows = [...rowsAsc].sort((a, b) => b.epochId - a.epochId);
+      const txSeries = rowsAsc.map((r) => r.txCount);
+      const tpsSeries = rowsAsc.map((r) => r.avgTps);
+      const latest = rows[0];
+      const sourceTs = trendData?.sourceTimestamp || "";
+      el.querySelector(".card-body").innerHTML = `
+        <div style="padding:12px 16px 6px">
+          <div class="u-fs12-dim">
+            Epoch-level throughput and gas trend from on-chain epoch aggregates.
+            ${sourceTs ? `Updated ${timeAgo(sourceTs)}.` : ""}
+          </div>
+          <div class="two-col" style="margin:8px 0 0">
+            <div>
+              <div class="u-fs11-dim">Transactions per Epoch</div>
+              <div class="sparkline-wrap">${renderSparkline(txSeries, { prefix: "", suffix: " tx/epoch", color: "var(--accent)" })}</div>
+            </div>
+            <div>
+              <div class="u-fs11-dim">Average TPS per Epoch</div>
+              <div class="sparkline-wrap">${renderSparkline(tpsSeries, { prefix: "", suffix: " TPS", color: "var(--green)" })}</div>
+            </div>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>Epoch</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Avg TPS</th><th class="u-ta-right">Ref Gas (MIST)</th><th class="u-ta-right">Checkpoints</th><th>Duration</th><th>End</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => `<tr>
+              <td><a class="hash-link" href="#/epoch/${r.epochId}">${fmtNumber(r.epochId)}</a>${r.isLive ? ' <span class="badge badge-success">Live</span>' : ''}</td>
+              <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
+              <td class="u-ta-right-mono">${r.avgTps.toFixed(2)}</td>
+              <td class="u-ta-right-mono">${fmtNumber(r.gasPrice)}</td>
+              <td class="u-ta-right-mono">${fmtNumber(r.checkpointCount)}</td>
+              <td>${fmtDurationCompact(r.durationMs)}</td>
+              <td>${r.isLive ? '<span class="u-c-dim">in progress</span>' : timeTag(r.endMs)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+        <div class="u-fs12-dim u-p12-16">Latest epoch ${fmtNumber(latest.epochId)}: ${fmtNumber(latest.txCount)} tx, ${latest.avgTps.toFixed(2)} TPS, gas ${fmtNumber(latest.gasPrice)} MIST.</div>
+      `;
+    });
+  }, { rootMargin: "200px 0px", timeoutMs: 1800 });
+
+  runWhenVisible("stablecoin-card", () => {
+    return fetchStablecoinSupply().then((data) => {
+      const el = document.getElementById("stablecoin-card");
+      if (!el) return;
+      if (!data || !data.coins.length) {
+        el.querySelector(".card-body").innerHTML = '<div class="empty">Supply data unavailable</div>';
+        return;
+      }
+      el.querySelector(".card-body").innerHTML = `
+        <div class="stablecoin-layout">
+          ${renderDonutChart(data.coins, data.totalSupply)}
+          <ul class="stablecoin-legend">
+            ${data.coins.map((c) => `<li>
+              <span class="dot" style="background:${c.color}"></span>
+              <span>${c.symbol}</span>
+              <span class="val">$${fmtCompact(c.supply)}</span>
+              <span class="pct">${c.pct.toFixed(1)}%</span>
+            </li>`).join("")}
+          </ul>
+        </div>`;
+    });
+  }, { rootMargin: "240px 0px", timeoutMs: 2200 });
+
+  runWhenVisible("protocol-rankings", () => {
+    return fetchEcosystemStats().then((stats) => {
+      const tvlBox = document.querySelector('[data-stat="tvl"]');
+      if (tvlBox && stats) tvlBox.textContent = "$" + fmtCompact(stats.totalTvl);
+      const tvlEl = document.getElementById("tvl-breakdown-card");
+      if (tvlEl && stats) {
+        const otherTvl = Math.max(0, stats.totalTvl - stats.lendingTvl - stats.dexTvl - stats.lstTvl);
+        const pctL = stats.totalTvl > 0 ? (stats.lendingTvl / stats.totalTvl * 100) : 0;
+        const pctD = stats.totalTvl > 0 ? (stats.dexTvl / stats.totalTvl * 100) : 0;
+        const pctS = stats.totalTvl > 0 ? (stats.lstTvl / stats.totalTvl * 100) : 0;
+        const pctO = Math.max(0, 100 - pctL - pctD - pctS);
+        tvlEl.querySelector(".card-body").innerHTML = `
+          <div style="padding:16px 16px 0">
+            <div style="font-size:24px;font-weight:700">$${fmtCompact(stats.totalTvl)}</div>
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Total Value Locked</div>
+            <div class="tvl-bar">
+              <div style="width:${pctL.toFixed(1)}%;background:var(--green)" title="Lending ${pctL.toFixed(1)}%"></div>
+              <div style="width:${pctD.toFixed(1)}%;background:var(--blue)" title="DEX ${pctD.toFixed(1)}%"></div>
+              <div style="width:${pctS.toFixed(1)}%;background:var(--purple)" title="Liquid Staking ${pctS.toFixed(1)}%"></div>
+              <div style="width:${pctO.toFixed(1)}%;background:var(--text-dim)" title="Other ${pctO.toFixed(1)}%"></div>
+            </div>
+          </div>
+          <div style="padding:0 16px 12px">
+            <div class="tvl-row"><span class="dot" style="background:var(--green)"></span> Lending <span class="tvl-val u-c-green">$${fmtCompact(stats.lendingTvl)} <span style="color:var(--text-dim);font-size:11px">${pctL.toFixed(1)}%</span></span></div>
+            <div class="tvl-row"><span class="dot" style="background:var(--blue)"></span> DEX <span class="tvl-val u-c-blue">$${fmtCompact(stats.dexTvl)} <span style="color:var(--text-dim);font-size:11px">${pctD.toFixed(1)}%</span></span></div>
+            <div class="tvl-row"><span class="dot" style="background:var(--purple)"></span> Liquid Staking <span class="tvl-val u-c-purple">$${fmtCompact(stats.lstTvl)} <span style="color:var(--text-dim);font-size:11px">${pctS.toFixed(1)}%</span></span></div>
+            <div class="tvl-row"><span class="dot" style="background:var(--text-dim)"></span> Other <span class="tvl-val">$${fmtCompact(otherTvl)} <span style="color:var(--text-dim);font-size:11px">${pctO.toFixed(1)}%</span></span></div>
+            <div class="tvl-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px"><span class="u-c-accent">24h DEX Volume</span> <span class="tvl-val u-c-accent">$${fmtCompact(stats.dexVolume24h)}</span></div>
+          </div>`;
+      }
+      const prEl = document.getElementById("protocol-rankings");
+      if (prEl && stats) {
+        prEl.querySelector(".card-body").innerHTML = `<table>
+          <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="u-ta-right">TVL</th><th class="u-ta-right">24h Change</th></tr></thead>
+          <tbody>
+            ${stats.protocols.slice(0, 10).map((p, i) => {
+              const catColor = categoryColors[p.category] || "var(--text-dim)";
+              const changeStr = p.change24h != null ? `${p.change24h >= 0 ? "+" : ""}${p.change24h.toFixed(2)}%` : "—";
+              const changeColor = p.change24h > 0 ? "var(--green)" : p.change24h < 0 ? "var(--red)" : "var(--text-dim)";
+              return `<tr>
+                <td style="color:var(--text-dim);font-size:12px">${i + 1}</td>
+                <td style="font-weight:500">${p.name}</td>
+                <td><span class="badge" style="background:${catColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${p.category}</span></td>
+                <td class="u-ta-right-mono">$${fmtCompact(p.tvl)}</td>
+                <td style="text-align:right;color:${changeColor};font-family:var(--mono)">${changeStr}</td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>`;
+      }
+    });
+  }, { rootMargin: "260px 0px", timeoutMs: 2500 });
+
+  fetchDefiPrices().then(() => {
+    const priceBox = document.querySelector('[data-stat="sui-price"]');
+    if (priceBox && defiPrices.SUI) priceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
+  });
+
+  if (dashboardTimer) clearInterval(dashboardTimer);
+  dashboardTimer = setInterval(async () => {
+    if (parseRoute(getRoute()).page !== "home") {
+      clearInterval(dashboardTimer);
+      dashboardTimer = null;
+      return;
+    }
+    try {
+      const freshHead = await gql(`{
+        checkpoint { sequenceNumber digest timestamp networkTotalTransactions }
+      }`);
+      const fcp = freshHead?.checkpoint || {};
       const cpEl = document.querySelector('[data-stat="checkpoint"]');
       if (cpEl) cpEl.textContent = fmtNumber(fcp.sequenceNumber);
       const txEl = document.querySelector('[data-stat="total-txns"]');
       if (txEl) txEl.textContent = fmtNumber(fcp.networkTotalTransactions);
       const cpTimeEl = document.querySelector('[data-stat-sub="cp-time"]');
-      if (cpTimeEl) { cpTimeEl.textContent = timeAgo(fcp.timestamp); cpTimeEl.title = fmtTime(fcp.timestamp); }
-      // Update tables by ID using enriched helpers
-      const cpBody = document.getElementById("dash-cp-tbody");
-      if (cpBody) cpBody.innerHTML = renderCpRows(fcps);
-      const txBody = document.getElementById("dash-tx-tbody");
-      if (txBody) txBody.innerHTML = renderTxRows(ftxs);
-    } catch (e) { /* silently ignore refresh errors */ }
+      if (cpTimeEl) {
+        cpTimeEl.textContent = timeAgo(fcp.timestamp);
+        cpTimeEl.title = fmtTime(fcp.timestamp);
+      }
+      const seq = Number(fcp?.sequenceNumber || 0);
+      if (Number.isFinite(seq) && seq > 0 && seq !== lastHeadSeq) {
+        lastHeadSeq = seq;
+        loadDashboardActivity().catch(() => null);
+      } else if (!latestCheckpointRows.length) {
+        loadDashboardActivity().catch(() => null);
+      }
+    } catch (_) { /* ignore refresh errors */ }
   }, 5000);
 }
 
@@ -4990,6 +5322,62 @@ async function txListFindCheckpointAtOrBeforeMs(targetMs, latestSeq) {
   return lo;
 }
 
+function txListEstimateCheckpointForMs(targetMs, latestSeq, latestTsMs) {
+  const seqMax = Math.max(0, Math.floor(Number(latestSeq || 0)));
+  if (!Number.isFinite(targetMs) || !Number.isFinite(latestTsMs)) return NaN;
+  const anchors = txListCheckpointHints
+    .map((h) => ({ tsMs: Number(h?.tsMs), seq: Number(h?.seq) }))
+    .filter((h) => Number.isFinite(h.tsMs) && Number.isFinite(h.seq))
+    .map((h) => ({ tsMs: h.tsMs, seq: Math.max(0, Math.min(seqMax, Math.floor(h.seq))) }));
+  anchors.push({ tsMs: latestTsMs, seq: seqMax });
+  anchors.sort((a, b) => a.tsMs - b.tsMs);
+  const deduped = [];
+  for (const row of anchors) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && prev.tsMs === row.tsMs) {
+      if (row.seq > prev.seq) prev.seq = row.seq;
+      continue;
+    }
+    deduped.push({ tsMs: row.tsMs, seq: row.seq });
+  }
+  if (!deduped.length) return NaN;
+  const DEFAULT_CPS = 1 / 1000; // ~1 checkpoint per second
+  const clampSeq = (v) => Math.max(0, Math.min(seqMax, Math.floor(Number(v) || 0)));
+  if (deduped.length === 1) {
+    const deltaMs = targetMs - latestTsMs;
+    return clampSeq(seqMax + deltaMs * DEFAULT_CPS);
+  }
+  let left = deduped[0];
+  let right = deduped[deduped.length - 1];
+  for (let i = 0; i < deduped.length - 1; i += 1) {
+    const a = deduped[i];
+    const b = deduped[i + 1];
+    if (targetMs >= a.tsMs && targetMs <= b.tsMs) {
+      left = a;
+      right = b;
+      break;
+    }
+    if (targetMs < deduped[0].tsMs) {
+      left = deduped[0];
+      right = deduped[1];
+      break;
+    }
+    if (targetMs > deduped[deduped.length - 1].tsMs) {
+      left = deduped[deduped.length - 2];
+      right = deduped[deduped.length - 1];
+      break;
+    }
+  }
+  const dt = Number(right.tsMs - left.tsMs);
+  if (!Number.isFinite(dt) || dt <= 0) {
+    const fallbackDeltaMs = targetMs - latestTsMs;
+    return clampSeq(seqMax + fallbackDeltaMs * DEFAULT_CPS);
+  }
+  const slope = (Number(right.seq) - Number(left.seq)) / dt;
+  const estimate = Number(left.seq) + (targetMs - Number(left.tsMs)) * slope;
+  return clampSeq(estimate);
+}
+
 async function txListResolveDateFilter(state) {
   const normalized = txListNormalizeDateState(state);
   if (normalized.preset === "all") {
@@ -5021,13 +5409,38 @@ async function txListResolveDateFilter(state) {
 
   const clampedToMs = Math.min(toMs, latest.tsMs);
   const clampedFromMs = Math.min(fromMs, clampedToMs);
-  const [startSeq, endSeq] = await Promise.all([
-    txListFindCheckpointAtOrAfterMs(clampedFromMs, latest.seq),
-    txListFindCheckpointAtOrBeforeMs(clampedToMs, latest.seq),
-  ]);
-  const lo = Math.max(0, Math.min(startSeq, endSeq) - TX_LIST_CHECKPOINT_PADDING);
-  const hi = Math.min(latest.seq, Math.max(startSeq, endSeq) + TX_LIST_CHECKPOINT_PADDING);
-  const note = `Timestamp range mapped to checkpoint bounds ~${fmtNumber(lo)} to ~${fmtNumber(hi)}.`;
+  if (normalized.preset === "custom") {
+    const [startSeq, endSeq] = await Promise.all([
+      txListFindCheckpointAtOrAfterMs(clampedFromMs, latest.seq),
+      txListFindCheckpointAtOrBeforeMs(clampedToMs, latest.seq),
+    ]);
+    const lo = Math.max(0, Math.min(startSeq, endSeq) - TX_LIST_CHECKPOINT_PADDING);
+    const hi = Math.min(latest.seq, Math.max(startSeq, endSeq) + TX_LIST_CHECKPOINT_PADDING);
+    const note = `Timestamp range mapped to checkpoint bounds ~${fmtNumber(lo)} to ~${fmtNumber(hi)}.`;
+    return {
+      filter: { afterCheckpoint: lo, beforeCheckpoint: hi },
+      fromMs: clampedFromMs,
+      toMs: clampedToMs,
+      note,
+      error: "",
+    };
+  }
+
+  const estStart = txListEstimateCheckpointForMs(clampedFromMs, latest.seq, latest.tsMs);
+  const estEnd = txListEstimateCheckpointForMs(clampedToMs, latest.seq, latest.tsMs);
+  if (!Number.isFinite(estStart) || !Number.isFinite(estEnd)) {
+    return {
+      filter: null,
+      fromMs: clampedFromMs,
+      toMs: clampedToMs,
+      note: "Using client-side timestamp filter (checkpoint estimate unavailable).",
+      error: "",
+    };
+  }
+  const pad = TX_LIST_CHECKPOINT_PADDING * 16;
+  const lo = Math.max(0, Math.min(estStart, estEnd) - pad);
+  const hi = Math.min(latest.seq, Math.max(estStart, estEnd) + pad);
+  const note = `Estimated checkpoint window ~${fmtNumber(lo)} to ~${fmtNumber(hi)} from cached timestamp hints.`;
   return {
     filter: { afterCheckpoint: lo, beforeCheckpoint: hi },
     fromMs: clampedFromMs,
@@ -5080,6 +5493,11 @@ async function renderTransactions(app, before = null, dateState = null) {
         }
       }`, { before, filter: dateFilter.filter });
       txs = (data?.transactions?.nodes || []).reverse().filter((t) => txListWithinRange(t, dateFilter.fromMs, dateFilter.toMs));
+      for (const tx of txs) {
+        const seq = Number(tx?.effects?.checkpoint?.sequenceNumber);
+        const tsMs = parseTsMs(tx?.effects?.timestamp);
+        if (Number.isFinite(seq) && Number.isFinite(tsMs)) txListRememberCheckpointHint(tsMs, seq);
+      }
       pi = data?.transactions?.pageInfo || pi;
     } catch (e) {
       txLoadError = e?.message || "Failed to load transactions.";
@@ -9409,12 +9827,6 @@ async function renderAddress(app, addr) {
     address(address: $addr) {
       address
       defaultNameRecord { domain }
-      balances(first: 20) {
-        nodes {
-          coinType { repr }
-          totalBalance
-        }
-      }
       objects(first: 20) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -9437,15 +9849,11 @@ async function renderAddress(app, addr) {
   let txFilterMeta = { filter: null, fromMs: NaN, toMs: NaN, note: "", error: "" };
   let txLoading = false;
   let txLoadError = "";
-  const balances = a.balances?.nodes || [];
   let allObjects = a.objects?.nodes || [];
   let objPageInfo = a.objects?.pageInfo || {};
   const name = a.defaultNameRecord?.domain;
 
-  // Prefetch coin metadata for balances
-  await prefetchCoinMeta(balances.map(b => b.coinType?.repr).filter(Boolean));
-
-  // DeFi data (loaded eagerly since it's the default tab)
+  // DeFi data is loaded only when the user opens the DeFi tab.
   let defiLoaded = false;
   let defiHtml = "";
 
@@ -9489,6 +9897,11 @@ async function renderAddress(app, addr) {
       const rows = (more?.address?.transactions?.nodes || [])
         .reverse()
         .filter((t) => txListWithinRange(t, txFilterMeta.fromMs, txFilterMeta.toMs));
+      for (const tx of rows) {
+        const seq = Number(tx?.effects?.checkpoint?.sequenceNumber);
+        const tsMs = parseTsMs(tx?.effects?.timestamp);
+        if (Number.isFinite(seq) && Number.isFinite(tsMs)) txListRememberCheckpointHint(tsMs, seq);
+      }
       allTxs = append ? [...allTxs, ...rows] : rows;
       txPageInfo = more?.address?.transactions?.pageInfo || { hasPreviousPage: false, startCursor: "" };
     } catch (e) {
@@ -10066,7 +10479,7 @@ async function renderAddress(app, addr) {
     if (!action) return;
     ev.preventDefault();
     if (action === "addr-switch-tab") {
-      renderTabs(trigger.getAttribute("data-tab") || "defi");
+      renderTabs(trigger.getAttribute("data-tab") || "txs");
       return;
     }
     if (action === "addr-tx-date-apply") {
@@ -10103,7 +10516,7 @@ async function renderAddress(app, addr) {
     }
   };
   app.addEventListener("click", app._addressClickHandler);
-  renderTabs("defi");
+  renderTabs("txs");
 }
 
 // ── Object Detail ───────────────────────────────────────────────────────
@@ -11769,6 +12182,9 @@ const QUERIES = {
 async function renderCoin(app, routeCoinType = "") {
   const routeParams = splitRouteAndParams(getRoute()).params;
   const requestedRaw = String(routeCoinType || routeParams.get("type") || "").trim();
+  const scanMode = getCoinActivityScanMode(routeParams.get("mode"));
+  const shouldScanActivity = routeParams.get("scan") === "1";
+  const shouldResolveSupply = shouldScanActivity || routeParams.get("supply") === "1";
 
   function renderSearchCard(currentValue = "", error = "") {
     return `
@@ -11884,11 +12300,12 @@ async function renderCoin(app, routeCoinType = "") {
     let supplyIsEstimated = false;
     let supplyRaw = 0n;
     let hasSupply = false;
+    let supplyLookupPending = false;
     if (coinMeta?.supply != null) {
       hasSupply = true;
       supplyRaw = parseBigIntSafe(coinMeta.supply);
       supplySource = "coinMetadata.supply";
-    } else {
+    } else if (shouldResolveSupply) {
       const rpcSupply = await fetchCoinTotalSupplyRpc(coinType, shortCoinType).catch(() => null);
       if (rpcSupply?.value != null) {
         hasSupply = true;
@@ -11899,6 +12316,10 @@ async function renderCoin(app, routeCoinType = "") {
         supplyUnavailableReason = rpcSupply?.note || "coinMetadata.supply unavailable";
       }
       supplySource = rpcSupply?.source || "unavailable";
+    } else {
+      supplyLookupPending = true;
+      supplySource = "pending";
+      supplyUnavailableReason = "Deferred on-chain lookup.";
     }
     const supplyExact = hasSupply ? scaledBigIntToText(supplyRaw, decimals, 8) : "—";
     const supplyApprox = hasSupply ? scaledBigIntAbsToApprox(supplyRaw, decimals, 8) : NaN;
@@ -11912,343 +12333,578 @@ async function renderCoin(app, routeCoinType = "") {
     const structName = typeParts[2] || "";
     const targetKey = coinTypeKey(coinType);
 
-    const RESULT_LIMIT = 50;
-    const PAGE_SIZE = 20;
-    const GLOBAL_SCAN_MAX_TX = 80;
-    const GLOBAL_SCAN_EMPTY_PAGE_THRESHOLD = 2;
-    const OBJECT_SCAN_MAX_PAGES = 10;
-    const OBJECT_SCAN_MAX_DIGESTS = 320;
-    const OBJECT_TX_LOAD_LIMIT = 80;
-    let scannedTx = 0;
-    let scannedPages = 0;
-    let before = null;
-    let hasPreviousPage = true;
-    let globalSupplementApplied = false;
-    let globalScanEarlyStop = false;
-    let objectDigestHasNext = false;
-    const matchedTx = new Set();
-    const processedDigests = new Set();
-    let truncatedBalances = false;
-    let truncatedEvents = false;
-    let truncatedObjects = false;
-    const transferRows = [];
-    const eventRows = [];
-    const objectRows = [];
-    const matchedActivityRows = [];
-    const MAX_CONTEXT_EVENTS_PER_TX = 8;
-    let objectFallbackScannedObjects = 0;
-    let objectFallbackScannedPages = 0;
-    let objectFallbackConsideredDigests = 0;
-    let objectFallbackLoadedTx = 0;
+    if (app._coinClickHandler) app.removeEventListener("click", app._coinClickHandler);
+    app._coinClickHandler = null;
 
-    function ingestCoinTransaction(tx) {
-      const txDigest = String(tx?.digest || "");
-      if (txDigest && processedDigests.has(txDigest)) return;
-      if (txDigest) processedDigests.add(txDigest);
-      const eff = tx?.effects || {};
-      const txEvents = eff?.events?.nodes || [];
-      const txAction = classifyTransactionAction(tx);
-      const txEventActionLabel = String(txAction?.label || "");
-      let txHasTransferMatch = false;
-      let txHasObjectMatch = false;
-      let txHasDirectEventMatch = false;
-      let txHasContextEventMatch = false;
-      let txObjectMatchCount = 0;
-      let txBalanceMatchCount = 0;
-      const contextualEventCandidates = [];
-
-      const coinBalanceRows = (eff?.balanceChanges?.nodes || [])
-        .filter((bc) => coinTypeKey(bc?.coinType?.repr || "") === targetKey);
-      if (coinBalanceRows.length) {
-        txHasTransferMatch = true;
-        txBalanceMatchCount = coinBalanceRows.length;
-        if (eff?.balanceChanges?.pageInfo?.hasNextPage) truncatedBalances = true;
-        let sentRaw = 0n;
-        let recvRaw = 0n;
-        const fromRows = [];
-        const toRows = [];
-        for (const bc of coinBalanceRows) {
-          const raw = parseBigIntSafe(bc?.amount || 0);
-          const owner = normalizeSuiAddress(bc?.owner?.address || "");
-          if (raw < 0n) {
-            sentRaw += -raw;
-            if (owner) fromRows.push(owner);
-          } else if (raw > 0n) {
-            recvRaw += raw;
-            if (owner) toRows.push(owner);
-          }
-        }
-        const amountRaw = sentRaw > recvRaw ? sentRaw : recvRaw;
-        if (amountRaw > 0n) {
-          const kind = classifyCoinFlowKindWithContext(eff, targetKey, sentRaw, recvRaw, txEventActionLabel);
-          transferRows.push({
-            digest: txDigest,
-            timestamp: eff?.timestamp || "",
-            status: eff?.status || "",
-            fromRows,
-            toRows,
-            amountRaw,
-            kind,
-            actionLabel: txEventActionLabel,
-          });
-        }
-      }
-
-      if (eff?.events?.pageInfo?.hasNextPage) truncatedEvents = true;
-      for (const ev of txEvents) {
-        const typeRepr = String(ev?.contents?.type?.repr || "");
-        const json = ev?.contents?.json;
-        const row = {
-          digest: txDigest,
-          timestamp: ev?.timestamp || eff?.timestamp || "",
-          status: eff?.status || "",
-          sender: normalizeSuiAddress(ev?.sender?.address || tx?.sender?.address || ""),
-          typeRepr,
-          moduleName: ev?.transactionModule?.name || "",
-          modulePackage: normalizeSuiAddress(ev?.transactionModule?.package?.address || ""),
-          jsonPreview: summarizeCoinJson(json),
-        };
-        if (moveTypeStringHasCoinType(typeRepr, targetKey) || valueHasCoinType(json, targetKey)) {
-          txHasDirectEventMatch = true;
-          eventRows.push({ ...row, matchSource: "direct" });
-        } else {
-          contextualEventCandidates.push(row);
-        }
-      }
-
-      if (eff?.objectChanges?.pageInfo?.hasNextPage) truncatedObjects = true;
-      for (const oc of (eff?.objectChanges?.nodes || [])) {
-        const inputType = String(oc?.inputState?.asMoveObject?.contents?.type?.repr || "");
-        const outputType = String(oc?.outputState?.asMoveObject?.contents?.type?.repr || "");
-        if (!moveTypeStringHasCoinType(inputType, targetKey) && !moveTypeStringHasCoinType(outputType, targetKey)) continue;
-        txHasObjectMatch = true;
-        txObjectMatchCount += 1;
-        const inputOwner = parseOwnerInfo(oc?.inputState?.owner);
-        const outputOwner = parseOwnerInfo(oc?.outputState?.owner);
-        const ownerAddress = outputOwner.address;
-        const ownerKind = outputOwner.kind;
-        const objectId = normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || "");
-        const typeRepr = outputType || inputType || "";
-        objectRows.push({
-          digest: txDigest,
-          timestamp: eff?.timestamp || "",
-          status: eff?.status || "",
-          objectId,
-          changeKind: oc?.idCreated ? "Created" : (oc?.idDeleted ? "Deleted" : "Mutated"),
-          typeRepr,
-          ownerAddress,
-          ownerKind,
-        });
-
-        const ownerChanged = (
-          (inputOwner.address || outputOwner.address || inputOwner.kind || outputOwner.kind) &&
-          (inputOwner.address !== outputOwner.address || inputOwner.kind !== outputOwner.kind)
-        );
-        const isCoinObject = /::coin::Coin\s*</.test(typeRepr);
-        if (ownerChanged && isCoinObject) {
-          txHasTransferMatch = true;
-          const fromRows = inputOwner.address ? [inputOwner.address] : [];
-          const toRows = outputOwner.address ? [outputOwner.address] : [];
-          transferRows.push({
-            digest: txDigest,
-            timestamp: eff?.timestamp || "",
-            status: eff?.status || "",
-            fromRows,
-            toRows,
-            amountRaw: null,
-            kind: "object-transfer",
-            fromHint: !fromRows.length ? (inputOwner.kind || "") : "",
-            toHint: !toRows.length ? (outputOwner.kind || "") : "",
-            actionLabel: txEventActionLabel,
-          });
-        }
-      }
-
-      if (!txHasDirectEventMatch && contextualEventCandidates.length && (txHasTransferMatch || txHasObjectMatch)) {
-        const contextRows = contextualEventCandidates.slice(0, MAX_CONTEXT_EVENTS_PER_TX);
-        if (contextualEventCandidates.length > MAX_CONTEXT_EVENTS_PER_TX) truncatedEvents = true;
-        for (const row of contextRows) eventRows.push({ ...row, matchSource: "context" });
-        if (contextRows.length) txHasContextEventMatch = true;
-      }
-
-      const txHasMatch = txHasTransferMatch || txHasObjectMatch || txHasDirectEventMatch || txHasContextEventMatch;
-      if (txHasMatch && txDigest) {
-        matchedTx.add(txDigest);
-        const signals = [];
-        if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
-        if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
-        if (txEventActionLabel) signals.push(txEventActionLabel.toLowerCase());
-        if (txHasDirectEventMatch) signals.push("direct event");
-        if (txHasContextEventMatch) signals.push("context events");
-        matchedActivityRows.push({
-          digest: txDigest,
-          timestamp: eff?.timestamp || "",
-          status: eff?.status || "",
-          sender: normalizeSuiAddress(tx?.sender?.address || ""),
-          signals: signals.join(" · "),
-        });
-      }
+    function readSupplySnapshot() {
+      const exact = hasSupply ? scaledBigIntToText(supplyRaw, decimals, 8) : "Unavailable";
+      const approx = hasSupply ? scaledBigIntAbsToApprox(supplyRaw, decimals, 8) : NaN;
+      const display = hasSupply
+        ? (Number.isFinite(approx) ? fmtCompact(approx) : exact)
+        : (supplyLookupPending ? "Loading..." : "—");
+      const statSub = hasSupply
+        ? `${symbol} units (${supplySource || "metadata"}${supplyIsEstimated ? ", derived" : ""})`
+        : (supplyLookupPending ? "Resolving supply from on-chain sources..." : (supplyUnavailableReason || "coinMetadata.supply unavailable"));
+      const source = hasSupply
+        ? `${supplySource || "coinMetadata.supply"}${supplySourceNote ? ` (${supplySourceNote})` : ""}`
+        : (supplyLookupPending ? "Pending on-chain lookup..." : (supplyUnavailableReason || "Unavailable"));
+      return { exact, display, statSub, source };
     }
 
-    const sortRecent = (a, b) => {
-      const diff = parseTsMs(b?.timestamp) - parseTsMs(a?.timestamp);
-      if (diff !== 0) return diff;
-      return String(b?.digest || "").localeCompare(String(a?.digest || ""));
-    };
+    function applySupplySnapshotToDom() {
+      const snap = readSupplySnapshot();
+      const statVal = document.getElementById("coin-supply-stat-value");
+      const statSub = document.getElementById("coin-supply-stat-sub");
+      const exactEl = document.getElementById("coin-supply-exact");
+      const sourceEl = document.getElementById("coin-supply-source");
+      if (statVal) statVal.textContent = snap.display;
+      if (statSub) statSub.textContent = snap.statSub;
+      if (exactEl) exactEl.textContent = hasSupply ? `${snap.exact} ${symbol}` : "Unavailable";
+      if (sourceEl) sourceEl.textContent = snap.source;
+    }
 
-    try {
-      const digestCandidates = await fetchCoinObjectDigestCandidates(coinType, {
-        maxPages: OBJECT_SCAN_MAX_PAGES,
-        maxDigests: OBJECT_SCAN_MAX_DIGESTS,
-      });
-      objectFallbackScannedObjects = digestCandidates?.sampledObjects || 0;
-      objectFallbackScannedPages = digestCandidates?.pages || 0;
-      objectDigestHasNext = !!digestCandidates?.hasNext;
-      const candidates = (digestCandidates?.digests || []).filter(Boolean);
-      objectFallbackConsideredDigests = candidates.length;
-      if (candidates.length) {
-        const metaRows = await fetchCoinTxMetaRowsByDigest(candidates);
-        metaRows.sort(sortRecent);
-        const topDigests = metaRows.map((row) => row.digest).filter(Boolean).slice(0, OBJECT_TX_LOAD_LIMIT);
-        const txRows = await fetchCoinTxDetailsByDigest(topDigests);
-        objectFallbackLoadedTx = txRows.length;
-        for (const tx of txRows) ingestCoinTransaction(tx);
+    if (!shouldScanActivity) {
+      const snap = readSupplySnapshot();
+      app.innerHTML = `
+        <div class="page-title">Coin Search <span class="type-tag">${escapeHtml(symbol)}</span></div>
+        ${renderSearchCard(coinType)}
+
+        <div class="card u-mb16">
+          <div class="card-header">Coin Overview</div>
+          <div class="card-body">
+            <div class="stats-grid u-mb16">
+              <div class="stat-box">
+                <div class="stat-label">Symbol</div>
+                <div class="stat-value">${escapeHtml(symbol)}</div>
+                <div class="stat-sub">${escapeHtml(name)}</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Decimals</div>
+                <div class="stat-value">${fmtNumber(decimals)}</div>
+                <div class="stat-sub">from CoinMetadata/registry</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Supply</div>
+                <div class="stat-value" id="coin-supply-stat-value">${escapeHtml(snap.display)}</div>
+                <div class="stat-sub" id="coin-supply-stat-sub">${escapeHtml(snap.statSub)}</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Matched Tx</div>
+                <div class="stat-value">—</div>
+                <div class="stat-sub">Activity scan deferred</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Transfers</div>
+                <div class="stat-value">—</div>
+                <div class="stat-sub">Click Load Activity</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Events / Objects</div>
+                <div class="stat-value">— / —</div>
+                <div class="stat-sub">Click Load Activity</div>
+              </div>
+            </div>
+
+            <div class="detail-grid">
+              <div class="detail-row">
+                <div class="detail-key">Coin Type</div>
+                <div class="detail-val">
+                  <span class="coin-type-text">${escapeHtml(coinType)}</span> ${copyBtn(coinType)}
+                </div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-key">Package / Module / Struct</div>
+                <div class="detail-val">
+                  ${packageAddr ? hashLink(packageAddr, "/object/" + packageAddr) : "—"} :: ${escapeHtml(moduleName || "—")} :: ${escapeHtml(structName || "—")}
+                </div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-key">Exact Supply</div>
+                <div class="detail-val" id="coin-supply-exact">${hasSupply ? `${escapeHtml(snap.exact)} ${escapeHtml(symbol)}` : '<span class="u-c-dim">Unavailable</span>'}</div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-key">Supply Source</div>
+                <div class="detail-val" id="coin-supply-source">${escapeHtml(snap.source)}</div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-key">Scan Scope</div>
+                <div class="detail-val">Not scanned yet.</div>
+              </div>
+            </div>
+            ${iconUrl ? `<div class="u-fs12-dim u-mt8">Icon: <a class="hash-link" href="${escapeAttr(iconUrl)}" target="_blank" rel="noopener">coinMetadata.iconUrl</a></div>` : ""}
+            <div class="coin-scan-note">
+              Activity scan is deferred to improve first render (default mode: Fast).
+              <button class="btn-surface-sm" data-action="coin-load-activity-fast">Load Fast Activity</button>
+              <button class="btn-surface-sm" data-action="coin-load-activity-full">Load Full Activity</button>
+              ${!shouldResolveSupply ? '<button class="btn-surface-sm" data-action="coin-load-supply">Load Supply</button>' : ""}
+            </div>
+          </div>
+        </div>
+
+        <div class="coin-activity-grid">
+          <div class="card">
+            <div class="card-header">Most Recent Transfers</div>
+            <div class="card-body">${renderEmpty("Activity scan is deferred. Click Load Fast Activity or Load Full Activity.")}</div>
+          </div>
+          <div class="card">
+            <div class="card-header">Most Recent Events</div>
+            <div class="card-body">${renderEmpty("Activity scan is deferred. Click Load Fast Activity or Load Full Activity.")}</div>
+          </div>
+          <div class="card">
+            <div class="card-header">Most Recent Object Changes</div>
+            <div class="card-body">${renderEmpty("Activity scan is deferred. Click Load Fast Activity or Load Full Activity.")}</div>
+          </div>
+          <div class="card">
+            <div class="card-header">Recent Matched Transactions</div>
+            <div class="card-body">${renderEmpty("Activity scan is deferred. Click Load Fast Activity or Load Full Activity.")}</div>
+          </div>
+        </div>
+      `;
+      bindCoinSearchForm();
+      app._coinClickHandler = async (ev) => {
+        const trigger = ev.target?.closest?.("[data-action]");
+        if (!trigger || !app.contains(trigger)) return;
+        const action = trigger.getAttribute("data-action");
+        if (action === "coin-load-supply") {
+          ev.preventDefault();
+          setRouteParams({ supply: "1" });
+          await routeTo(getRoute());
+          return;
+        }
+        if (action === "coin-load-activity-fast") {
+          ev.preventDefault();
+          setRouteParams({ scan: "1", supply: "1", mode: "fast", refresh: null });
+          await routeTo(getRoute());
+          return;
+        }
+        if (action === "coin-load-activity-full") {
+          ev.preventDefault();
+          setRouteParams({ scan: "1", supply: "1", mode: "full", refresh: null });
+          await routeTo(getRoute());
+        }
+      };
+      app.addEventListener("click", app._coinClickHandler);
+      if (supplyLookupPending) {
+        fetchCoinTotalSupplyRpc(coinType, shortCoinType).then((rpcSupply) => {
+          if (rpcSupply?.value != null) {
+            hasSupply = true;
+            supplyRaw = parseBigIntSafe(rpcSupply.value);
+            supplySource = rpcSupply?.source || "unavailable";
+            supplyIsEstimated = !!rpcSupply?.estimated;
+            supplySourceNote = String(rpcSupply?.note || "");
+            supplyUnavailableReason = "";
+          } else {
+            supplySource = rpcSupply?.source || "unavailable";
+            supplyUnavailableReason = rpcSupply?.note || "coinMetadata.supply unavailable";
+          }
+          supplyLookupPending = false;
+          applySupplySnapshotToDom();
+        }).catch(() => {
+          supplyLookupPending = false;
+          supplySource = "unavailable";
+          supplyUnavailableReason = "coinMetadata.supply unavailable";
+          applySupplySnapshotToDom();
+        });
       }
-    } catch (_) { /* ignore object-linked scan failures */ }
+      return;
+    }
 
-    const shouldRunGlobalSupplement = (
-      objectDigestHasNext
-      || objectFallbackLoadedTx < 24
-      || matchedTx.size < 16
-    );
+    const scanProfile = COIN_ACTIVITY_SCAN_MODE_CONFIG[scanMode] || COIN_ACTIVITY_SCAN_MODE_CONFIG.fast;
+    const RESULT_LIMIT = Number(scanProfile.resultLimit || 50);
+    const PAGE_SIZE = Number(scanProfile.pageSize || 20);
+    const GLOBAL_SCAN_MAX_TX = Number(scanProfile.globalScanMaxTx || 60);
+    const GLOBAL_SCAN_EMPTY_PAGE_THRESHOLD = Number(scanProfile.globalScanEmptyPageThreshold || 2);
+    const OBJECT_SCAN_MAX_PAGES = Number(scanProfile.objectScanMaxPages || 6);
+    const OBJECT_SCAN_MAX_DIGESTS = Number(scanProfile.objectScanMaxDigests || 160);
+    const OBJECT_TX_LOAD_LIMIT = Number(scanProfile.objectTxLoadLimit || 48);
+    const forceScanRefresh = routeParams.get("refresh") === "1";
+    const scanCacheKey = `${targetKey}|mode:${scanMode}|v1`;
+    const scanData = await coinSearchLoadActivityScanCached(scanCacheKey, { force: forceScanRefresh }, async () => {
+      let scannedTx = 0;
+      let scannedPages = 0;
+      let before = null;
+      let hasPreviousPage = true;
+      let globalSupplementApplied = false;
+      let globalScanEarlyStop = false;
+      let objectDigestHasNext = false;
+      const matchedTx = new Set();
+      const processedDigests = new Set();
+      let truncatedBalances = false;
+      let truncatedEvents = false;
+      let truncatedObjects = false;
+      const transferRows = [];
+      const eventRows = [];
+      const objectRows = [];
+      const matchedActivityRows = [];
+      const MAX_CONTEXT_EVENTS_PER_TX = 8;
+      let objectFallbackScannedObjects = 0;
+      let objectFallbackScannedPages = 0;
+      let objectFallbackConsideredDigests = 0;
+      let objectFallbackLoadedTx = 0;
 
-    if (shouldRunGlobalSupplement) {
-      globalSupplementApplied = true;
-      let emptyPages = 0;
-      while (hasPreviousPage && scannedTx < GLOBAL_SCAN_MAX_TX) {
-        const data = await gql(`query($before: String) {
-          transactions(last: ${PAGE_SIZE}, before: $before, filter: { kind: PROGRAMMABLE_TX }) {
-            pageInfo { hasPreviousPage startCursor }
-            nodes {
-              digest
-              sender { address }
-              kind {
-                __typename
-                ... on ProgrammableTransaction {
-                  commands(first: 8) {
+      function ingestCoinTransaction(tx) {
+        const txDigest = String(tx?.digest || "");
+        if (txDigest && processedDigests.has(txDigest)) return;
+        if (txDigest) processedDigests.add(txDigest);
+        const eff = tx?.effects || {};
+        const txEvents = eff?.events?.nodes || [];
+        const txAction = classifyTransactionAction(tx);
+        const txEventActionLabel = String(txAction?.label || "");
+        let txHasTransferMatch = false;
+        let txHasObjectMatch = false;
+        let txHasDirectEventMatch = false;
+        let txHasContextEventMatch = false;
+        let txObjectMatchCount = 0;
+        let txBalanceMatchCount = 0;
+        const contextualEventCandidates = [];
+
+        const coinBalanceRows = (eff?.balanceChanges?.nodes || [])
+          .filter((bc) => coinTypeKey(bc?.coinType?.repr || "") === targetKey);
+        if (coinBalanceRows.length) {
+          txHasTransferMatch = true;
+          txBalanceMatchCount = coinBalanceRows.length;
+          if (eff?.balanceChanges?.pageInfo?.hasNextPage) truncatedBalances = true;
+          let sentRaw = 0n;
+          let recvRaw = 0n;
+          const fromRows = [];
+          const toRows = [];
+          for (const bc of coinBalanceRows) {
+            const raw = parseBigIntSafe(bc?.amount || 0);
+            const owner = normalizeSuiAddress(bc?.owner?.address || "");
+            if (raw < 0n) {
+              sentRaw += -raw;
+              if (owner) fromRows.push(owner);
+            } else if (raw > 0n) {
+              recvRaw += raw;
+              if (owner) toRows.push(owner);
+            }
+          }
+          const amountRaw = sentRaw > recvRaw ? sentRaw : recvRaw;
+          if (amountRaw > 0n) {
+            const kind = classifyCoinFlowKindWithContext(eff, targetKey, sentRaw, recvRaw, txEventActionLabel);
+            transferRows.push({
+              digest: txDigest,
+              timestamp: eff?.timestamp || "",
+              status: eff?.status || "",
+              fromRows,
+              toRows,
+              amountRaw,
+              kind,
+              actionLabel: txEventActionLabel,
+            });
+          }
+        }
+
+        if (eff?.events?.pageInfo?.hasNextPage) truncatedEvents = true;
+        for (const ev of txEvents) {
+          const typeRepr = String(ev?.contents?.type?.repr || "");
+          const json = ev?.contents?.json;
+          const row = {
+            digest: txDigest,
+            timestamp: ev?.timestamp || eff?.timestamp || "",
+            status: eff?.status || "",
+            sender: normalizeSuiAddress(ev?.sender?.address || tx?.sender?.address || ""),
+            typeRepr,
+            moduleName: ev?.transactionModule?.name || "",
+            modulePackage: normalizeSuiAddress(ev?.transactionModule?.package?.address || ""),
+            jsonPreview: summarizeCoinJson(json),
+          };
+          if (moveTypeStringHasCoinType(typeRepr, targetKey) || valueHasCoinType(json, targetKey)) {
+            txHasDirectEventMatch = true;
+            eventRows.push({ ...row, matchSource: "direct" });
+          } else {
+            contextualEventCandidates.push(row);
+          }
+        }
+
+        if (eff?.objectChanges?.pageInfo?.hasNextPage) truncatedObjects = true;
+        for (const oc of (eff?.objectChanges?.nodes || [])) {
+          const inputType = String(oc?.inputState?.asMoveObject?.contents?.type?.repr || "");
+          const outputType = String(oc?.outputState?.asMoveObject?.contents?.type?.repr || "");
+          if (!moveTypeStringHasCoinType(inputType, targetKey) && !moveTypeStringHasCoinType(outputType, targetKey)) continue;
+          txHasObjectMatch = true;
+          txObjectMatchCount += 1;
+          const inputOwner = parseOwnerInfo(oc?.inputState?.owner);
+          const outputOwner = parseOwnerInfo(oc?.outputState?.owner);
+          const ownerAddress = outputOwner.address;
+          const ownerKind = outputOwner.kind;
+          const objectId = normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || "");
+          const typeRepr = outputType || inputType || "";
+          objectRows.push({
+            digest: txDigest,
+            timestamp: eff?.timestamp || "",
+            status: eff?.status || "",
+            objectId,
+            changeKind: oc?.idCreated ? "Created" : (oc?.idDeleted ? "Deleted" : "Mutated"),
+            typeRepr,
+            ownerAddress,
+            ownerKind,
+          });
+
+          const ownerChanged = (
+            (inputOwner.address || outputOwner.address || inputOwner.kind || outputOwner.kind) &&
+            (inputOwner.address !== outputOwner.address || inputOwner.kind !== outputOwner.kind)
+          );
+          const isCoinObject = /::coin::Coin\s*</.test(typeRepr);
+          if (ownerChanged && isCoinObject) {
+            txHasTransferMatch = true;
+            const fromRows = inputOwner.address ? [inputOwner.address] : [];
+            const toRows = outputOwner.address ? [outputOwner.address] : [];
+            transferRows.push({
+              digest: txDigest,
+              timestamp: eff?.timestamp || "",
+              status: eff?.status || "",
+              fromRows,
+              toRows,
+              amountRaw: null,
+              kind: "object-transfer",
+              fromHint: !fromRows.length ? (inputOwner.kind || "") : "",
+              toHint: !toRows.length ? (outputOwner.kind || "") : "",
+              actionLabel: txEventActionLabel,
+            });
+          }
+        }
+
+        if (!txHasDirectEventMatch && contextualEventCandidates.length && (txHasTransferMatch || txHasObjectMatch)) {
+          const contextRows = contextualEventCandidates.slice(0, MAX_CONTEXT_EVENTS_PER_TX);
+          if (contextualEventCandidates.length > MAX_CONTEXT_EVENTS_PER_TX) truncatedEvents = true;
+          for (const row of contextRows) eventRows.push({ ...row, matchSource: "context" });
+          if (contextRows.length) txHasContextEventMatch = true;
+        }
+
+        const txHasMatch = txHasTransferMatch || txHasObjectMatch || txHasDirectEventMatch || txHasContextEventMatch;
+        if (txHasMatch && txDigest) {
+          matchedTx.add(txDigest);
+          const signals = [];
+          if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
+          if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
+          if (txEventActionLabel) signals.push(txEventActionLabel.toLowerCase());
+          if (txHasDirectEventMatch) signals.push("direct event");
+          if (txHasContextEventMatch) signals.push("context events");
+          matchedActivityRows.push({
+            digest: txDigest,
+            timestamp: eff?.timestamp || "",
+            status: eff?.status || "",
+            sender: normalizeSuiAddress(tx?.sender?.address || ""),
+            signals: signals.join(" · "),
+          });
+        }
+      }
+
+      const sortRecent = (a, b) => {
+        const diff = parseTsMs(b?.timestamp) - parseTsMs(a?.timestamp);
+        if (diff !== 0) return diff;
+        return String(b?.digest || "").localeCompare(String(a?.digest || ""));
+      };
+
+      try {
+        const digestCandidates = await fetchCoinObjectDigestCandidates(coinType, {
+          maxPages: OBJECT_SCAN_MAX_PAGES,
+          maxDigests: OBJECT_SCAN_MAX_DIGESTS,
+        });
+        objectFallbackScannedObjects = digestCandidates?.sampledObjects || 0;
+        objectFallbackScannedPages = digestCandidates?.pages || 0;
+        objectDigestHasNext = !!digestCandidates?.hasNext;
+        const candidates = (digestCandidates?.digests || []).filter(Boolean);
+        objectFallbackConsideredDigests = candidates.length;
+        if (candidates.length) {
+          const metaRows = await fetchCoinTxMetaRowsByDigest(candidates);
+          metaRows.sort(sortRecent);
+          const topDigests = metaRows.map((row) => row.digest).filter(Boolean).slice(0, OBJECT_TX_LOAD_LIMIT);
+          const txRows = await fetchCoinTxDetailsByDigest(topDigests);
+          objectFallbackLoadedTx = txRows.length;
+          for (const tx of txRows) ingestCoinTransaction(tx);
+        }
+      } catch (_) { /* ignore object-linked scan failures */ }
+
+      const shouldRunGlobalSupplement = (
+        objectDigestHasNext
+        || objectFallbackLoadedTx < Math.min(24, OBJECT_TX_LOAD_LIMIT)
+        || matchedTx.size < Math.max(16, Math.floor(RESULT_LIMIT / 3))
+      );
+
+      if (shouldRunGlobalSupplement) {
+        globalSupplementApplied = true;
+        let emptyPages = 0;
+        while (hasPreviousPage && scannedTx < GLOBAL_SCAN_MAX_TX) {
+          const data = await gql(`query($before: String) {
+            transactions(last: ${PAGE_SIZE}, before: $before, filter: { kind: PROGRAMMABLE_TX }) {
+              pageInfo { hasPreviousPage startCursor }
+              nodes {
+                digest
+                sender { address }
+                kind {
+                  __typename
+                  ... on ProgrammableTransaction {
+                    commands(first: 8) {
+                      nodes {
+                        __typename
+                        ... on MoveCallCommand {
+                          function { name module { name package { address } } }
+                        }
+                      }
+                    }
+                  }
+                }
+                effects {
+                  status timestamp
+                  balanceChanges(first: 50) {
+                    pageInfo { hasNextPage }
+                    nodes { owner { address } amount coinType { repr } }
+                  }
+                  events(first: 50) {
+                    pageInfo { hasNextPage }
                     nodes {
-                      __typename
-                      ... on MoveCallCommand {
-                        function { name module { name package { address } } }
-                      }
+                      contents { type { repr } json }
+                      sender { address }
+                      timestamp
+                      transactionModule { name package { address } }
                     }
                   }
-                }
-              }
-              effects {
-                status timestamp
-                balanceChanges(first: 50) {
-                  pageInfo { hasNextPage }
-                  nodes { owner { address } amount coinType { repr } }
-                }
-                events(first: 50) {
-                  pageInfo { hasNextPage }
-                  nodes {
-                    contents { type { repr } json }
-                    sender { address }
-                    timestamp
-                    transactionModule { name package { address } }
-                  }
-                }
-                objectChanges(first: 50) {
-                  pageInfo { hasNextPage }
-                  nodes {
-                    address idCreated idDeleted
-                    inputState {
-                      owner {
-                        ... on AddressOwner { address { address } }
-                        ... on ObjectOwner { address { address } }
-                        ... on Shared { initialSharedVersion }
-                        ... on Immutable { __typename }
+                  objectChanges(first: 50) {
+                    pageInfo { hasNextPage }
+                    nodes {
+                      address idCreated idDeleted
+                      inputState {
+                        owner {
+                          ... on AddressOwner { address { address } }
+                          ... on ObjectOwner { address { address } }
+                          ... on Shared { initialSharedVersion }
+                          ... on Immutable { __typename }
+                        }
+                        asMoveObject { contents { type { repr } } }
                       }
-                      asMoveObject { contents { type { repr } } }
-                    }
-                    outputState {
-                      owner {
-                        ... on AddressOwner { address { address } }
-                        ... on ObjectOwner { address { address } }
-                        ... on Shared { initialSharedVersion }
-                        ... on Immutable { __typename }
+                      outputState {
+                        owner {
+                          ... on AddressOwner { address { address } }
+                          ... on ObjectOwner { address { address } }
+                          ... on Shared { initialSharedVersion }
+                          ... on Immutable { __typename }
+                        }
+                        asMoveObject { contents { type { repr } } }
                       }
-                      asMoveObject { contents { type { repr } } }
                     }
                   }
                 }
               }
             }
+          }`, { before });
+
+          const conn = data?.transactions;
+          const txs = conn?.nodes || [];
+          if (!txs.length) break;
+
+          scannedTx += txs.length;
+          scannedPages += 1;
+          const matchedBefore = matchedTx.size;
+          for (const tx of txs) ingestCoinTransaction(tx);
+          const gainedMatches = matchedTx.size > matchedBefore;
+          emptyPages = gainedMatches ? 0 : (emptyPages + 1);
+
+          hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
+          before = conn?.pageInfo?.startCursor || null;
+
+          if (transferRows.length >= RESULT_LIMIT && eventRows.length >= RESULT_LIMIT && objectRows.length >= RESULT_LIMIT) break;
+          if (emptyPages >= GLOBAL_SCAN_EMPTY_PAGE_THRESHOLD && matchedTx.size > 0) {
+            globalScanEarlyStop = true;
+            break;
           }
-        }`, { before });
-
-        const conn = data?.transactions;
-        const txs = conn?.nodes || [];
-        if (!txs.length) break;
-
-        scannedTx += txs.length;
-        scannedPages += 1;
-        const matchedBefore = matchedTx.size;
-        for (const tx of txs) ingestCoinTransaction(tx);
-        const gainedMatches = matchedTx.size > matchedBefore;
-        emptyPages = gainedMatches ? 0 : (emptyPages + 1);
-
-        hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
-        before = conn?.pageInfo?.startCursor || null;
-
-        if (transferRows.length >= RESULT_LIMIT && eventRows.length >= RESULT_LIMIT && objectRows.length >= RESULT_LIMIT) break;
-        if (emptyPages >= GLOBAL_SCAN_EMPTY_PAGE_THRESHOLD && matchedTx.size > 0) {
-          globalScanEarlyStop = true;
-          break;
         }
       }
-    }
 
-    transferRows.sort(sortRecent);
-    eventRows.sort(sortRecent);
-    objectRows.sort(sortRecent);
-    matchedActivityRows.sort(sortRecent);
-    const transfers = transferRows.slice(0, RESULT_LIMIT);
-    const events = eventRows.slice(0, RESULT_LIMIT);
-    const objects = objectRows.slice(0, RESULT_LIMIT);
-    const matchedActivity = matchedActivityRows.slice(0, RESULT_LIMIT);
+      transferRows.sort(sortRecent);
+      eventRows.sort(sortRecent);
+      objectRows.sort(sortRecent);
+      matchedActivityRows.sort(sortRecent);
+      const transfers = transferRows.slice(0, RESULT_LIMIT);
+      const events = eventRows.slice(0, RESULT_LIMIT);
+      const objects = objectRows.slice(0, RESULT_LIMIT);
+      const matchedActivity = matchedActivityRows.slice(0, RESULT_LIMIT);
 
-    const scanLimitReached = scannedTx >= GLOBAL_SCAN_MAX_TX && hasPreviousPage;
-    const notes = [];
-    if (objectDigestHasNext) notes.push(`Object-linked scan hit cap at ${fmtNumber(objectFallbackScannedObjects)} Coin objects; older activity may exist.`);
-    if (scanLimitReached) notes.push(`Supplemental scan hit cap at ${fmtNumber(GLOBAL_SCAN_MAX_TX)} programmable transactions.`);
-    if (globalSupplementApplied && scannedTx > 0) {
-      notes.push(`Supplemental scan inspected ${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages.`);
+      const scanLimitReached = scannedTx >= GLOBAL_SCAN_MAX_TX && hasPreviousPage;
+      const notes = [];
+      if (objectDigestHasNext) notes.push(`Object-linked scan hit cap at ${fmtNumber(objectFallbackScannedObjects)} Coin objects; older activity may exist.`);
+      if (scanLimitReached) notes.push(`Supplemental scan hit cap at ${fmtNumber(GLOBAL_SCAN_MAX_TX)} programmable transactions.`);
+      if (globalSupplementApplied && scannedTx > 0) {
+        notes.push(`Supplemental scan inspected ${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages.`);
+      }
+      if (globalScanEarlyStop) notes.push("Supplemental scan stopped early after consecutive pages without new coin matches.");
+      if (truncatedBalances || truncatedEvents || truncatedObjects) {
+        const fields = [];
+        if (truncatedBalances) fields.push("balanceChanges");
+        if (truncatedEvents) fields.push("events");
+        if (truncatedObjects) fields.push("objectChanges");
+        notes.push(`Some matched transactions exceed per-query page size for ${fields.join(", ")}.`);
+      }
+      const usedObjectScan = objectFallbackLoadedTx > 0;
+      if (usedObjectScan) {
+        notes.push(`Object-linked scan sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects across ${fmtNumber(objectFallbackScannedPages)} pages and loaded ${fmtNumber(objectFallbackLoadedTx)} transactions.`);
+      } else if (!transferRows.length && !eventRows.length && !objectRows.length && objectFallbackScannedObjects > 0) {
+        notes.push(`Object-linked scan sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects but did not find recent transactions in the sample.`);
+      }
+      const directEventCount = events.filter((row) => row.matchSource === "direct").length;
+      const contextEventCount = events.length - directEventCount;
+      const transferEmptyLabel = matchedTx.size
+        ? "No balance-change or coin-object ownership transfers found in sampled data. Recent activity can still appear in events/object changes below."
+        : "No recent transfers found for this coin type in sampled data.";
+      const eventEmptyLabel = matchedTx.size
+        ? "No events directly referenced this coin type in sampled data."
+        : "No recent events referencing this coin type in sampled data.";
+
+      return {
+        scanMode,
+        resultLimit: RESULT_LIMIT,
+        scannedTx,
+        scannedPages,
+        objectFallbackScannedObjects,
+        objectFallbackScannedPages,
+        objectFallbackConsideredDigests,
+        objectFallbackLoadedTx,
+        matchedTxCount: matchedTx.size,
+        directEventCount,
+        contextEventCount,
+        transferEmptyLabel,
+        eventEmptyLabel,
+        notes,
+        objectDigestHasNext,
+        globalSupplementApplied,
+        globalScanEarlyStop,
+        truncatedBalances,
+        truncatedEvents,
+        truncatedObjects,
+        scanLimitReached,
+        usedObjectScan,
+        transfers,
+        events,
+        objects,
+        matchedActivity,
+      };
+    });
+    const transfers = Array.isArray(scanData?.transfers) ? scanData.transfers : [];
+    const events = Array.isArray(scanData?.events) ? scanData.events : [];
+    const objects = Array.isArray(scanData?.objects) ? scanData.objects : [];
+    const matchedActivity = Array.isArray(scanData?.matchedActivity) ? scanData.matchedActivity : [];
+    const notes = Array.isArray(scanData?.notes) ? scanData.notes : [];
+    const directEventCount = Number(scanData?.directEventCount || 0);
+    const contextEventCount = Number(scanData?.contextEventCount || Math.max(0, events.length - directEventCount));
+    const matchedTxCount = Number(scanData?.matchedTxCount || 0);
+    const scannedTx = Number(scanData?.scannedTx || 0);
+    const scannedPages = Number(scanData?.scannedPages || 0);
+    const objectFallbackScannedObjects = Number(scanData?.objectFallbackScannedObjects || 0);
+    const objectFallbackScannedPages = Number(scanData?.objectFallbackScannedPages || 0);
+    const objectFallbackConsideredDigests = Number(scanData?.objectFallbackConsideredDigests || 0);
+    const objectFallbackLoadedTx = Number(scanData?.objectFallbackLoadedTx || 0);
+    const transferEmptyLabel = String(scanData?.transferEmptyLabel || "No recent transfers found for this coin type in sampled data.");
+    const eventEmptyLabel = String(scanData?.eventEmptyLabel || "No recent events referencing this coin type in sampled data.");
+    const activeMode = getCoinActivityScanMode(scanData?.scanMode || scanMode);
+    const modeLabel = COIN_ACTIVITY_SCAN_MODE_CONFIG[activeMode]?.label || "Fast";
+    const encodedCoinType = encodeURIComponent(coinType);
+    const fastScanHref = `#/coin?type=${encodedCoinType}&scan=1&supply=1&mode=fast`;
+    const fullScanHref = `#/coin?type=${encodedCoinType}&scan=1&supply=1&mode=full`;
+    const refreshScanHref = `#/coin?type=${encodedCoinType}&scan=1&supply=1&mode=${encodeURIComponent(activeMode)}&refresh=1`;
+    if (!notes.some((row) => String(row || "").toLowerCase().includes("scan mode"))) {
+      notes.unshift(`Scan mode: ${modeLabel} (object pages ≤ ${fmtNumber(OBJECT_SCAN_MAX_PAGES)}, object digest candidates ≤ ${fmtNumber(OBJECT_SCAN_MAX_DIGESTS)}, supplemental programmable txs ≤ ${fmtNumber(GLOBAL_SCAN_MAX_TX)}).`);
     }
-    if (globalScanEarlyStop) notes.push("Supplemental scan stopped early after consecutive pages without new coin matches.");
-    if (truncatedBalances || truncatedEvents || truncatedObjects) {
-      const fields = [];
-      if (truncatedBalances) fields.push("balanceChanges");
-      if (truncatedEvents) fields.push("events");
-      if (truncatedObjects) fields.push("objectChanges");
-      notes.push(`Some matched transactions exceed per-query page size for ${fields.join(", ")}.`);
-    }
-    const usedObjectScan = objectFallbackLoadedTx > 0;
-    if (usedObjectScan) {
-      notes.push(`Object-linked scan sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects across ${fmtNumber(objectFallbackScannedPages)} pages and loaded ${fmtNumber(objectFallbackLoadedTx)} transactions.`);
-    } else if (!transferRows.length && !eventRows.length && !objectRows.length && objectFallbackScannedObjects > 0) {
-      notes.push(`Object-linked scan sampled ${fmtNumber(objectFallbackScannedObjects)} Coin objects but did not find recent transactions in the sample.`);
-    }
-    const directEventCount = events.filter((row) => row.matchSource === "direct").length;
-    const contextEventCount = events.length - directEventCount;
-    const transferEmptyLabel = matchedTx.size
-      ? "No balance-change or coin-object ownership transfers found in sampled data. Recent activity can still appear in events/object changes below."
-      : "No recent transfers found for this coin type in sampled data.";
-    const eventEmptyLabel = matchedTx.size
-      ? "No events directly referenced this coin type in sampled data."
-      : "No recent events referencing this coin type in sampled data.";
 
     app.innerHTML = `
       <div class="page-title">Coin Search <span class="type-tag">${escapeHtml(symbol)}</span></div>
@@ -12275,7 +12931,7 @@ async function renderCoin(app, routeCoinType = "") {
             </div>
             <div class="stat-box">
               <div class="stat-label">Matched Tx</div>
-              <div class="stat-value">${fmtNumber(matchedTx.size)}</div>
+              <div class="stat-value">${fmtNumber(matchedTxCount)}</div>
               <div class="stat-sub">from ${fmtNumber(objectFallbackLoadedTx)} object-linked txs${scannedTx ? ` + ${fmtNumber(scannedTx)} supplemental txs` : ""}</div>
             </div>
             <div class="stat-box">
@@ -12314,6 +12970,7 @@ async function renderCoin(app, routeCoinType = "") {
             <div class="detail-row">
               <div class="detail-key">Scan Scope</div>
               <div class="detail-val">
+                ${escapeHtml(modeLabel)} mode:
                 ${fmtNumber(objectFallbackScannedObjects)} Coin objects across ${fmtNumber(objectFallbackScannedPages)} pages (${fmtNumber(objectFallbackConsideredDigests)} candidate tx digests, ${fmtNumber(objectFallbackLoadedTx)} loaded txs)
                 ${scannedTx ? `; supplemental programmable scan ${fmtNumber(scannedTx)} txs across ${fmtNumber(scannedPages)} pages` : ""}
               </div>
@@ -12321,6 +12978,13 @@ async function renderCoin(app, routeCoinType = "") {
           </div>
           ${iconUrl ? `<div class="u-fs12-dim u-mt8">Icon: <a class="hash-link" href="${escapeAttr(iconUrl)}" target="_blank" rel="noopener">coinMetadata.iconUrl</a></div>` : ""}
           ${notes.length ? `<div class="coin-scan-note">${notes.map(n => escapeHtml(n)).join(" ")}</div>` : ""}
+          <div class="coin-scan-note">
+            Activity scan mode:
+            <span class="badge">${escapeHtml(modeLabel)}</span>
+            <a class="btn-surface-sm" href="${fastScanHref}">Fast</a>
+            <a class="btn-surface-sm" href="${fullScanHref}">Full</a>
+            <a class="btn-surface-sm" href="${refreshScanHref}">Refresh</a>
+          </div>
         </div>
       </div>
 
@@ -12557,35 +13221,11 @@ async function renderTransfers(app) {
 }
 
 // ── Validators / Staking ────────────────────────────────────────────────
-async function renderValidators(app) {
-  app.innerHTML = `<div class="page-title">Validators</div><div class="card"><div class="card-body">${renderLoading()}</div></div>`;
-  // Fetch current epoch validators (paginated) + previous epoch for APY + epoch economics
-  let allValNodes = [];
-  let cursor = null;
-  let epochId = 0, refGas = "0", startTs = "";
-  for (let page = 0; page < 5; page++) {
-    const afterClause = cursor ? `, after: "${cursor}"` : "";
-    const q = `{ epoch { epochId startTimestamp referenceGasPrice validatorSet { activeValidators(first: 50${afterClause}) { pageInfo { hasNextPage endCursor } nodes { atRisk contents { json } } } } } }`;
-    const curEpoch = await gql(q);
-    epochId = curEpoch.epoch.epochId;
-    refGas = curEpoch.epoch.referenceGasPrice;
-    startTs = curEpoch.epoch.startTimestamp;
-    const av = curEpoch.epoch.validatorSet?.activeValidators;
-    allValNodes.push(...(av?.nodes || []));
-    if (!av?.pageInfo?.hasNextPage) break;
-    cursor = av.pageInfo.endCursor;
-  }
-  // Fetch previous epoch for APY + economics
-  const prevEpoch = await gql(`{ epoch(epochId: ${epochId - 1}) {
-    totalStakeRewards totalStakeSubsidies totalGasFees fundSize
-    fundInflow fundOutflow netInflow
-    totalTransactions totalCheckpoints
-    startTimestamp endTimestamp
-  } }`);
-  const prev = prevEpoch.epoch;
-
-  const validators = allValNodes.map(v => {
-    const j = v.contents?.json || {};
+async function renderValidators(app, opts = {}) {
+  const fullMode = !!opts?.full;
+  const seed = opts?.seed || null;
+  const toValidatorRow = (v) => {
+    const j = v?.contents?.json || {};
     const meta = j.metadata || {};
     const pool = j.staking_pool || {};
     const suiBal = Number(pool.sui_balance || 0);
@@ -12616,9 +13256,142 @@ async function renderValidators(app) {
       nextGasPrice,
       nextCommission,
       activationEpoch: Number(pool.activation_epoch || 0),
-      atRisk: v.atRisk || 0,
+      atRisk: v?.atRisk || 0,
     };
-  }).sort((a, b) => b.stake - a.stake);
+  };
+
+  if (!fullMode) {
+    app.innerHTML = `<div class="page-title">Validators</div><div class="card"><div class="card-body">${renderLoading()}</div></div>`;
+    const firstPage = await gql(`{
+      epoch {
+        epochId
+        startTimestamp
+        referenceGasPrice
+        validatorSet {
+          activeValidators(first: 50) {
+            pageInfo { hasNextPage endCursor }
+            nodes { atRisk contents { json } }
+          }
+        }
+      }
+    }`);
+    const ep = firstPage?.epoch || {};
+    const firstConn = ep?.validatorSet?.activeValidators || {};
+    const firstNodes = firstConn?.nodes || [];
+    const quickValidators = firstNodes.map(toValidatorRow).sort((a, b) => b.stake - a.stake);
+    const quickStake = quickValidators.reduce((s, v) => s + v.stake, 0);
+    app.innerHTML = `
+      <div class="page-title">Validators <span class="type-tag">Epoch ${fmtNumber(ep.epochId)}</span></div>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="stat-label">Loaded Validators</div>
+          <div class="stat-value">${fmtNumber(quickValidators.length)}</div>
+          <div class="stat-sub">${firstConn?.pageInfo?.hasNextPage ? "Loading remaining pages..." : "Page 1 complete"}</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Loaded Stake</div>
+          <div class="stat-value">${fmtCompact(quickStake / 1e9)}</div>
+          <div class="stat-sub">SUI (partial)</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Reference Gas Price</div>
+          <div class="stat-value">${fmtNumber(ep.referenceGasPrice)}</div>
+          <div class="stat-sub">MIST</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">Validator Set (Progressive Load)</div>
+        <div class="card-body">
+          <div class="u-fs12-dim u-mb12">Rendering first validator page immediately. Full analytics and remaining validators are loading in background.</div>
+          <table>
+            <thead><tr><th>#</th><th>Validator</th><th class="u-ta-right">Stake (SUI)</th><th class="u-ta-right">Voting %</th><th class="u-ta-right">Commission</th><th class="u-ta-right">Gas Price</th></tr></thead>
+            <tbody>
+              ${quickValidators.map((v, i) => `<tr>
+                <td class="u-c-dim">${i + 1}</td>
+                <td>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    ${v.imageUrl ? `<img src="${v.imageUrl}" data-hide-on-error="1" style="width:20px;height:20px;border-radius:50%;object-fit:cover">` : ""}
+                    <div>
+                      <div style="font-weight:500">${v.name}</div>
+                      <div class="u-fs11-dim">${truncHash(v.address)}</div>
+                    </div>
+                  </div>
+                </td>
+                <td class="u-ta-right-mono">${fmtCompact(v.stake / 1e9)}</td>
+                <td class="u-ta-right-mono">${(v.votingPower / 100).toFixed(2)}%</td>
+                <td class="u-ta-right-mono">${(v.commission / 100).toFixed(1)}%</td>
+                <td class="u-ta-right-mono">${fmtNumber(v.gasPrice)}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    Promise.resolve().then(() => renderValidators(app, {
+      full: true,
+      seed: {
+        epochId: ep?.epochId,
+        referenceGasPrice: ep?.referenceGasPrice,
+        startTimestamp: ep?.startTimestamp,
+        nodes: firstNodes,
+        hasNextPage: !!firstConn?.pageInfo?.hasNextPage,
+        endCursor: firstConn?.pageInfo?.endCursor || null,
+      },
+    })).catch(() => null);
+    return;
+  }
+
+  app.innerHTML = `<div class="page-title">Validators</div><div class="card"><div class="card-body">${renderLoading()}</div></div>`;
+  // Fetch current epoch validators (paginated) + previous epoch for APY + epoch economics
+  let allValNodes = Array.isArray(seed?.nodes) ? [...seed.nodes] : [];
+  let cursor = seed?.endCursor || null;
+  let epochId = Number(seed?.epochId || 0);
+  let refGas = seed?.referenceGasPrice || "0";
+  let startTs = seed?.startTimestamp || "";
+  if (!allValNodes.length) {
+    const firstPage = await gql(`{
+      epoch {
+        epochId
+        startTimestamp
+        referenceGasPrice
+        validatorSet {
+          activeValidators(first: 50) {
+            pageInfo { hasNextPage endCursor }
+            nodes { atRisk contents { json } }
+          }
+        }
+      }
+    }`);
+    const ep = firstPage?.epoch || {};
+    const firstConn = ep?.validatorSet?.activeValidators || {};
+    epochId = Number(ep?.epochId || 0);
+    refGas = ep?.referenceGasPrice || "0";
+    startTs = ep?.startTimestamp || "";
+    allValNodes = firstConn?.nodes || [];
+    cursor = firstConn?.pageInfo?.hasNextPage ? (firstConn?.pageInfo?.endCursor || null) : null;
+  }
+  for (let page = 0; page < 5 && cursor; page++) {
+    const afterClause = cursor ? `, after: "${cursor}"` : "";
+    const q = `{ epoch { epochId startTimestamp referenceGasPrice validatorSet { activeValidators(first: 50${afterClause}) { pageInfo { hasNextPage endCursor } nodes { atRisk contents { json } } } } } }`;
+    const curEpoch = await gql(q);
+    epochId = curEpoch.epoch.epochId;
+    refGas = curEpoch.epoch.referenceGasPrice;
+    startTs = curEpoch.epoch.startTimestamp;
+    const av = curEpoch.epoch.validatorSet?.activeValidators;
+    allValNodes.push(...(av?.nodes || []));
+    if (!av?.pageInfo?.hasNextPage) break;
+    cursor = av.pageInfo.endCursor;
+  }
+  // Fetch previous epoch for APY + economics
+  const prevEpoch = await gql(`{ epoch(epochId: ${epochId - 1}) {
+    totalStakeRewards totalStakeSubsidies totalGasFees fundSize
+    fundInflow fundOutflow netInflow
+    totalTransactions totalCheckpoints
+    startTimestamp endTimestamp
+  } }`);
+  const prev = prevEpoch.epoch;
+
+  const validators = allValNodes.map((v) => toValidatorRow(v)).sort((a, b) => b.stake - a.stake);
 
   const totalStake = validators.reduce((s, v) => s + v.stake, 0);
   const totalRewardsPool = validators.reduce((s, v) => s + v.rewards, 0);
@@ -13146,6 +13919,27 @@ async function renderEvents(app) {
   let senderFilter = routeParams.get("sender") || "";
   let eventsData = [];
   let fetchedAt = "";
+  const eventJsonCacheByTx = {};
+  const eventJsonInFlightByTx = {};
+
+  function packEventJsonPayload(value) {
+    if (value == null) return "";
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function unpackEventJsonPayload(value) {
+    if (typeof value !== "string") return value;
+    if (!value) return null;
+    try {
+      return JSON.parse(value);
+    } catch (_) {
+      return null;
+    }
+  }
 
   async function loadEvents() {
     const filters = [];
@@ -13158,8 +13952,10 @@ async function renderEvents(app) {
     }
     if (senderNorm) filters.push(`sender: ${JSON.stringify(senderNorm)}`);
     const filterArg = filters.length ? `filter: { ${filters.join(", ")} }` : "";
-    const data = await gql(`{ events(last: 50 ${filterArg}) { nodes { contents { type { repr } json } sender { address } timestamp transaction { digest } transactionModule { name package { address } } } } }`);
+    const data = await gql(`{ events(last: 50 ${filterArg}) { nodes { contents { type { repr } } sender { address } timestamp transaction { digest } transactionModule { name package { address } } } } }`);
     eventsData = data?.events?.nodes || [];
+    for (const key of Object.keys(eventJsonCacheByTx)) delete eventJsonCacheByTx[key];
+    for (const key of Object.keys(eventJsonInFlightByTx)) delete eventJsonInFlightByTx[key];
     fetchedAt = new Date().toISOString();
   }
 
@@ -13172,7 +13968,35 @@ async function renderEvents(app) {
     const allPkgs = [...new Set([...emitPkgs, ...typePkgs])];
     if (allPkgs.length) await resolvePackageNames(allPkgs);
   }
-  await resolveEventPkgs();
+  async function ensureEventJsonForTx(digest) {
+    const key = String(digest || "");
+    if (!key) return [];
+    if (Array.isArray(eventJsonCacheByTx[key])) return eventJsonCacheByTx[key];
+    if (eventJsonInFlightByTx[key]) return eventJsonInFlightByTx[key];
+    eventJsonInFlightByTx[key] = (async () => {
+      try {
+        const data = await gql(`query($digest: String!) {
+          transaction(digest: $digest) {
+            effects {
+              events(first: 100) {
+                nodes { contents { json } }
+              }
+            }
+          }
+        }`, { digest: key });
+        const rows = data?.transaction?.effects?.events?.nodes || [];
+        const payloads = rows.map((row) => packEventJsonPayload(row?.contents?.json ?? null));
+        eventJsonCacheByTx[key] = payloads;
+        return payloads;
+      } catch (_) {
+        eventJsonCacheByTx[key] = [];
+        return [];
+      } finally {
+        delete eventJsonInFlightByTx[key];
+      }
+    })();
+    return eventJsonInFlightByTx[key];
+  }
 
   // Helper: replace package address in type repr with MVR name
   function mvrType(repr) {
@@ -13254,11 +14078,10 @@ async function renderEvents(app) {
           </div>
           <div class="card-body" id="${groupId}" style="padding:0">
             <table style="margin:0"><thead><tr><th>Event Type</th><th>Module</th><th>Data</th></tr></thead><tbody>`;
-        for (const ev of group.events) {
+        for (let groupEventIdx = 0; groupEventIdx < group.events.length; groupEventIdx += 1) {
+          const ev = group.events[groupEventIdx];
           const typeRepr = ev.contents?.type?.repr || "—";
           const modName = ev.transactionModule?.name || "—";
-          const hasJson = ev.contents?.json && Object.keys(ev.contents.json).length > 0;
-          const keyCount = hasJson ? Object.keys(ev.contents.json).length : 0;
           const typeShort = typeRepr.replace(/^0x[0-9a-f]{64}::/, "");
           const typeDisplay = (() => {
             const typePkgMatch = typeRepr.match(/^(0x[0-9a-f]{64})::/);
@@ -13266,14 +14089,21 @@ async function renderEvents(app) {
             return typeShort;
           })();
           const rowId = `evt-row-${evtIdx++}`;
+          const payloads = eventJsonCacheByTx[group.digest];
+          const payloadKnown = Array.isArray(payloads) && groupEventIdx < payloads.length;
+          const payload = payloadKnown ? unpackEventJsonPayload(payloads[groupEventIdx]) : undefined;
+          const dataBtnLabel = payloadKnown
+            ? (payload ? "View JSON" : "No JSON")
+            : "Load JSON";
           html += `<tr>
             <td style="font-family:var(--mono);font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${typeRepr}">${typeDisplay}</td>
             <td class="u-fs12-dim">${modName}</td>
-            <td>${hasJson ? `<button data-action="events-toggle-json" data-row-id="${rowId}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">{${keyCount}} fields</button>` : '<span class="u-c-dim">—</span>'}</td>
+            <td><button data-action="events-toggle-json" data-row-id="${rowId}" data-tx-digest="${escapeAttr(group.digest)}" data-event-idx="${groupEventIdx}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">${dataBtnLabel}</button></td>
           </tr>`;
-          if (hasJson) {
-            html += `<tr id="${rowId}" style="display:none"><td colspan="3" style="padding:0 8px 8px">${jsonTreeBlock(ev.contents.json, 280)}</td></tr>`;
-          }
+          const payloadHtml = !payloadKnown
+            ? `<div class="u-fs12-dim">JSON payload not loaded.</div>`
+            : (payload ? jsonTreeBlock(payload, 280) : `<div class="u-fs12-dim">No JSON payload for this event.</div>`);
+          html += `<tr id="${rowId}" style="display:none"><td colspan="3" style="padding:0 8px 8px">${payloadHtml}</td></tr>`;
         }
         html += `</tbody></table></div></div>`;
       }
@@ -13290,8 +14120,11 @@ async function renderEvents(app) {
     });
     app.innerHTML = renderLoading();
     await loadEvents();
-    await resolveEventPkgs();
     app.innerHTML = renderEventsContent();
+    resolveEventPkgs().then(() => {
+      if (parseRoute(getRoute()).page !== "events") return;
+      app.innerHTML = renderEventsContent();
+    }).catch(() => null);
   };
 
   if (app._eventsClickHandler) app.removeEventListener("click", app._eventsClickHandler);
@@ -13311,8 +14144,35 @@ async function renderEvents(app) {
       const row = document.getElementById(rowId);
       if (!row) return;
       const expanded = row.style.display === "table-row";
-      row.style.display = expanded ? "none" : "table-row";
-      trigger.setAttribute("aria-expanded", expanded ? "false" : "true");
+      if (expanded) {
+        row.style.display = "none";
+        trigger.setAttribute("aria-expanded", "false");
+        return;
+      }
+      const digest = trigger.getAttribute("data-tx-digest") || "";
+      const eventIdx = Number(trigger.getAttribute("data-event-idx"));
+      const validIdx = Number.isFinite(eventIdx) ? Math.max(0, Math.floor(eventIdx)) : 0;
+      if (!Array.isArray(eventJsonCacheByTx[digest])) {
+        trigger.setAttribute("disabled", "disabled");
+        const prevLabel = trigger.textContent;
+        trigger.textContent = "Loading...";
+        await ensureEventJsonForTx(digest);
+        trigger.removeAttribute("disabled");
+        const payloads = eventJsonCacheByTx[digest];
+        const payload = Array.isArray(payloads) ? unpackEventJsonPayload(payloads[validIdx]) : undefined;
+        trigger.textContent = payload === undefined
+          ? (prevLabel || "Load JSON")
+          : (payload ? "View JSON" : "No JSON");
+      }
+      const payloads = eventJsonCacheByTx[digest];
+      const payload = Array.isArray(payloads) ? unpackEventJsonPayload(payloads[validIdx]) : undefined;
+      row.innerHTML = `<td colspan="3" style="padding:0 8px 8px">${
+        payload === undefined
+          ? '<div class="u-fs12-dim">JSON payload unavailable.</div>'
+          : (payload ? jsonTreeBlock(payload, 280) : '<div class="u-fs12-dim">No JSON payload for this event.</div>')
+      }</td>`;
+      row.style.display = "table-row";
+      trigger.setAttribute("aria-expanded", "true");
     }
     if (action === "events-toggle-group") {
       ev.preventDefault();
@@ -13326,6 +14186,10 @@ async function renderEvents(app) {
   };
   app.addEventListener("click", app._eventsClickHandler);
   app.innerHTML = renderEventsContent();
+  resolveEventPkgs().then(() => {
+    if (parseRoute(getRoute()).page !== "events") return;
+    app.innerHTML = renderEventsContent();
+  }).catch(() => null);
 }
 
 function defiCategoryColor(category) {
