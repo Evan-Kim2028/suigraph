@@ -3065,6 +3065,16 @@ function viewQueryBtn(queryKey, params = {}) {
 // ── Coin Metadata Cache ─────────────────────────────────────────────────
 const coinMetaCache = {};
 const coinTotalSupplyRpcCache = {};
+const coinTxMetaDigestCache = {};
+const coinTxDetailDigestCache = {};
+
+function prunePlainObjectCache(obj, maxEntries = 2500) {
+  const keys = Object.keys(obj || {});
+  if (keys.length <= maxEntries) return;
+  const drop = Math.max(1, keys.length - maxEntries);
+  for (let i = 0; i < drop; i += 1) delete obj[keys[i]];
+}
+
 async function fetchCoinObjectSupplySnapshot(coinType, { maxObjects = 1200, maxPages = 32 } = {}) {
   const coinObjType = `0x2::coin::Coin<${coinType}>`;
   let after = null;
@@ -3328,8 +3338,13 @@ function parseRoute(route) {
   if (parts[0] === "checkpoints") return { page: "checkpoints" };
   if (parts[0] === "tx" && parts[1]) return { page: "tx", digest: parts[1] };
   if (parts[0] === "txs") return { page: "txs" };
-  if (parts[0] === "address" && parts[1]) return { page: "address", addr: parts[1] };
-  if (parts[0] === "object" && parts[1]) return { page: "object", id: parts[1] };
+  if (parts[0] === "address" && parts[1]) return { page: "address", addr: decodeURIComponent(parts[1]) };
+  if (parts[0] === "object" && parts[1]) {
+    const rawId = decodeURIComponent(parts[1]);
+    const coinType = normalizeCoinTypeQueryInput(rawId);
+    if (coinType) return { page: "coin", coinType };
+    return { page: "object", id: rawId };
+  }
   if (parts[0] === "coin") return { page: "coin", coinType: routeParams.get("type") || "" };
   if (parts[0] === "graphql") return { page: "graphql" };
   if (parts[0] === "epoch" && parts[1]) return { page: "epoch", id: parts[1] };
@@ -6382,9 +6397,17 @@ function txMovePackages(tx) {
 }
 
 function normalizeSuiAddress(addr) {
-  const s = String(addr || "").trim().toLowerCase();
-  if (!s) return "";
-  return s.startsWith("0x") ? s : ("0x" + s);
+  const raw = String(addr || "").trim().toLowerCase();
+  if (!raw) return "";
+  let hex = raw.startsWith("0x") ? raw.slice(2) : raw;
+  if (!hex || !/^[0-9a-f]+$/.test(hex)) return "";
+  if (hex.length > 64) {
+    const trimmed = hex.replace(/^0+/, "");
+    if (!trimmed || trimmed.length > 64) return "";
+    hex = trimmed;
+  }
+  hex = hex.replace(/^0+/, "") || "0";
+  return "0x" + hex;
 }
 
 function packageFromTypeRepr(repr) {
@@ -8846,6 +8869,18 @@ async function fetchAftermathPerpsPositions(addr) {
 
 // ── Address View ────────────────────────────────────────────────────────
 async function renderAddress(app, addr) {
+  const rawAddr = decodeURIComponent(String(addr || ""));
+  const addrNorm = normalizeSuiAddress(rawAddr);
+  if (!addrNorm) {
+    const asCoinType = normalizeCoinTypeQueryInput(rawAddr);
+    if (asCoinType) {
+      navigate("/coin?type=" + encodeURIComponent(asCoinType));
+      return;
+    }
+    app.innerHTML = renderEmpty(`Invalid address: ${escapeHtml(rawAddr || String(addr || ""))}`);
+    return;
+  }
+
   const data = await gql(`query($addr: SuiAddress!) {
     address(address: $addr) {
       address
@@ -8864,11 +8899,11 @@ async function renderAddress(app, addr) {
         }
       }
     }
-  }`, { addr });
+  }`, { addr: addrNorm });
 
   // If address query returns null, try as object
   if (!data.address) {
-    return renderObjectDetail(app, addr);
+    return renderObjectDetail(app, addrNorm);
   }
 
   const a = data.address;
@@ -9942,6 +9977,18 @@ async function renderDeletedObjectDetail(app, id) {
 }
 
 async function renderObjectDetail(app, id) {
+  const rawId = decodeURIComponent(String(id || ""));
+  const idNorm = normalizeSuiAddress(rawId);
+  if (!idNorm) {
+    const asCoinType = normalizeCoinTypeQueryInput(rawId);
+    if (asCoinType) {
+      navigate("/coin?type=" + encodeURIComponent(asCoinType));
+      return;
+    }
+    app.innerHTML = renderEmpty(`Invalid object ID: ${escapeHtml(rawId || String(id || ""))}`);
+    return;
+  }
+
   const data = await gql(`query($id: SuiAddress!) {
     object(address: $id) {
       address version digest storageRebate
@@ -9973,11 +10020,11 @@ async function renderObjectDetail(app, id) {
         }
       }
     }
-  }`, { id });
+  }`, { id: idNorm });
 
   const obj = data.object;
   if (!obj) {
-    await renderDeletedObjectDetail(app, id);
+    await renderDeletedObjectDetail(app, idNorm);
     return;
   }
 
@@ -11322,7 +11369,7 @@ async function renderCoin(app, routeCoinType = "") {
     return approx.toExponential(2);
   }
 
-  async function fetchCoinObjectDigestCandidates(coinTypeValue, { maxPages = 12, maxDigests = 600 } = {}) {
+  async function fetchCoinObjectDigestCandidates(coinTypeValue, { maxPages = 8, maxDigests = 280 } = {}) {
     const coinObjectType = `0x2::coin::Coin<${coinTypeValue}>`;
     let after = null;
     let hasNext = true;
@@ -11368,29 +11415,49 @@ async function renderCoin(app, routeCoinType = "") {
   }
 
   async function fetchCoinTxMetaRowsByDigest(digests) {
-    const chunkRows = await mapChunksWithLimit(digests || [], 30, 4, async (chunk) => {
+    const uniqueDigests = [...new Set((digests || []).filter(Boolean))];
+    const rows = [];
+    const missing = [];
+    for (const digest of uniqueDigests) {
+      const cached = coinTxMetaDigestCache[digest];
+      if (cached) rows.push(cached);
+      else missing.push(digest);
+    }
+    const chunkRows = await mapChunksWithLimit(missing, 30, 6, async (chunk) => {
       if (!chunk.length) return [];
       const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") { digest effects { status timestamp } }`);
       const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
       if (!data) return [];
-      const rows = [];
+      const out = [];
       for (let i = 0; i < chunk.length; i += 1) {
         const tx = data?.[`t${i}`];
         if (!tx?.digest) continue;
-        rows.push({
+        const row = {
           digest: tx.digest,
           timestamp: tx?.effects?.timestamp || "",
           status: tx?.effects?.status || "",
-        });
+        };
+        out.push(row);
+        coinTxMetaDigestCache[row.digest] = row;
       }
-      return rows;
+      prunePlainObjectCache(coinTxMetaDigestCache, 4000);
+      return out;
     });
-    return chunkRows.flat();
+    rows.push(...chunkRows.flat());
+    return rows;
   }
 
   async function fetchCoinTxDetailsByDigest(digests) {
+    const uniqueDigests = [...new Set((digests || []).filter(Boolean))];
+    const rows = [];
+    const missing = [];
+    for (const digest of uniqueDigests) {
+      const cached = coinTxDetailDigestCache[digest];
+      if (cached) rows.push(cached);
+      else missing.push(digest);
+    }
     // Keep payload below Sui GraphQL 5KB request cap.
-    const chunkRows = await mapChunksWithLimit(digests || [], 2, 3, async (chunk) => {
+    const chunkRows = await mapChunksWithLimit(missing, 2, 4, async (chunk) => {
       if (!chunk.length) return [];
       const aliases = chunk.map((digest, i) => `t${i}: transaction(digest: "${digest}") {
         digest
@@ -11438,14 +11505,18 @@ async function renderCoin(app, routeCoinType = "") {
       }`);
       const data = await gql(`{ ${aliases.join("\n")} }`).catch(() => null);
       if (!data) return [];
-      const rows = [];
+      const out = [];
       for (let i = 0; i < chunk.length; i += 1) {
         const tx = data?.[`t${i}`];
-        if (tx?.digest) rows.push(tx);
+        if (!tx?.digest) continue;
+        out.push(tx);
+        coinTxDetailDigestCache[tx.digest] = tx;
       }
-      return rows;
+      prunePlainObjectCache(coinTxDetailDigestCache, 1500);
+      return out;
     });
-    return chunkRows.flat();
+    rows.push(...chunkRows.flat());
+    return rows;
   }
 
   try {
@@ -11499,10 +11570,12 @@ async function renderCoin(app, routeCoinType = "") {
     const MAX_SCAN_TX = 220;
     const PAGE_SIZE = 20;
     const RESULT_LIMIT = 50;
+    const EARLY_EMPTY_PAGE_THRESHOLD = 4;
     let scannedTx = 0;
     let scannedPages = 0;
     let before = null;
     let hasPreviousPage = true;
+    let stoppedForTargetedFallback = false;
     const matchedTx = new Set();
     let truncatedBalances = false;
     let truncatedEvents = false;
@@ -11723,6 +11796,11 @@ async function renderCoin(app, routeCoinType = "") {
 
       for (const tx of txs) ingestCoinTransaction(tx);
 
+      if (!matchedTx.size && scannedPages >= EARLY_EMPTY_PAGE_THRESHOLD) {
+        stoppedForTargetedFallback = true;
+        break;
+      }
+
       hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
       before = conn?.pageInfo?.startCursor || null;
       if (transferRows.length >= RESULT_LIMIT && eventRows.length >= RESULT_LIMIT && objectRows.length >= RESULT_LIMIT) break;
@@ -11736,7 +11814,7 @@ async function renderCoin(app, routeCoinType = "") {
 
     if (!transferRows.length && !eventRows.length && !objectRows.length) {
       try {
-        const digestCandidates = await fetchCoinObjectDigestCandidates(coinType, { maxPages: 12, maxDigests: 600 });
+        const digestCandidates = await fetchCoinObjectDigestCandidates(coinType);
         objectFallbackScannedObjects = digestCandidates?.sampledObjects || 0;
         objectFallbackScannedPages = digestCandidates?.pages || 0;
         const candidates = (digestCandidates?.digests || []).filter((d) => d && !matchedTx.has(d));
@@ -11744,7 +11822,7 @@ async function renderCoin(app, routeCoinType = "") {
         if (candidates.length) {
           const metaRows = await fetchCoinTxMetaRowsByDigest(candidates);
           metaRows.sort(sortRecent);
-          const topDigests = metaRows.map((row) => row.digest).filter(Boolean).slice(0, 90);
+          const topDigests = metaRows.map((row) => row.digest).filter(Boolean).slice(0, 60);
           const txRows = await fetchCoinTxDetailsByDigest(topDigests);
           objectFallbackLoadedTx = txRows.length;
           for (const tx of txRows) ingestCoinTransaction(tx);
@@ -11764,6 +11842,9 @@ async function renderCoin(app, routeCoinType = "") {
     const scanLimitReached = scannedTx >= MAX_SCAN_TX && hasPreviousPage;
     const notes = [];
     if (scanLimitReached) notes.push(`Reached scan cap at ${fmtNumber(MAX_SCAN_TX)} transactions; older activity may exist.`);
+    if (stoppedForTargetedFallback) {
+      notes.push(`No matches in initial ${fmtNumber(scannedTx)}-tx fast scan; switched to object-linked fallback.`);
+    }
     if (truncatedBalances || truncatedEvents || truncatedObjects) {
       const fields = [];
       if (truncatedBalances) fields.push("balanceChanges");
