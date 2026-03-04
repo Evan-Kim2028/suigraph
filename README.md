@@ -138,23 +138,22 @@ site-builder --context=mainnet deploy ./dist --epochs 10 --ws-resources ./ws-res
 
 Notes:
 - The `deploy` command creates a site on first run, then updates the same site on subsequent runs.
-- The site object ID is tracked in `site/ws-resources.json` (via `object_id`) when you pass `--ws-resources ./ws-resources.json`.
+- The canonical site object ID is tracked in `site/ws-resources.json` (via `object_id`) when you pass `--ws-resources ./ws-resources.json`.
+- `site/dist/ws-resources.json` is a generated copy from build/deploy output; do not treat it as the canonical source.
 - `wal.app` serves mainnet-linked sites; testnet generally requires running your own portal.
 
-## Current Walrus Deployment
+## Current Walrus Deployment (as of 2026-03-04)
 
 | Field | Value |
 |-------|-------|
-| Site Object ID | `0xab8338106e896d9145353a27d773a3dfa5086492c9c262dec274b023c602f4b4` |
-| Epochs | 5 |
-| Expiry | 2026-05-05 |
+| Site Object ID | `0xa1248f83831fd952680649e461899a59647f6f1fefc6397a77d387dc01a7d732` |
+| Source of Truth | `site/ws-resources.json` (`object_id`) |
 | SuiNS Name | `suigraph-explorer` |
 | Public URL | [https://suigraph-explorer.wal.app](https://suigraph-explorer.wal.app) |
 | Network | Mainnet |
-| Deployer Wallet | `blissful-moonstone` (Sui keystore alias) |
 | site-builder Version | 2.6.0 |
 
-The site object ID is also tracked in `site/dist/ws-resources.json` under the `object_id` field. Future `site-builder deploy` commands will automatically update this same object.
+Future `site-builder deploy` commands with the same `--ws-resources ./ws-resources.json` file update the same object ID in place.
 
 ## Additional Project Docs
 

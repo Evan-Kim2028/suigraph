@@ -304,6 +304,7 @@ function initPerfTooltip(el) {
 
 // ── Config ──────────────────────────────────────────────────────────────
 const GQL = "https://graphql.mainnet.sui.io/graphql";
+const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 
 // ── DeFi Protocol Constants ────────────────────────────────────────────
 // Pool oracle: on-chain pricing via Cetus + Bluefin CLMM pools
@@ -934,6 +935,50 @@ async function gql(query, variables = {}) {
     if (!json.data) throw new Error(json.errors[0]?.message || "GraphQL query failed");
   }
   return json.data;
+}
+
+async function suiRpcCall(method, params = []) {
+  const payload = JSON.stringify({
+    jsonrpc: "2.0",
+    id: `${method}:${Date.now()}`,
+    method,
+    params,
+  });
+  const res = await fetch(SUI_RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload,
+  });
+  const raw = await res.text();
+  let json = {};
+  try {
+    json = raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    throw new Error("Invalid RPC JSON response");
+  }
+  if (!res.ok) {
+    throw new Error(json?.error?.message || `RPC request failed (${res.status})`);
+  }
+  if (json?.error) {
+    throw new Error(json.error?.message || "RPC request failed");
+  }
+  return json?.result;
+}
+
+function formatSupplyUnavailableReason(msg) {
+  const text = String(msg || "").trim();
+  if (!text) return "Supply lookup unavailable for this coin type.";
+  const lower = text.toLowerCase();
+  if (lower.includes("treasurycap") || lower.includes("treasury cap")) {
+    return "No TreasuryCap was found for this coin type.";
+  }
+  if (lower.includes("package-created objects")) {
+    return "No package-created TreasuryCap was found for this coin type.";
+  }
+  if (lower.includes("not found")) {
+    return "Supply object was not found on-chain for this coin type.";
+  }
+  return text;
 }
 
 function uniqueNormalizedAddresses(addresses) {
@@ -1821,6 +1866,7 @@ function viewQueryBtn(queryKey, params = {}) {
 
 // ── Coin Metadata Cache ─────────────────────────────────────────────────
 const coinMetaCache = {};
+const coinTotalSupplyRpcCache = {};
 async function getCoinMeta(coinType) {
   if (!coinType) return null;
   if (coinMetaCache[coinType]) return coinMetaCache[coinType];
@@ -1832,6 +1878,33 @@ async function getCoinMeta(coinType) {
     }
   } catch (e) { /* ignore */ }
   return null;
+}
+
+async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {
+  const candidates = [...new Set([coinType, shortCoinType].filter(Boolean))];
+  if (!candidates.length) return { value: null, source: "", note: "No coin type provided." };
+  const cacheKey = candidates.map(coinTypeKey).filter(Boolean)[0] || coinTypeKey(candidates[0]);
+  if (cacheKey && coinTotalSupplyRpcCache[cacheKey]) return coinTotalSupplyRpcCache[cacheKey];
+  const run = (async () => {
+    let lastErr = "";
+    for (const ct of candidates) {
+      try {
+        const result = await suiRpcCall("suix_getTotalSupply", [ct]);
+        if (result?.value != null) {
+          return { value: String(result.value), source: "suix_getTotalSupply", note: "" };
+        }
+      } catch (e) {
+        lastErr = e?.message || String(e);
+      }
+    }
+    return {
+      value: null,
+      source: "suix_getTotalSupply",
+      note: formatSupplyUnavailableReason(lastErr),
+    };
+  })();
+  if (cacheKey) coinTotalSupplyRpcCache[cacheKey] = run;
+  return run;
 }
 
 // Batch-fetch metadata for multiple coin types at once (via aliases)
@@ -9957,6 +10030,14 @@ async function renderCoin(app, routeCoinType = "") {
     return `${hashLink(first, "/address/" + first)}${extra}`;
   }
 
+  function parseOwnerInfo(owner) {
+    if (owner?.initialSharedVersion != null) return { address: "", kind: "shared" };
+    if (owner?.__typename === "Immutable") return { address: "", kind: "immutable" };
+    const address = normalizeSuiAddress(owner?.address?.address || "");
+    if (address) return { address, kind: "address" };
+    return { address: "", kind: "" };
+  }
+
   function fmtCoinAbs(raw, decimals) {
     const bi = typeof raw === "bigint" ? raw : parseBigIntSafe(raw);
     if (bi <= 0n) return "0";
@@ -9982,8 +10063,24 @@ async function renderCoin(app, routeCoinType = "") {
       ? Number(coinMeta.decimals)
       : Number(resolved?.decimals || 9);
     const iconUrl = String(coinMeta?.iconUrl || "");
-    const supplyRaw = parseBigIntSafe(coinMeta?.supply ?? 0);
-    const hasSupply = coinMeta?.supply != null;
+    let supplySource = "";
+    let supplyUnavailableReason = "";
+    let supplyRaw = 0n;
+    let hasSupply = false;
+    if (coinMeta?.supply != null) {
+      hasSupply = true;
+      supplyRaw = parseBigIntSafe(coinMeta.supply);
+      supplySource = "coinMetadata.supply";
+    } else {
+      const rpcSupply = await fetchCoinTotalSupplyRpc(coinType, shortCoinType).catch(() => null);
+      if (rpcSupply?.value != null) {
+        hasSupply = true;
+        supplyRaw = parseBigIntSafe(rpcSupply.value);
+      } else {
+        supplyUnavailableReason = rpcSupply?.note || "coinMetadata.supply unavailable";
+      }
+      supplySource = rpcSupply?.source || "unavailable";
+    }
     const supplyExact = hasSupply ? scaledBigIntToText(supplyRaw, decimals, 8) : "—";
     const supplyApprox = hasSupply ? scaledBigIntAbsToApprox(supplyRaw, decimals, 8) : NaN;
     const supplyDisplay = hasSupply
@@ -10010,6 +10107,7 @@ async function renderCoin(app, routeCoinType = "") {
     const transferRows = [];
     const eventRows = [];
     const objectRows = [];
+    const matchedActivityRows = [];
 
     while (hasPreviousPage && scannedTx < MAX_SCAN_TX) {
       const data = await gql(`query($before: String) {
@@ -10038,7 +10136,16 @@ async function renderCoin(app, routeCoinType = "") {
                 pageInfo { hasNextPage }
                 nodes {
                   address idCreated idDeleted
-                  inputState { version asMoveObject { contents { type { repr } } } }
+                  inputState {
+                    version
+                    owner {
+                      ... on AddressOwner { address { address } }
+                      ... on ObjectOwner { address { address } }
+                      ... on Shared { initialSharedVersion }
+                      ... on Immutable { __typename }
+                    }
+                    asMoveObject { contents { type { repr } } }
+                  }
                   outputState {
                     version
                     owner {
@@ -10065,12 +10172,19 @@ async function renderCoin(app, routeCoinType = "") {
 
       for (const tx of txs) {
         const eff = tx?.effects || {};
-        let txHasMatch = false;
+        let txHasTransferMatch = false;
+        let txHasObjectMatch = false;
+        let txHasDirectEventMatch = false;
+        let txHasContextEventMatch = false;
+        let txObjectMatchCount = 0;
+        let txBalanceMatchCount = 0;
+        const contextualEventCandidates = [];
 
         const coinBalanceRows = (eff?.balanceChanges?.nodes || [])
           .filter((bc) => coinTypeKey(bc?.coinType?.repr || "") === targetKey);
         if (coinBalanceRows.length) {
-          txHasMatch = true;
+          txHasTransferMatch = true;
+          txBalanceMatchCount = coinBalanceRows.length;
           if (eff?.balanceChanges?.pageInfo?.hasNextPage) truncatedBalances = true;
           let sentRaw = 0n;
           let recvRaw = 0n;
@@ -10106,9 +10220,7 @@ async function renderCoin(app, routeCoinType = "") {
         for (const ev of (eff?.events?.nodes || [])) {
           const typeRepr = String(ev?.contents?.type?.repr || "");
           const json = ev?.contents?.json;
-          if (!moveTypeStringHasCoinType(typeRepr, targetKey) && !valueHasCoinType(json, targetKey)) continue;
-          txHasMatch = true;
-          eventRows.push({
+          const row = {
             digest: tx?.digest || "",
             timestamp: ev?.timestamp || eff?.timestamp || "",
             status: eff?.status || "",
@@ -10117,7 +10229,13 @@ async function renderCoin(app, routeCoinType = "") {
             moduleName: ev?.transactionModule?.name || "",
             modulePackage: normalizeSuiAddress(ev?.transactionModule?.package?.address || ""),
             jsonPreview: summarizeCoinJson(json),
-          });
+          };
+          if (moveTypeStringHasCoinType(typeRepr, targetKey) || valueHasCoinType(json, targetKey)) {
+            txHasDirectEventMatch = true;
+            eventRows.push({ ...row, matchSource: "direct" });
+          } else {
+            contextualEventCandidates.push(row);
+          }
         }
 
         if (eff?.objectChanges?.pageInfo?.hasNextPage) truncatedObjects = true;
@@ -10125,24 +10243,72 @@ async function renderCoin(app, routeCoinType = "") {
           const inputType = String(oc?.inputState?.asMoveObject?.contents?.type?.repr || "");
           const outputType = String(oc?.outputState?.asMoveObject?.contents?.type?.repr || "");
           if (!moveTypeStringHasCoinType(inputType, targetKey) && !moveTypeStringHasCoinType(outputType, targetKey)) continue;
-          txHasMatch = true;
-          const ownerAddress = normalizeSuiAddress(oc?.outputState?.owner?.address?.address || "");
-          let ownerKind = "";
-          if (oc?.outputState?.owner?.initialSharedVersion != null) ownerKind = "shared";
-          else if (oc?.outputState?.owner?.__typename === "Immutable") ownerKind = "immutable";
+          txHasObjectMatch = true;
+          txObjectMatchCount += 1;
+          const inputOwner = parseOwnerInfo(oc?.inputState?.owner);
+          const outputOwner = parseOwnerInfo(oc?.outputState?.owner);
+          const ownerAddress = outputOwner.address;
+          const ownerKind = outputOwner.kind;
+          const objectId = normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || "");
+          const typeRepr = outputType || inputType || "";
           objectRows.push({
             digest: tx?.digest || "",
             timestamp: eff?.timestamp || "",
             status: eff?.status || "",
-            objectId: normalizeSuiAddress(oc?.address || oc?.idCreated || oc?.idDeleted || ""),
+            objectId,
             changeKind: oc?.idCreated ? "Created" : (oc?.idDeleted ? "Deleted" : "Mutated"),
-            typeRepr: outputType || inputType || "",
+            typeRepr,
             ownerAddress,
             ownerKind,
           });
+
+          const ownerChanged = (
+            (inputOwner.address || outputOwner.address || inputOwner.kind || outputOwner.kind) &&
+            (inputOwner.address !== outputOwner.address || inputOwner.kind !== outputOwner.kind)
+          );
+          const isCoinObject = /::coin::Coin\s*</.test(typeRepr);
+          if (ownerChanged && isCoinObject) {
+            txHasTransferMatch = true;
+            const fromRows = inputOwner.address ? [inputOwner.address] : [];
+            const toRows = outputOwner.address ? [outputOwner.address] : [];
+            transferRows.push({
+              digest: tx?.digest || "",
+              timestamp: eff?.timestamp || "",
+              status: eff?.status || "",
+              fromRows,
+              toRows,
+              amountRaw: null,
+              kind: "object-transfer",
+              fromHint: !fromRows.length ? (inputOwner.kind || "") : "",
+              toHint: !toRows.length ? (outputOwner.kind || "") : "",
+            });
+          }
         }
 
-        if (txHasMatch && tx?.digest) matchedTx.add(tx.digest);
+        if (!txHasDirectEventMatch && contextualEventCandidates.length && (txHasTransferMatch || txHasObjectMatch)) {
+          const maxContextRows = 8;
+          const contextRows = contextualEventCandidates.slice(0, maxContextRows);
+          if (contextualEventCandidates.length > maxContextRows) truncatedEvents = true;
+          for (const row of contextRows) eventRows.push({ ...row, matchSource: "context" });
+          if (contextRows.length) txHasContextEventMatch = true;
+        }
+
+        const txHasMatch = txHasTransferMatch || txHasObjectMatch || txHasDirectEventMatch || txHasContextEventMatch;
+        if (txHasMatch && tx?.digest) {
+          matchedTx.add(tx.digest);
+          const signals = [];
+          if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
+          if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
+          if (txHasDirectEventMatch) signals.push("direct event");
+          if (txHasContextEventMatch) signals.push("context events");
+          matchedActivityRows.push({
+            digest: tx.digest,
+            timestamp: eff?.timestamp || "",
+            status: eff?.status || "",
+            sender: normalizeSuiAddress(tx?.sender?.address || ""),
+            signals: signals.join(" · "),
+          });
+        }
       }
 
       hasPreviousPage = !!conn?.pageInfo?.hasPreviousPage;
@@ -10158,9 +10324,11 @@ async function renderCoin(app, routeCoinType = "") {
     transferRows.sort(sortRecent);
     eventRows.sort(sortRecent);
     objectRows.sort(sortRecent);
+    matchedActivityRows.sort(sortRecent);
     const transfers = transferRows.slice(0, RESULT_LIMIT);
     const events = eventRows.slice(0, RESULT_LIMIT);
     const objects = objectRows.slice(0, RESULT_LIMIT);
+    const matchedActivity = matchedActivityRows.slice(0, RESULT_LIMIT);
 
     const scanLimitReached = scannedTx >= MAX_SCAN_TX && hasPreviousPage;
     const notes = [];
@@ -10172,6 +10340,14 @@ async function renderCoin(app, routeCoinType = "") {
       if (truncatedObjects) fields.push("objectChanges");
       notes.push(`Some matched transactions exceed per-query page size for ${fields.join(", ")}.`);
     }
+    const directEventCount = events.filter((row) => row.matchSource === "direct").length;
+    const contextEventCount = events.length - directEventCount;
+    const transferEmptyLabel = matchedTx.size
+      ? "No balance-change or coin-object ownership transfers found in scanned transactions. Recent activity can still appear in events/object changes below."
+      : "No recent transfers found for this coin type in scanned transactions.";
+    const eventEmptyLabel = matchedTx.size
+      ? "No events directly referenced this coin type in scanned transactions."
+      : "No recent events referencing this coin type in scanned transactions.";
 
     app.innerHTML = `
       <div class="page-title">Coin Search <span class="type-tag">${escapeHtml(symbol)}</span></div>
@@ -10194,7 +10370,7 @@ async function renderCoin(app, routeCoinType = "") {
             <div class="stat-box">
               <div class="stat-label">Supply</div>
               <div class="stat-value">${hasSupply ? escapeHtml(supplyDisplay) : "—"}</div>
-              <div class="stat-sub">${hasSupply ? `${escapeHtml(symbol)} units` : "coinMetadata.supply unavailable"}</div>
+              <div class="stat-sub">${hasSupply ? `${escapeHtml(symbol)} units (${escapeHtml(supplySource || "metadata")})` : escapeHtml(supplyUnavailableReason || "coinMetadata.supply unavailable")}</div>
             </div>
             <div class="stat-box">
               <div class="stat-label">Matched Tx</div>
@@ -10209,7 +10385,7 @@ async function renderCoin(app, routeCoinType = "") {
             <div class="stat-box">
               <div class="stat-label">Events / Objects</div>
               <div class="stat-value">${fmtNumber(events.length)} / ${fmtNumber(objects.length)}</div>
-              <div class="stat-sub">recent rows</div>
+              <div class="stat-sub">${fmtNumber(directEventCount)} direct · ${fmtNumber(contextEventCount)} context</div>
             </div>
           </div>
 
@@ -10231,6 +10407,10 @@ async function renderCoin(app, routeCoinType = "") {
               <div class="detail-val">${hasSupply ? `${escapeHtml(supplyExact)} ${escapeHtml(symbol)}` : '<span class="u-c-dim">Unavailable</span>'}</div>
             </div>
             <div class="detail-row">
+              <div class="detail-key">Supply Source</div>
+              <div class="detail-val">${hasSupply ? escapeHtml(supplySource || "coinMetadata.supply") : `<span class="u-c-dim">${escapeHtml(supplyUnavailableReason || "Unavailable")}</span>`}</div>
+            </div>
+            <div class="detail-row">
               <div class="detail-key">Scan Scope</div>
               <div class="detail-val">${fmtNumber(scannedTx)} programmable transactions across ${fmtNumber(scannedPages)} pages</div>
             </div>
@@ -10248,12 +10428,20 @@ async function renderCoin(app, routeCoinType = "") {
               <thead><tr><th>Kind</th><th class="u-ta-right">Amount</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
               <tbody>
                 ${transfers.map((row) => {
-                  const fromFallback = row.kind === "mint" ? "mint/system" : "—";
-                  const toFallback = row.kind === "burn" ? "burn/sink" : "—";
-                  const kindLabel = row.kind === "transfer" ? "Transfer" : (row.kind === "mint" ? "Mint/Inflow" : "Burn/Outflow");
+                  const fromFallback = row.kind === "mint"
+                    ? "mint/system"
+                    : (row.fromHint ? row.fromHint : "—");
+                  const toFallback = row.kind === "burn"
+                    ? "burn/sink"
+                    : (row.toHint ? row.toHint : "—");
+                  const kindLabel = row.kind === "transfer"
+                    ? "Transfer"
+                    : (row.kind === "mint"
+                      ? "Mint/Inflow"
+                      : (row.kind === "burn" ? "Burn/Outflow" : "Object Transfer"));
                   return `<tr>
                     <td><span class="coin-transfer-kind coin-transfer-kind-${row.kind}">${kindLabel}</span></td>
-                    <td class="u-ta-right-mono">${fmtCoinAbs(row.amountRaw, decimals)}</td>
+                    <td class="u-ta-right-mono">${row.amountRaw == null ? '<span class="u-c-dim">Unknown</span>' : fmtCoinAbs(row.amountRaw, decimals)}</td>
                     <td>${renderAddressList(row.fromRows, fromFallback)}</td>
                     <td>${renderAddressList(row.toRows, toFallback)}</td>
                     <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
@@ -10261,7 +10449,7 @@ async function renderCoin(app, routeCoinType = "") {
                   </tr>`;
                 }).join("")}
               </tbody>
-            </table>` : renderEmpty("No recent transfers found for this coin type in scanned transactions.")}
+            </table>` : renderEmpty(transferEmptyLabel)}
           </div>
         </div>
 
@@ -10269,7 +10457,7 @@ async function renderCoin(app, routeCoinType = "") {
           <div class="card-header">Most Recent Events</div>
           <div class="card-body">
             ${events.length ? `<table>
-              <thead><tr><th>Event Type</th><th>Sender</th><th>Module</th><th>Tx</th><th>Time</th><th>Payload</th></tr></thead>
+              <thead><tr><th>Match</th><th>Event Type</th><th>Sender</th><th>Module</th><th>Tx</th><th>Time</th><th>Payload</th></tr></thead>
               <tbody>
                 ${events.map((row) => {
                   const typeLabel = shortType(row.typeRepr) || row.typeRepr || "—";
@@ -10277,6 +10465,7 @@ async function renderCoin(app, routeCoinType = "") {
                     ? `${hashLink(row.modulePackage, "/object/" + row.modulePackage)}::${escapeHtml(row.moduleName || "—")}`
                     : escapeHtml(row.moduleName || "—");
                   return `<tr>
+                    <td><span class="badge ${row.matchSource === "direct" ? "badge-success" : ""}">${row.matchSource === "direct" ? "direct" : "context"}</span></td>
                     <td class="coin-type-cell" title="${escapeAttr(row.typeRepr || "")}">${escapeHtml(typeLabel)}</td>
                     <td>${row.sender ? hashLink(row.sender, "/address/" + row.sender) : '<span class="u-c-dim">—</span>'}</td>
                     <td>${moduleLabel}</td>
@@ -10286,7 +10475,7 @@ async function renderCoin(app, routeCoinType = "") {
                   </tr>`;
                 }).join("")}
               </tbody>
-            </table>` : renderEmpty("No recent events referencing this coin type in scanned transactions.")}
+            </table>` : renderEmpty(eventEmptyLabel)}
           </div>
         </div>
 
@@ -10316,6 +10505,24 @@ async function renderCoin(app, routeCoinType = "") {
                 }).join("")}
               </tbody>
             </table>` : renderEmpty("No recent object changes containing this coin type in scanned transactions.")}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">Recent Matched Transactions</div>
+          <div class="card-body">
+            ${matchedActivity.length ? `<table>
+              <thead><tr><th>Tx</th><th>Sender</th><th>Signals</th><th>Status</th><th>Time</th></tr></thead>
+              <tbody>
+                ${matchedActivity.map((row) => `<tr>
+                  <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
+                  <td>${row.sender ? hashLink(row.sender, "/address/" + row.sender) : '<span class="u-c-dim">—</span>'}</td>
+                  <td>${row.signals ? escapeHtml(row.signals) : '<span class="u-c-dim">—</span>'}</td>
+                  <td>${statusBadge(row.status)}</td>
+                  <td>${timeTag(row.timestamp)}</td>
+                </tr>`).join("")}
+              </tbody>
+            </table>` : renderEmpty("No matched transactions found for this coin type in scanned transactions.")}
           </div>
         </div>
       </div>
