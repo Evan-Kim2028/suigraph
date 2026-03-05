@@ -9,8 +9,8 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 
 | Metric | Value |
 |---|---:|
-| Total gql call sites | 94 |
-| Static template query call sites | 89 |
+| Total gql call sites | 98 |
+| Static template query call sites | 93 |
 | Dynamic/non-literal call sites | 5 |
 | Query root fields in schema snapshot | 32 |
 | Query root fields used (static scan) | 22 |
@@ -26,9 +26,9 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 | `address` | 26 |
 | `object` | 13 |
 | `checkpoint` | 10 |
-| `transactions` | 9 |
-| `checkpoints` | 4 |
-| `epoch` | 3 |
+| `transactions` | 8 |
+| `epoch` | 5 |
+| `checkpoints` | 3 |
 | `objects` | 3 |
 | `objectVersions` | 3 |
 | `multiGetCheckpoints` | 2 |
@@ -36,6 +36,7 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 | `multiGetTransactionEffects` | 2 |
 | `packageVersions` | 2 |
 | `serviceConfig` | 2 |
+| `transaction` | 2 |
 | `chainIdentifier` | 1 |
 | `coinMetadata` | 1 |
 | `epochs` | 1 |
@@ -43,7 +44,6 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 | `nameRecord` | 1 |
 | `protocolConfigs` | 1 |
 | `simulateTransaction` | 1 |
-| `transaction` | 1 |
 | `transactionEffects` | 1 |
 
 ## Unused Query Roots

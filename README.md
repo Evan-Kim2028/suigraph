@@ -69,6 +69,15 @@ This repo is designed to be deployable on [Walrus Sites](https://docs.wal.app/) 
 - Walrus-aware configuration:
   - `ws-resources.json` controls headers, routes, metadata, and deployed site object tracking
 
+## Coin Search Classification Notes
+
+- Coin transfer `Action` and `Kind` now share one classifier pipeline in `site/src/app.js`:
+  - `classifyTransactionAction(...)`
+  - `classifyCoinTransferFlow(...)`
+- This avoids drift where `Action` said one thing while `Kind` was computed by a different path.
+- Non-supply actions (for example `order`/`deposit`/`withdraw`) are guarded from being mislabeled as `mint`/`burn`.
+- `site/scripts/smoke-coin-search.mjs` mirrors the same logic and includes invariant checks to catch regressions.
+
 ## Local Development
 
 Requirements:

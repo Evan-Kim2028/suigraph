@@ -2789,6 +2789,41 @@ const EVENT_ACTION_TAGS = [
   { key: "mint", re: /\bmint/, label: "Mint", priority: 40 },
   { key: "burn", re: /\bburn/, label: "Burn", priority: 40 },
 ];
+const COIN_SWAP_ACTION_KEYS = new Set(["swap", "fill"]);
+const COIN_SUPPLY_ACTION_KEYS = new Set(["mint", "burn"]);
+const COIN_NON_SUPPLY_ACTION_KEYS = new Set([
+  "order",
+  "flash-loan",
+  "liquidation",
+  "borrow",
+  "repay",
+  "deposit",
+  "withdraw",
+  "unstake",
+  "stake",
+  "claim",
+]);
+const ACTION_LABEL_TO_KEY = Object.freeze(EVENT_ACTION_TAGS.reduce((acc, tag) => {
+  const key = String(tag?.key || "").trim().toLowerCase();
+  const label = String(tag?.label || "").trim().toLowerCase();
+  if (key) acc[key] = key;
+  if (label) acc[label] = key;
+  return acc;
+}, {}));
+
+function normalizeActionKey(actionInfo) {
+  if (!actionInfo) return "";
+  if (typeof actionInfo === "object") {
+    const key = String(actionInfo?.key || "").trim().toLowerCase();
+    if (key) return key;
+    const label = String(actionInfo?.label || "").trim().toLowerCase();
+    if (label && ACTION_LABEL_TO_KEY[label]) return ACTION_LABEL_TO_KEY[label];
+    return label ? label.replace(/\s+/g, "-") : "";
+  }
+  const raw = String(actionInfo || "").trim().toLowerCase();
+  if (!raw) return "";
+  return ACTION_LABEL_TO_KEY[raw] || raw.replace(/\s+/g, "-");
+}
 
 function pickBestActionMatch(matches) {
   const rows = [...(matches || new Map()).values()];
@@ -2894,23 +2929,31 @@ const COIN_TRANSFER_KIND_META = {
   "object-transfer": { label: "Object Transfer", css: "transfer", fromFallback: "—", toFallback: "—" },
 };
 
-function classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel = "") {
+function classifyCoinBalanceFlowKind(sentRaw, recvRaw, actionInfo = null) {
   const sent = parseBigIntSafe(sentRaw);
   const recv = parseBigIntSafe(recvRaw);
   const hasSent = sent > 0n;
   const hasRecv = recv > 0n;
-  const action = String(eventActionLabel || "");
-  if (action === "Swap") {
+  const actionKey = normalizeActionKey(actionInfo);
+  if (COIN_SWAP_ACTION_KEYS.has(actionKey)) {
     if (hasSent && hasRecv) return "swap";
     if (hasRecv) return "swap-in";
     if (hasSent) return "swap-out";
   }
-  // Non-supply actions (e.g., Deposit, Order, Borrow) often move funds into
-  // protocol-owned accounts without actually burning/minting supply.
-  if (action && action !== "Mint" && action !== "Burn") {
+  // Non-supply actions often move funds into protocol-owned accounts
+  // without changing coin supply.
+  if (actionKey && COIN_NON_SUPPLY_ACTION_KEYS.has(actionKey)) {
     if (hasSent && hasRecv) return "transfer";
     if (hasRecv) return "inflow";
     if (hasSent) return "outflow";
+  }
+  if (actionKey === "mint") {
+    if (hasRecv && !hasSent) return "mint";
+    if (hasSent && !hasRecv) return "outflow";
+  }
+  if (actionKey === "burn") {
+    if (hasSent && !hasRecv) return "burn";
+    if (hasRecv && !hasSent) return "inflow";
   }
   if (hasSent && hasRecv) return "transfer";
   if (hasRecv) return "mint";
@@ -2918,22 +2961,58 @@ function classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel = "") {
   return "transfer";
 }
 
-function classifyCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, eventActionLabel = "") {
-  const base = classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel);
-  if (base !== "mint" && base !== "burn" && base !== "inflow" && base !== "outflow") return base;
-  // Only auto-recast to swap when action tags are absent or explicit swap.
-  const action = String(eventActionLabel || "");
-  if (action && action !== "Swap") return base;
+function deriveCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, actionInfo = null) {
+  const actionKey = normalizeActionKey(actionInfo);
+  const baseKind = classifyCoinBalanceFlowKind(sentRaw, recvRaw, actionInfo);
+  let flowKind = baseKind;
+  let recastByContext = false;
+  if (baseKind !== "mint" && baseKind !== "burn" && baseKind !== "inflow" && baseKind !== "outflow") {
+    return { actionKey, baseKind, flowKind, recastByContext, hasOppositeNonTarget: false };
+  }
+  // Only auto-recast to swap when action is unknown or explicitly swap/fill.
+  if (actionKey && !COIN_SWAP_ACTION_KEYS.has(actionKey)) {
+    return { actionKey, baseKind, flowKind, recastByContext, hasOppositeNonTarget: false };
+  }
   const allRows = effects?.balanceChanges?.nodes || [];
   const hasOppositeNonTarget = allRows.some((bc) => {
     const ct = coinTypeKey(bc?.coinType?.repr || "");
     if (!ct || ct === targetKey) return false;
     const raw = parseBigIntSafe(bc?.amount || 0);
-    if (base === "mint" || base === "inflow") return raw < 0n;
+    if (baseKind === "mint" || baseKind === "inflow") return raw < 0n;
     return raw > 0n;
   });
-  if (!hasOppositeNonTarget) return base;
-  return (base === "mint" || base === "inflow") ? "swap-in" : "swap-out";
+  if (hasOppositeNonTarget) {
+    flowKind = (baseKind === "mint" || baseKind === "inflow") ? "swap-in" : "swap-out";
+    recastByContext = true;
+  }
+  return { actionKey, baseKind, flowKind, recastByContext, hasOppositeNonTarget };
+}
+
+function classifyCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, actionInfo = null) {
+  return deriveCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, actionInfo).flowKind;
+}
+
+function classifyCoinTransferFlow(effects, targetKey, sentRaw, recvRaw, txAction = null) {
+  const derived = deriveCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, txAction);
+  const actionKey = derived.actionKey || normalizeActionKey(txAction);
+  const actionLabel = typeof txAction === "string" ? String(txAction) : String(txAction?.label || "");
+  const actionSource = typeof txAction === "object" && txAction ? String(txAction?.source || "") : "";
+  const actionConfidence = typeof txAction === "object" && txAction ? String(txAction?.confidence || "") : "";
+  const reasons = [];
+  if (actionKey) reasons.push(`action:${actionKey}`);
+  reasons.push(`base:${derived.baseKind}`);
+  if (derived.recastByContext) reasons.push("context:cross-asset-opposite-flow");
+  const isSupplyChanging = COIN_SUPPLY_ACTION_KEYS.has(actionKey) || derived.flowKind === "mint" || derived.flowKind === "burn";
+  return {
+    actionKey,
+    actionLabel,
+    actionSource,
+    actionConfidence,
+    flowKind: derived.flowKind,
+    baseKind: derived.baseKind,
+    isSupplyChanging,
+    reasons,
+  };
 }
 
 function getCoinTransferKindMeta(kind, row = null) {
@@ -3490,6 +3569,11 @@ function coinSearchPackTransferRows(rows) {
     String(row?.fromHint || ""),
     String(row?.toHint || ""),
     String(row?.actionLabel || ""),
+    String(row?.actionKey || ""),
+    String(row?.actionSource || ""),
+    String(row?.actionConfidence || ""),
+    String(row?.baseKind || ""),
+    Array.isArray(row?.actionReasons) ? row.actionReasons.map((r) => String(r || "")) : [],
   ]));
 }
 
@@ -3505,6 +3589,11 @@ function coinSearchUnpackTransferRows(rows) {
     fromHint: String(row?.[7] || ""),
     toHint: String(row?.[8] || ""),
     actionLabel: String(row?.[9] || ""),
+    actionKey: String(row?.[10] || ""),
+    actionSource: String(row?.[11] || ""),
+    actionConfidence: String(row?.[12] || ""),
+    baseKind: String(row?.[13] || ""),
+    actionReasons: Array.isArray(row?.[14]) ? row[14].map((r) => String(r || "")) : [],
   }));
 }
 
@@ -12531,7 +12620,7 @@ async function renderCoin(app, routeCoinType = "") {
     const OBJECT_SCAN_MAX_DIGESTS = Number(scanProfile.objectScanMaxDigests || 160);
     const OBJECT_TX_LOAD_LIMIT = Number(scanProfile.objectTxLoadLimit || 48);
     const forceScanRefresh = routeParams.get("refresh") === "1";
-    const scanCacheKey = `${targetKey}|mode:${scanMode}|v1`;
+    const scanCacheKey = `${targetKey}|mode:${scanMode}|v2`;
     const scanData = await coinSearchLoadActivityScanCached(scanCacheKey, { force: forceScanRefresh }, async () => {
       let scannedTx = 0;
       let scannedPages = 0;
@@ -12562,7 +12651,8 @@ async function renderCoin(app, routeCoinType = "") {
         const eff = tx?.effects || {};
         const txEvents = eff?.events?.nodes || [];
         const txAction = classifyTransactionAction(tx);
-        const txEventActionLabel = String(txAction?.label || "");
+        const txActionLabel = String(txAction?.label || "");
+        const txActionKey = normalizeActionKey(txAction);
         let txHasTransferMatch = false;
         let txHasObjectMatch = false;
         let txHasDirectEventMatch = false;
@@ -12594,7 +12684,7 @@ async function renderCoin(app, routeCoinType = "") {
           }
           const amountRaw = sentRaw > recvRaw ? sentRaw : recvRaw;
           if (amountRaw > 0n) {
-            const kind = classifyCoinFlowKindWithContext(eff, targetKey, sentRaw, recvRaw, txEventActionLabel);
+            const flow = classifyCoinTransferFlow(eff, targetKey, sentRaw, recvRaw, txAction);
             transferRows.push({
               digest: txDigest,
               timestamp: eff?.timestamp || "",
@@ -12602,8 +12692,13 @@ async function renderCoin(app, routeCoinType = "") {
               fromRows,
               toRows,
               amountRaw,
-              kind,
-              actionLabel: txEventActionLabel,
+              kind: flow.flowKind,
+              actionLabel: flow.actionLabel,
+              actionKey: flow.actionKey,
+              actionSource: flow.actionSource,
+              actionConfidence: flow.actionConfidence,
+              baseKind: flow.baseKind,
+              actionReasons: flow.reasons,
             });
           }
         }
@@ -12673,7 +12768,12 @@ async function renderCoin(app, routeCoinType = "") {
               kind: "object-transfer",
               fromHint: !fromRows.length ? (inputOwner.kind || "") : "",
               toHint: !toRows.length ? (outputOwner.kind || "") : "",
-              actionLabel: txEventActionLabel,
+              actionLabel: txActionLabel,
+              actionKey: txActionKey,
+              actionSource: String(txAction?.source || ""),
+              actionConfidence: String(txAction?.confidence || ""),
+              baseKind: "object-transfer",
+              actionReasons: txActionKey ? [`action:${txActionKey}`, "base:object-transfer"] : ["base:object-transfer"],
             });
           }
         }
@@ -12691,7 +12791,7 @@ async function renderCoin(app, routeCoinType = "") {
           const signals = [];
           if (txBalanceMatchCount) signals.push(`${fmtNumber(txBalanceMatchCount)} balance`);
           if (txObjectMatchCount) signals.push(`${fmtNumber(txObjectMatchCount)} object`);
-          if (txEventActionLabel) signals.push(txEventActionLabel.toLowerCase());
+          if (txActionLabel) signals.push(txActionLabel.toLowerCase());
           if (txHasDirectEventMatch) signals.push("direct event");
           if (txHasContextEventMatch) signals.push("context events");
           matchedActivityRows.push({

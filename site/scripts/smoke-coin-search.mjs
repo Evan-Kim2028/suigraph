@@ -27,6 +27,27 @@ const EVENT_ACTION_TAGS = [
   { key: "mint", re: /\bmint/, label: "Mint", priority: 40 },
   { key: "burn", re: /\bburn/, label: "Burn", priority: 40 },
 ];
+const COIN_SWAP_ACTION_KEYS = new Set(["swap", "fill"]);
+const COIN_SUPPLY_ACTION_KEYS = new Set(["mint", "burn"]);
+const COIN_NON_SUPPLY_ACTION_KEYS = new Set([
+  "order",
+  "flash-loan",
+  "liquidation",
+  "borrow",
+  "repay",
+  "deposit",
+  "withdraw",
+  "unstake",
+  "stake",
+  "claim",
+]);
+const ACTION_LABEL_TO_KEY = Object.freeze(EVENT_ACTION_TAGS.reduce((acc, tag) => {
+  const key = String(tag?.key || "").trim().toLowerCase();
+  const label = String(tag?.label || "").trim().toLowerCase();
+  if (key) acc[key] = key;
+  if (label) acc[label] = key;
+  return acc;
+}, {}));
 
 function parseArgs(argv) {
   const opts = {
@@ -274,15 +295,43 @@ function classifyTransactionAction(tx) {
   return null;
 }
 
-function classifyCoinBalanceFlowKind(sentRaw, recvRaw, actionLabel = "") {
+function normalizeActionKey(actionInfo) {
+  if (!actionInfo) return "";
+  if (typeof actionInfo === "object") {
+    const key = String(actionInfo?.key || "").trim().toLowerCase();
+    if (key) return key;
+    const label = String(actionInfo?.label || "").trim().toLowerCase();
+    if (label && ACTION_LABEL_TO_KEY[label]) return ACTION_LABEL_TO_KEY[label];
+    return label ? label.replace(/\s+/g, "-") : "";
+  }
+  const raw = String(actionInfo || "").trim().toLowerCase();
+  if (!raw) return "";
+  return ACTION_LABEL_TO_KEY[raw] || raw.replace(/\s+/g, "-");
+}
+
+function classifyCoinBalanceFlowKind(sentRaw, recvRaw, actionInfo = null) {
   const sent = parseBigIntSafe(sentRaw);
   const recv = parseBigIntSafe(recvRaw);
   const hasSent = sent > 0n;
   const hasRecv = recv > 0n;
-  if (actionLabel === "Swap") {
+  const actionKey = normalizeActionKey(actionInfo);
+  if (COIN_SWAP_ACTION_KEYS.has(actionKey)) {
     if (hasSent && hasRecv) return "swap";
     if (hasRecv) return "swap-in";
     if (hasSent) return "swap-out";
+  }
+  if (actionKey && COIN_NON_SUPPLY_ACTION_KEYS.has(actionKey)) {
+    if (hasSent && hasRecv) return "transfer";
+    if (hasRecv) return "inflow";
+    if (hasSent) return "outflow";
+  }
+  if (actionKey === "mint") {
+    if (hasRecv && !hasSent) return "mint";
+    if (hasSent && !hasRecv) return "outflow";
+  }
+  if (actionKey === "burn") {
+    if (hasSent && !hasRecv) return "burn";
+    if (hasRecv && !hasSent) return "inflow";
   }
   if (hasSent && hasRecv) return "transfer";
   if (hasRecv) return "mint";
@@ -290,19 +339,57 @@ function classifyCoinBalanceFlowKind(sentRaw, recvRaw, actionLabel = "") {
   return "transfer";
 }
 
-function classifyCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, actionLabel = "") {
-  const base = classifyCoinBalanceFlowKind(sentRaw, recvRaw, actionLabel);
-  if (base !== "mint" && base !== "burn") return base;
+function deriveCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, actionInfo = null) {
+  const actionKey = normalizeActionKey(actionInfo);
+  const base = classifyCoinBalanceFlowKind(sentRaw, recvRaw, actionInfo);
+  let flowKind = base;
+  let recastByContext = false;
+  if (base !== "mint" && base !== "burn" && base !== "inflow" && base !== "outflow") {
+    return { actionKey, baseKind: base, flowKind, recastByContext, hasOppositeNonTarget: false };
+  }
+  if (actionKey && !COIN_SWAP_ACTION_KEYS.has(actionKey)) {
+    return { actionKey, baseKind: base, flowKind, recastByContext, hasOppositeNonTarget: false };
+  }
   const allRows = effects?.balanceChanges?.nodes || [];
   const hasOppositeNonTarget = allRows.some((bc) => {
     const ct = coinTypeKey(bc?.coinType?.repr || "");
     if (!ct || ct === targetKey) return false;
     const raw = parseBigIntSafe(bc?.amount || 0);
-    if (base === "mint") return raw < 0n;
+    if (base === "mint" || base === "inflow") return raw < 0n;
     return raw > 0n;
   });
-  if (!hasOppositeNonTarget) return base;
-  return base === "mint" ? "swap-in" : "swap-out";
+  if (hasOppositeNonTarget) {
+    flowKind = (base === "mint" || base === "inflow") ? "swap-in" : "swap-out";
+    recastByContext = true;
+  }
+  return { actionKey, baseKind: base, flowKind, recastByContext, hasOppositeNonTarget };
+}
+
+function classifyCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, actionInfo = null) {
+  return deriveCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, actionInfo).flowKind;
+}
+
+function classifyCoinTransferFlow(effects, targetKey, sentRaw, recvRaw, txAction = null) {
+  const derived = deriveCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, txAction);
+  const actionKey = derived.actionKey || normalizeActionKey(txAction);
+  const actionLabel = typeof txAction === "string" ? String(txAction) : String(txAction?.label || "");
+  const actionSource = typeof txAction === "object" && txAction ? String(txAction?.source || "") : "";
+  const actionConfidence = typeof txAction === "object" && txAction ? String(txAction?.confidence || "") : "";
+  const reasons = [];
+  if (actionKey) reasons.push(`action:${actionKey}`);
+  reasons.push(`base:${derived.baseKind}`);
+  if (derived.recastByContext) reasons.push("context:cross-asset-opposite-flow");
+  const isSupplyChanging = COIN_SUPPLY_ACTION_KEYS.has(actionKey) || derived.flowKind === "mint" || derived.flowKind === "burn";
+  return {
+    actionKey,
+    actionLabel,
+    actionSource,
+    actionConfidence,
+    flowKind: derived.flowKind,
+    baseKind: derived.baseKind,
+    isSupplyChanging,
+    reasons,
+  };
 }
 
 async function fetchObjectDigestCandidates(coinType, maxPages, maxDigests) {
@@ -449,6 +536,8 @@ async function inspectCoin(coinType, opts) {
   let transfers = 0;
   let swapAsMintSignals = 0;
   const swapAsMintDigests = [];
+  let classifierInvariantViolations = 0;
+  const classifierInvariantDigests = [];
 
   for (const tx of txRows) {
     const digest = String(tx?.digest || "");
@@ -474,12 +563,21 @@ async function inspectCoin(coinType, opts) {
         if (raw < 0n) sentRaw += -raw;
         else if (raw > 0n) recvRaw += raw;
       }
-      const kind = classifyCoinFlowKindWithContext(eff, targetKey, sentRaw, recvRaw, action);
+      const flow = classifyCoinTransferFlow(eff, targetKey, sentRaw, recvRaw, txAction);
+      const kind = flow.flowKind;
       kindCounts.set(kind, (kindCounts.get(kind) || 0) + 1);
       transfers += 1;
-      if ((kind === "mint" || kind === "burn") && action === "Swap") {
+      if ((kind === "mint" || kind === "burn") && COIN_SWAP_ACTION_KEYS.has(flow.actionKey)) {
         swapAsMintSignals += 1;
         swapAsMintDigests.push(digest);
+      }
+      if (!flow.isSupplyChanging && (kind === "mint" || kind === "burn")) {
+        classifierInvariantViolations += 1;
+        if (classifierInvariantDigests.length < 8) classifierInvariantDigests.push(digest);
+      }
+      if (COIN_NON_SUPPLY_ACTION_KEYS.has(flow.actionKey) && (kind === "mint" || kind === "burn")) {
+        classifierInvariantViolations += 1;
+        if (classifierInvariantDigests.length < 8) classifierInvariantDigests.push(digest);
       }
     }
 
@@ -527,6 +625,8 @@ async function inspectCoin(coinType, opts) {
     kindCounts: [...kindCounts.entries()].sort((a, b) => b[1] - a[1]),
     swapAsMintSignals,
     swapAsMintDigests: swapAsMintDigests.slice(0, 6),
+    classifierInvariantViolations,
+    classifierInvariantDigests: classifierInvariantDigests.slice(0, 6),
   };
 }
 
@@ -550,6 +650,10 @@ function printResult(res) {
   if (res.swapAsMintDigests.length) {
     console.log(`swapAsMintDigests: ${res.swapAsMintDigests.map((d) => shortHash(d)).join(", ")}`);
   }
+  console.log(`classifierInvariantViolations: ${res.classifierInvariantViolations}`);
+  if (res.classifierInvariantDigests.length) {
+    console.log(`classifierInvariantDigests: ${res.classifierInvariantDigests.map((d) => shortHash(d)).join(", ")}`);
+  }
 }
 
 async function main() {
@@ -566,14 +670,20 @@ async function main() {
   }
 
   console.log(`Running coin smoke for ${normalizedCoins.length} coin type(s)...`);
+  let invariantFailures = 0;
   for (const coinType of normalizedCoins) {
     try {
       const res = await inspectCoin(coinType, opts);
       printResult(res);
+      invariantFailures += Number(res?.classifierInvariantViolations || 0);
     } catch (e) {
       console.error(`\n=== ${coinType} ===`);
       console.error(`error: ${e?.message || String(e)}`);
     }
+  }
+  if (invariantFailures > 0) {
+    console.error(`\nClassifier invariant violations detected: ${invariantFailures}`);
+    process.exitCode = 2;
   }
 }
 
