@@ -1756,6 +1756,8 @@ function classifyTransactionAction(tx) {
 
 const COIN_TRANSFER_KIND_META = {
   transfer: { label: "Transfer", css: "transfer", fromFallback: "—", toFallback: "—" },
+  inflow: { label: "Inflow", css: "transfer", fromFallback: "unknown/protocol", toFallback: "—" },
+  outflow: { label: "Outflow", css: "transfer", fromFallback: "—", toFallback: "unknown/protocol" },
   mint: { label: "Mint/Inflow", css: "mint", fromFallback: "mint/system", toFallback: "—" },
   burn: { label: "Burn/Outflow", css: "burn", fromFallback: "—", toFallback: "burn/sink" },
   swap: { label: "Swap", css: "swap", fromFallback: "swap router/pool", toFallback: "swap router/pool" },
@@ -1775,6 +1777,13 @@ function classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel = "") {
     if (hasRecv) return "swap-in";
     if (hasSent) return "swap-out";
   }
+  // Non-supply actions (e.g., Deposit, Order, Borrow) often move funds into
+  // protocol-owned accounts without actually burning/minting supply.
+  if (action && action !== "Mint" && action !== "Burn") {
+    if (hasSent && hasRecv) return "transfer";
+    if (hasRecv) return "inflow";
+    if (hasSent) return "outflow";
+  }
   if (hasSent && hasRecv) return "transfer";
   if (hasRecv) return "mint";
   if (hasSent) return "burn";
@@ -1783,17 +1792,20 @@ function classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel = "") {
 
 function classifyCoinFlowKindWithContext(effects, targetKey, sentRaw, recvRaw, eventActionLabel = "") {
   const base = classifyCoinBalanceFlowKind(sentRaw, recvRaw, eventActionLabel);
-  if (base !== "mint" && base !== "burn") return base;
+  if (base !== "mint" && base !== "burn" && base !== "inflow" && base !== "outflow") return base;
+  // Only auto-recast to swap when action tags are absent or explicit swap.
+  const action = String(eventActionLabel || "");
+  if (action && action !== "Swap") return base;
   const allRows = effects?.balanceChanges?.nodes || [];
   const hasOppositeNonTarget = allRows.some((bc) => {
     const ct = coinTypeKey(bc?.coinType?.repr || "");
     if (!ct || ct === targetKey) return false;
     const raw = parseBigIntSafe(bc?.amount || 0);
-    if (base === "mint") return raw < 0n;
+    if (base === "mint" || base === "inflow") return raw < 0n;
     return raw > 0n;
   });
   if (!hasOppositeNonTarget) return base;
-  return base === "mint" ? "swap-in" : "swap-out";
+  return (base === "mint" || base === "inflow") ? "swap-in" : "swap-out";
 }
 
 function getCoinTransferKindMeta(kind, row = null) {
