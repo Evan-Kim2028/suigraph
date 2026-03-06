@@ -2066,6 +2066,14 @@ const BLUEFIN_PRO_ACCOUNTS_TABLE = "0x63f16b288f33fbe6d9374602cbbfa9948bf1cc175e
 // Aftermath Perpetuals — positions stored as dynamic fields on ClearingHouse objects
 const AF_PERPS_PKG = "0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068";
 const AF_ACCOUNT_CAP_TYPE = `${AF_PERPS_PKG}::account::AccountCap`;
+const AF_ACCOUNT_ADMIN_TYPE = `${AF_PERPS_PKG}::account::AccountCap<${AF_PERPS_PKG}::account::ADMIN>`;
+const AF_ACCOUNT_ASSISTANT_TYPE = `${AF_PERPS_PKG}::account::AccountCap<${AF_PERPS_PKG}::account::ASSISTANT>`;
+const AF_ACCOUNT_CAP_FILTERS = [
+  { type: AF_ACCOUNT_ADMIN_TYPE, role: "admin" },
+  { type: AF_ACCOUNT_ASSISTANT_TYPE, role: "assistant" },
+  // Fallback for indexers that may still expose a non-parameterized repr.
+  { type: AF_ACCOUNT_CAP_TYPE, role: "unknown" },
+];
 const AF_CLEARING_HOUSES = {
   "0x95969906ca735c9d44e8a44b5b7791b4dacaddf70fbdfbda40ccd3f8a9fd4920": "BTC/USD",
   "0xed358c545b4a6698f757d3840a6b7effd1b958dd31260931bef07691f255b1fa": "XAUT/USD",
@@ -4031,7 +4039,16 @@ async function getCoinMeta(coinType) {
 
 async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {
   const candidates = [...new Set([coinType, shortCoinType].filter(Boolean))];
-  if (!candidates.length) return { value: null, source: "", note: "No coin type provided." };
+  if (!candidates.length) {
+    return {
+      value: null,
+      source: "",
+      note: "No coin type provided.",
+      estimated: false,
+      canonicalKnown: false,
+      canonicalUnavailableReason: "No coin type provided.",
+    };
+  }
   const cacheKey = candidates.map(coinTypeKey).filter(Boolean)[0] || coinTypeKey(candidates[0]);
   if (cacheKey && coinTotalSupplyRpcCache[cacheKey]) return coinTotalSupplyRpcCache[cacheKey];
   const run = (async () => {
@@ -4040,12 +4057,20 @@ async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {
       try {
         const result = await suiRpcCall("suix_getTotalSupply", [ct]);
         if (result?.value != null) {
-          return { value: String(result.value), source: "suix_getTotalSupply", note: "", estimated: false };
+          return {
+            value: String(result.value),
+            source: "suix_getTotalSupply",
+            note: "",
+            estimated: false,
+            canonicalKnown: true,
+            canonicalUnavailableReason: "",
+          };
         }
       } catch (e) {
         lastErr = e?.message || String(e);
       }
     }
+    let canonicalUnavailableReason = "";
     let registryNote = "";
     try {
       const md = await suiRpcCall("suix_getCoinMetadata", [candidates[0]]);
@@ -4054,7 +4079,10 @@ async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {
         const mdObj = await suiRpcCall("sui_getObject", [mdId, { showContent: true }]).catch(() => null);
         const variant = String(mdObj?.data?.content?.fields?.supply?.variant || "");
         if (variant) {
-          if (variant.toLowerCase() === "unknown") registryNote = "Coin registry marks supply state as Unknown.";
+          if (variant.toLowerCase() === "unknown") {
+            canonicalUnavailableReason = "Unknown Supply: canonical total supply is not tracked for this coin type (TreasuryCap may be managed externally).";
+            registryNote = "Coin registry marks supply state as Unknown.";
+          }
           else registryNote = `Coin registry supply state is ${variant}.`;
         }
       }
@@ -4073,6 +4101,8 @@ async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {
           source: "coinObjects.sum",
           note: noteParts.join(" "),
           estimated: true,
+          canonicalKnown: false,
+          canonicalUnavailableReason: canonicalUnavailableReason || "Canonical supply unavailable from coin registry/RPC sources.",
         };
       }
       if (!registryNote && objectSupply?.hasNext) {
@@ -4087,6 +4117,8 @@ async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {
       source: "suix_getTotalSupply",
       note: mergedNote || reason,
       estimated: false,
+      canonicalKnown: false,
+      canonicalUnavailableReason: canonicalUnavailableReason || mergedNote || reason,
     };
   })();
   if (cacheKey) coinTotalSupplyRpcCache[cacheKey] = run;
@@ -9365,6 +9397,23 @@ function afNormalizeAccountId(v) {
   if (!raw || !/^\d+$/.test(raw)) return "";
   return raw.replace(/^0+(?=\d)/, "") || "0";
 }
+function afAccountCapRoleFromType(typeRepr, fallbackRole = "") {
+  const lower = String(typeRepr || "").toLowerCase();
+  if (!lower) return fallbackRole || "unknown";
+  if (lower.includes("::account::admin>") || lower.endsWith("::account::admin")) return "admin";
+  if (lower.includes("::account::assistant>") || lower.endsWith("::account::assistant")) return "assistant";
+  return fallbackRole || "unknown";
+}
+function afRolePriority(role) {
+  if (role === "admin") return 2;
+  if (role === "assistant") return 1;
+  return 0;
+}
+function afRoleLabel(role) {
+  if (role === "admin") return "Admin";
+  if (role === "assistant") return "Assistant";
+  return "Unknown";
+}
 function afMarketAccountKey(chId, accountId) {
   return `${chId}::${accountId}`;
 }
@@ -9372,48 +9421,100 @@ function afMarketLabel(chId) {
   return AF_CLEARING_HOUSES[chId] || `Market ${truncHash(chId, 6)}`;
 }
 async function fetchAftermathAccountCaps(addr) {
-  const out = [];
-  const seen = new Set();
-  let after = null;
+  const capByObject = {};
   let partial = false;
-  for (let page = 0; page < AF_ACCOUNT_CAP_MAX_PAGES; page += 1) {
-    const data = await gql(`query($addr: SuiAddress!, $after: String, $first: Int!) {
-      address(address: $addr) {
-        objects(filter: { type: "${AF_ACCOUNT_CAP_TYPE}" }, first: $first, after: $after) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            address
-            contents { json }
+
+  for (const filter of AF_ACCOUNT_CAP_FILTERS) {
+    let after = null;
+    for (let page = 0; page < AF_ACCOUNT_CAP_MAX_PAGES; page += 1) {
+      const data = await gql(`query($addr: SuiAddress!, $type: String!, $after: String, $first: Int!) {
+        address(address: $addr) {
+          objects(filter: { type: $type }, first: $first, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              address
+              contents {
+                type { repr }
+                json
+              }
+            }
           }
         }
-      }
-    }`, {
-      addr,
-      after,
-      first: AF_ACCOUNT_CAP_PAGE_SIZE,
-    });
-    const conn = data?.address?.objects;
-    const rows = conn?.nodes || [];
-    for (const row of rows) {
-      const info = row?.contents?.json || {};
-      const accountId = afNormalizeAccountId(info.account_id);
-      if (!accountId || seen.has(accountId)) continue;
-      seen.add(accountId);
-      out.push({
-        accountId,
-        capObjectId: normalizeSuiAddress(row?.address || ""),
-        accountObjectId: normalizeSuiAddress(info.account_obj_id || ""),
+      }`, {
+        addr,
+        type: filter.type,
+        after,
+        first: AF_ACCOUNT_CAP_PAGE_SIZE,
       });
+      const conn = data?.address?.objects;
+      const rows = conn?.nodes || [];
+      for (const row of rows) {
+        const info = row?.contents?.json || {};
+        const accountId = afNormalizeAccountId(info.account_id);
+        const capObjectId = normalizeSuiAddress(row?.address || "");
+        if (!accountId && !capObjectId) continue;
+        const key = capObjectId || `${accountId}:${filter.type}`;
+        const role = afAccountCapRoleFromType(row?.contents?.type?.repr || "", filter.role);
+        const existing = capByObject[key];
+        if (existing) {
+          if (afRolePriority(role) > afRolePriority(existing.role || "")) existing.role = role;
+          if (!existing.accountObjectId) existing.accountObjectId = normalizeSuiAddress(info.account_obj_id || "");
+          if (!existing.accountId) existing.accountId = accountId;
+          continue;
+        }
+        capByObject[key] = {
+          accountId,
+          role,
+          capObjectId,
+          accountObjectId: normalizeSuiAddress(info.account_obj_id || ""),
+          capType: String(row?.contents?.type?.repr || filter.type || ""),
+        };
+      }
+      if (!conn?.pageInfo?.hasNextPage) {
+        after = null;
+        break;
+      }
+      after = conn?.pageInfo?.endCursor || null;
+      if (!after) break;
+      if (page === AF_ACCOUNT_CAP_MAX_PAGES - 1) partial = true;
     }
-    if (!conn?.pageInfo?.hasNextPage) {
-      after = null;
-      break;
-    }
-    after = conn?.pageInfo?.endCursor || null;
-    if (!after) break;
-    if (page === AF_ACCOUNT_CAP_MAX_PAGES - 1) partial = true;
   }
-  return { caps: out, partial };
+
+  const caps = Object.values(capByObject).filter((row) => row?.accountId);
+  const accountMap = {};
+  for (const cap of caps) {
+    const key = cap.accountId;
+    if (!accountMap[key]) {
+      accountMap[key] = {
+        accountId: cap.accountId,
+        accountObjectId: cap.accountObjectId || "",
+        capObjectIds: [],
+        roleSet: new Set(),
+        role: "unknown",
+      };
+    }
+    const row = accountMap[key];
+    if (cap.accountObjectId && !row.accountObjectId) row.accountObjectId = cap.accountObjectId;
+    if (cap.capObjectId) row.capObjectIds.push(cap.capObjectId);
+    if (cap.role) row.roleSet.add(cap.role);
+    if (afRolePriority(cap.role) > afRolePriority(row.role)) row.role = cap.role;
+  }
+  const accounts = Object.values(accountMap)
+    .map((row) => ({
+      accountId: row.accountId,
+      accountObjectId: row.accountObjectId,
+      capObjectIds: [...new Set(row.capObjectIds.filter(Boolean))],
+      roles: [...row.roleSet].sort((a, b) => afRolePriority(b) - afRolePriority(a)),
+      role: row.role,
+    }))
+    .sort((a, b) => {
+      const ai = parseBigIntSafe(a.accountId);
+      const bi = parseBigIntSafe(b.accountId);
+      if (ai === bi) return 0;
+      return ai < bi ? -1 : 1;
+    });
+
+  return { caps, accounts, partial };
 }
 async function fetchAftermathClearingHouses(force = false) {
   const now = Date.now();
@@ -9717,12 +9818,13 @@ async function fetchAftermathPerpsPositions(addr) {
 
     const capsMeta = await fetchAftermathAccountCaps(addr);
     const caps = capsMeta.caps || [];
+    const accounts = capsMeta.accounts || [];
     if (capsMeta.partial) {
       partial = true;
       warnings.push("AccountCap scan reached pagination cap; account coverage may be partial.");
     }
-    if (!caps.length) {
-      return { accounts: [], markets: [], positions: [], orders: [], collateral: 0, partial, warnings };
+    if (!accounts.length) {
+      return { accounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial, warnings };
     }
 
     let marketRows = [];
@@ -9743,7 +9845,7 @@ async function fetchAftermathPerpsPositions(addr) {
       }));
     }
 
-    const posMeta = await fetchAftermathPositionStates(caps, marketRows);
+    const posMeta = await fetchAftermathPositionStates(accounts, marketRows);
     const states = posMeta.states || [];
     const stateByKey = {};
     for (const s of states) stateByKey[s.key] = s;
@@ -9767,7 +9869,7 @@ async function fetchAftermathPerpsPositions(addr) {
 
     const expectedByKey = {};
     const accountSetByMarket = {};
-    const allAccountIds = new Set(caps.map((c) => c.accountId));
+    const allAccountIds = new Set(accounts.map((c) => c.accountId));
     for (const s of states) {
       if (!s.hasOpenOrders) continue;
       const expected = s.pendingOrders > 0 ? s.pendingOrders : 1;
@@ -9889,7 +9991,8 @@ async function fetchAftermathPerpsPositions(addr) {
       || (b.size || 0) - (a.size || 0));
 
     return {
-      accounts: caps,
+      accounts,
+      caps,
       markets: marketRows,
       positions,
       orders,
@@ -9900,6 +10003,7 @@ async function fetchAftermathPerpsPositions(addr) {
   } catch (e) {
     return {
       accounts: [],
+      caps: [],
       markets: [],
       positions: [],
       orders: [],
@@ -10116,7 +10220,7 @@ async function renderAddress(app, addr) {
     const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
     const afPerpsData = aftermathPerps.status === "fulfilled"
       ? aftermathPerps.value
-      : { accounts: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
+      : { accounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
 
     // Derive XAUM (gold) price from Aftermath XAUT/USD order prices if no DEX liquidity
     if (!defiPrices.XAUM || defiPrices.XAUM <= 0) {
@@ -10185,6 +10289,7 @@ async function renderAddress(app, addr) {
       || walletBals.length
       || db.positions.length
       || bluefinProData.positions.length
+      || afPerpsData.accounts.length
       || afPerpsData.positions.length
       || afPerpsData.orders.length
       || afPerpsData.collateral > 0;
@@ -10217,8 +10322,8 @@ async function renderAddress(app, addr) {
     if (totalDexLp > 0) html += `<div class="stat-box"><div class="stat-label">DEX LP</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalDexLp)}</div><div class="stat-sub">${allDexLp.length} positions</div></div>`;
     if (db.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">DeepBook Margin</div><div class="stat-value u-c-accent">${db.positions.length}</div><div class="stat-sub">positions</div></div>`;
     if (bluefinProData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Bluefin Perps</div><div class="stat-value u-c-blue">${bluefinProData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(bluefinProData.collateral)} collateral</div></div>`;
-    if (afPerpsData.positions.length > 0 || afPerpsData.orders.length > 0 || afPerpsData.collateral > 0) {
-      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length + afPerpsData.orders.length}</div><div class="stat-sub">${afPerpsData.positions.length} pos · ${afPerpsData.orders.length} orders · ${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
+    if (afPerpsData.accounts.length || afPerpsData.positions.length > 0 || afPerpsData.orders.length > 0 || afPerpsData.collateral > 0) {
+      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length + afPerpsData.orders.length}</div><div class="stat-sub">${afPerpsData.accounts.length} acct · ${afPerpsData.positions.length} pos · ${afPerpsData.orders.length} orders · ${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
     }
     html += `</div>`;
 
@@ -10396,14 +10501,37 @@ async function renderAddress(app, addr) {
     }
 
     // ─── Aftermath Perps ─────────────────────
-    if (afPerpsData.positions.length || afPerpsData.orders.length || afPerpsData.collateral > 0 || afPerpsData.warnings?.length) {
+    if (afPerpsData.accounts.length || afPerpsData.positions.length || afPerpsData.orders.length || afPerpsData.collateral > 0 || afPerpsData.warnings?.length) {
       html += `<h3 class="u-section-h3">Aftermath Perpetuals</h3>`;
       html += `<div class="u-bg-panel-12">`;
       if (afPerpsData.collateral > 0) {
         html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
       }
+      if (afPerpsData.accounts.length) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Perps Accounts</div>`;
+        html += `<table><thead><tr><th>Account ID</th><th>Role</th><th>Caps (owned)</th><th class="u-ta-right">Account Object</th></tr></thead><tbody>`;
+        for (const aRow of afPerpsData.accounts) {
+          const roleBadgeColor = aRow.role === "admin"
+            ? "var(--accent)"
+            : (aRow.role === "assistant" ? "var(--blue)" : "var(--text-dim)");
+          const roleText = afRoleLabel(aRow.role);
+          const capLinks = (aRow.capObjectIds || []).length
+            ? (aRow.capObjectIds || []).map((id) => hashLink(id, "/object/" + id)).join(" ")
+            : `<span class="u-c-dim">—</span>`;
+          const accountObject = aRow.accountObjectId
+            ? hashLink(aRow.accountObjectId, "/object/" + aRow.accountObjectId)
+            : '<span class="u-c-dim">—</span>';
+          html += `<tr>
+            <td class="u-mono">${escapeHtml(String(aRow.accountId || "—"))}</td>
+            <td><span class="badge" style="background:${roleBadgeColor}22;color:${roleBadgeColor}">${escapeHtml(roleText)}</span></td>
+            <td>${capLinks}</td>
+            <td class="u-ta-right">${accountObject}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+      }
       if (afPerpsData.partial || afPerpsData.warnings?.length) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin:0 0 8px 0;padding:6px 8px;background:var(--panel);border:1px dashed var(--border);border-radius:8px">`;
+        html += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.accounts.length ? "8px" : "0"} 0 8px 0;padding:6px 8px;background:var(--panel);border:1px dashed var(--border);border-radius:8px">`;
         if (afPerpsData.partial) html += `<div>Open-order coverage is partial; incomplete rows are explicitly tagged.</div>`;
         const warnRows = (afPerpsData.warnings || []).slice(0, 4);
         for (const w of warnRows) html += `<div>${escapeHtml(w)}</div>`;
@@ -12396,38 +12524,60 @@ async function renderCoin(app, routeCoinType = "") {
       ? Number(coinMeta.decimals)
       : Number(resolved?.decimals || 9);
     const iconUrl = String(coinMeta?.iconUrl || "");
-    let supplySource = "";
-    let supplyUnavailableReason = "";
-    let supplySourceNote = "";
-    let supplyIsEstimated = false;
-    let supplyRaw = 0n;
-    let hasSupply = false;
+    let canonicalSupplyRaw = null;
+    let canonicalSupplySource = "";
+    let canonicalSupplyNote = "";
+    let canonicalUnavailableReason = "";
+    let estimatedSupplyRaw = null;
+    let estimatedSupplySource = "";
+    let estimatedSupplyNote = "";
     let supplyLookupPending = false;
+    function applyRpcSupplyResult(rpcSupply) {
+      const hasValue = rpcSupply?.value != null;
+      const isEstimated = !!rpcSupply?.estimated;
+      const canonicalKnown = !!rpcSupply?.canonicalKnown && hasValue && !isEstimated;
+      const source = String(rpcSupply?.source || "");
+      const note = String(rpcSupply?.note || "");
+      const canonicalReason = String(rpcSupply?.canonicalUnavailableReason || "");
+      if (canonicalKnown) {
+        canonicalSupplyRaw = parseBigIntSafe(rpcSupply.value);
+        canonicalSupplySource = source || "suix_getTotalSupply";
+        canonicalSupplyNote = note;
+        canonicalUnavailableReason = "";
+        estimatedSupplyRaw = null;
+        estimatedSupplySource = "";
+        estimatedSupplyNote = "";
+        return;
+      }
+      canonicalSupplyRaw = null;
+      canonicalSupplySource = "";
+      canonicalSupplyNote = "";
+      if (hasValue && isEstimated) {
+        estimatedSupplyRaw = parseBigIntSafe(rpcSupply.value);
+        estimatedSupplySource = source || "coinObjects.sum";
+        estimatedSupplyNote = note || "Derived estimate from live Coin objects; wrapped Balance<T> may be excluded.";
+      } else {
+        estimatedSupplyRaw = null;
+        estimatedSupplySource = "";
+        estimatedSupplyNote = "";
+      }
+      canonicalUnavailableReason = canonicalReason || note || "Unknown Supply: canonical total supply is not tracked for this coin type (TreasuryCap may be managed externally).";
+    }
     if (coinMeta?.supply != null) {
-      hasSupply = true;
-      supplyRaw = parseBigIntSafe(coinMeta.supply);
-      supplySource = "coinMetadata.supply";
+      canonicalSupplyRaw = parseBigIntSafe(coinMeta.supply);
+      canonicalSupplySource = "coinMetadata.supply";
+      canonicalSupplyNote = "";
+      canonicalUnavailableReason = "";
+      estimatedSupplyRaw = null;
+      estimatedSupplySource = "";
+      estimatedSupplyNote = "";
     } else if (shouldResolveSupply) {
       const rpcSupply = await fetchCoinTotalSupplyRpc(coinType, shortCoinType).catch(() => null);
-      if (rpcSupply?.value != null) {
-        hasSupply = true;
-        supplyRaw = parseBigIntSafe(rpcSupply.value);
-        supplyIsEstimated = !!rpcSupply?.estimated;
-        supplySourceNote = String(rpcSupply?.note || "");
-      } else {
-        supplyUnavailableReason = rpcSupply?.note || "coinMetadata.supply unavailable";
-      }
-      supplySource = rpcSupply?.source || "unavailable";
+      applyRpcSupplyResult(rpcSupply);
     } else {
       supplyLookupPending = true;
-      supplySource = "pending";
-      supplyUnavailableReason = "Deferred on-chain lookup.";
+      canonicalUnavailableReason = "Deferred on-chain lookup.";
     }
-    const supplyExact = hasSupply ? scaledBigIntToText(supplyRaw, decimals, 8) : "—";
-    const supplyApprox = hasSupply ? scaledBigIntAbsToApprox(supplyRaw, decimals, 8) : NaN;
-    const supplyDisplay = hasSupply
-      ? (Number.isFinite(supplyApprox) ? fmtCompact(supplyApprox) : supplyExact)
-      : "—";
 
     const typeParts = coinType.split("::");
     const packageAddr = normalizeSuiAddress(typeParts[0] || "");
@@ -12439,30 +12589,57 @@ async function renderCoin(app, routeCoinType = "") {
     app._coinClickHandler = null;
 
     function readSupplySnapshot() {
-      const exact = hasSupply ? scaledBigIntToText(supplyRaw, decimals, 8) : "Unavailable";
-      const approx = hasSupply ? scaledBigIntAbsToApprox(supplyRaw, decimals, 8) : NaN;
-      const display = hasSupply
-        ? (Number.isFinite(approx) ? fmtCompact(approx) : exact)
-        : (supplyLookupPending ? "Loading..." : "—");
-      const statSub = hasSupply
-        ? `${symbol} units (${supplySource || "metadata"}${supplyIsEstimated ? ", derived" : ""})`
-        : (supplyLookupPending ? "Resolving supply from on-chain sources..." : (supplyUnavailableReason || "coinMetadata.supply unavailable"));
-      const source = hasSupply
-        ? `${supplySource || "coinMetadata.supply"}${supplySourceNote ? ` (${supplySourceNote})` : ""}`
-        : (supplyLookupPending ? "Pending on-chain lookup..." : (supplyUnavailableReason || "Unavailable"));
-      return { exact, display, statSub, source };
+      const canonicalKnown = canonicalSupplyRaw != null;
+      const estimatedKnown = estimatedSupplyRaw != null;
+      const canonicalExactRaw = canonicalKnown ? scaledBigIntToText(canonicalSupplyRaw, decimals, 8) : "";
+      const canonicalApprox = canonicalKnown ? scaledBigIntAbsToApprox(canonicalSupplyRaw, decimals, 8) : NaN;
+      const canonicalDisplay = canonicalKnown
+        ? (Number.isFinite(canonicalApprox) ? fmtCompact(canonicalApprox) : canonicalExactRaw)
+        : (supplyLookupPending ? "Loading..." : "Unknown");
+      const estimatedExactRaw = estimatedKnown ? scaledBigIntToText(estimatedSupplyRaw, decimals, 8) : "";
+      const estimatedApprox = estimatedKnown ? scaledBigIntAbsToApprox(estimatedSupplyRaw, decimals, 8) : NaN;
+      const estimatedDisplay = estimatedKnown
+        ? (Number.isFinite(estimatedApprox) ? fmtCompact(estimatedApprox) : estimatedExactRaw)
+        : "—";
+      const canonicalUnknownReason = canonicalUnavailableReason || "Unknown Supply: canonical total supply is not tracked for this coin type (TreasuryCap may be managed externally).";
+      const canonicalStatSub = canonicalKnown
+        ? `${symbol} units (${canonicalSupplySource || "coinMetadata.supply"})`
+        : (supplyLookupPending
+          ? "Resolving canonical supply from on-chain sources..."
+          : (estimatedKnown ? `${canonicalUnknownReason} Estimated: ${estimatedDisplay} ${symbol} (derived).` : canonicalUnknownReason));
+      const canonicalExact = canonicalKnown ? `${canonicalExactRaw} ${symbol}` : "Unknown";
+      const canonicalSource = canonicalKnown
+        ? `${canonicalSupplySource || "coinMetadata.supply"}${canonicalSupplyNote ? ` (${canonicalSupplyNote})` : ""}`
+        : (supplyLookupPending ? "Pending on-chain lookup..." : canonicalUnknownReason);
+      const estimatedExact = estimatedKnown ? `${estimatedExactRaw} ${symbol}` : "—";
+      const estimatedSource = estimatedKnown
+        ? `${estimatedSupplySource || "coinObjects.sum"}${estimatedSupplyNote ? ` (${estimatedSupplyNote})` : ""}`
+        : "—";
+      return {
+        canonicalDisplay,
+        canonicalStatSub,
+        canonicalExact,
+        canonicalSource,
+        estimatedDisplay,
+        estimatedExact,
+        estimatedSource,
+      };
     }
 
     function applySupplySnapshotToDom() {
       const snap = readSupplySnapshot();
-      const statVal = document.getElementById("coin-supply-stat-value");
-      const statSub = document.getElementById("coin-supply-stat-sub");
-      const exactEl = document.getElementById("coin-supply-exact");
-      const sourceEl = document.getElementById("coin-supply-source");
-      if (statVal) statVal.textContent = snap.display;
-      if (statSub) statSub.textContent = snap.statSub;
-      if (exactEl) exactEl.textContent = hasSupply ? `${snap.exact} ${symbol}` : "Unavailable";
-      if (sourceEl) sourceEl.textContent = snap.source;
+      const statVal = document.getElementById("coin-supply-canonical-stat-value");
+      const statSub = document.getElementById("coin-supply-canonical-stat-sub");
+      const canonicalExactEl = document.getElementById("coin-supply-canonical-exact");
+      const canonicalSourceEl = document.getElementById("coin-supply-canonical-source");
+      const estExactEl = document.getElementById("coin-supply-estimate-exact");
+      const estSourceEl = document.getElementById("coin-supply-estimate-source");
+      if (statVal) statVal.textContent = snap.canonicalDisplay;
+      if (statSub) statSub.textContent = snap.canonicalStatSub;
+      if (canonicalExactEl) canonicalExactEl.textContent = snap.canonicalExact;
+      if (canonicalSourceEl) canonicalSourceEl.textContent = snap.canonicalSource;
+      if (estExactEl) estExactEl.textContent = snap.estimatedExact;
+      if (estSourceEl) estSourceEl.textContent = snap.estimatedSource;
     }
 
     if (!shouldScanActivity) {
@@ -12486,9 +12663,9 @@ async function renderCoin(app, routeCoinType = "") {
                 <div class="stat-sub">from CoinMetadata/registry</div>
               </div>
               <div class="stat-box">
-                <div class="stat-label">Supply</div>
-                <div class="stat-value" id="coin-supply-stat-value">${escapeHtml(snap.display)}</div>
-                <div class="stat-sub" id="coin-supply-stat-sub">${escapeHtml(snap.statSub)}</div>
+                <div class="stat-label">Canonical Supply</div>
+                <div class="stat-value" id="coin-supply-canonical-stat-value">${escapeHtml(snap.canonicalDisplay)}</div>
+                <div class="stat-sub" id="coin-supply-canonical-stat-sub">${escapeHtml(snap.canonicalStatSub)}</div>
               </div>
               <div class="stat-box">
                 <div class="stat-label">Matched Tx</div>
@@ -12521,12 +12698,20 @@ async function renderCoin(app, routeCoinType = "") {
                 </div>
               </div>
               <div class="detail-row">
-                <div class="detail-key">Exact Supply</div>
-                <div class="detail-val" id="coin-supply-exact">${hasSupply ? `${escapeHtml(snap.exact)} ${escapeHtml(symbol)}` : '<span class="u-c-dim">Unavailable</span>'}</div>
+                <div class="detail-key">Canonical Supply</div>
+                <div class="detail-val" id="coin-supply-canonical-exact">${escapeHtml(snap.canonicalExact)}</div>
               </div>
               <div class="detail-row">
-                <div class="detail-key">Supply Source</div>
-                <div class="detail-val" id="coin-supply-source">${escapeHtml(snap.source)}</div>
+                <div class="detail-key">Canonical Source</div>
+                <div class="detail-val" id="coin-supply-canonical-source">${escapeHtml(snap.canonicalSource)}</div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-key">Estimated Supply</div>
+                <div class="detail-val" id="coin-supply-estimate-exact">${escapeHtml(snap.estimatedExact)}</div>
+              </div>
+              <div class="detail-row">
+                <div class="detail-key">Estimate Basis</div>
+                <div class="detail-val" id="coin-supply-estimate-source">${escapeHtml(snap.estimatedSource)}</div>
               </div>
               <div class="detail-row">
                 <div class="detail-key">Scan Scope</div>
@@ -12588,23 +12773,12 @@ async function renderCoin(app, routeCoinType = "") {
       app.addEventListener("click", app._coinClickHandler);
       if (supplyLookupPending) {
         fetchCoinTotalSupplyRpc(coinType, shortCoinType).then((rpcSupply) => {
-          if (rpcSupply?.value != null) {
-            hasSupply = true;
-            supplyRaw = parseBigIntSafe(rpcSupply.value);
-            supplySource = rpcSupply?.source || "unavailable";
-            supplyIsEstimated = !!rpcSupply?.estimated;
-            supplySourceNote = String(rpcSupply?.note || "");
-            supplyUnavailableReason = "";
-          } else {
-            supplySource = rpcSupply?.source || "unavailable";
-            supplyUnavailableReason = rpcSupply?.note || "coinMetadata.supply unavailable";
-          }
+          applyRpcSupplyResult(rpcSupply);
           supplyLookupPending = false;
           applySupplySnapshotToDom();
         }).catch(() => {
           supplyLookupPending = false;
-          supplySource = "unavailable";
-          supplyUnavailableReason = "coinMetadata.supply unavailable";
+          canonicalUnavailableReason = "Supply lookup unavailable for this coin type.";
           applySupplySnapshotToDom();
         });
       }
@@ -13018,6 +13192,7 @@ async function renderCoin(app, routeCoinType = "") {
     if (!notes.some((row) => String(row || "").toLowerCase().includes("scan mode"))) {
       notes.unshift(`Scan mode: ${modeLabel} (object pages ≤ ${fmtNumber(OBJECT_SCAN_MAX_PAGES)}, object digest candidates ≤ ${fmtNumber(OBJECT_SCAN_MAX_DIGESTS)}, supplemental programmable txs ≤ ${fmtNumber(GLOBAL_SCAN_MAX_TX)}).`);
     }
+    const snap = readSupplySnapshot();
 
     app.innerHTML = `
       <div class="page-title">Coin Search <span class="type-tag">${escapeHtml(symbol)}</span></div>
@@ -13038,9 +13213,9 @@ async function renderCoin(app, routeCoinType = "") {
               <div class="stat-sub">from CoinMetadata/registry</div>
             </div>
             <div class="stat-box">
-              <div class="stat-label">Supply</div>
-              <div class="stat-value">${hasSupply ? escapeHtml(supplyDisplay) : "—"}</div>
-              <div class="stat-sub">${hasSupply ? `${escapeHtml(symbol)} units (${escapeHtml(supplySource || "metadata")}${supplyIsEstimated ? ", derived" : ""})` : escapeHtml(supplyUnavailableReason || "coinMetadata.supply unavailable")}</div>
+              <div class="stat-label">Canonical Supply</div>
+              <div class="stat-value">${escapeHtml(snap.canonicalDisplay)}</div>
+              <div class="stat-sub">${escapeHtml(snap.canonicalStatSub)}</div>
             </div>
             <div class="stat-box">
               <div class="stat-label">Matched Tx</div>
@@ -13073,12 +13248,20 @@ async function renderCoin(app, routeCoinType = "") {
               </div>
             </div>
             <div class="detail-row">
-              <div class="detail-key">Exact Supply</div>
-              <div class="detail-val">${hasSupply ? `${escapeHtml(supplyExact)} ${escapeHtml(symbol)}` : '<span class="u-c-dim">Unavailable</span>'}</div>
+              <div class="detail-key">Canonical Supply</div>
+              <div class="detail-val">${escapeHtml(snap.canonicalExact)}</div>
             </div>
             <div class="detail-row">
-              <div class="detail-key">Supply Source</div>
-              <div class="detail-val">${hasSupply ? `${escapeHtml(supplySource || "coinMetadata.supply")}${supplySourceNote ? ` <span class="u-fs11-dim">${escapeHtml(supplySourceNote)}</span>` : ""}` : `<span class="u-c-dim">${escapeHtml(supplyUnavailableReason || "Unavailable")}</span>`}</div>
+              <div class="detail-key">Canonical Source</div>
+              <div class="detail-val">${escapeHtml(snap.canonicalSource)}</div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-key">Estimated Supply</div>
+              <div class="detail-val">${escapeHtml(snap.estimatedExact)}</div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-key">Estimate Basis</div>
+              <div class="detail-val">${escapeHtml(snap.estimatedSource)}</div>
             </div>
             <div class="detail-row">
               <div class="detail-key">Scan Scope</div>

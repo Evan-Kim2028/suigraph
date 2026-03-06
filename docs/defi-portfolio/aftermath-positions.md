@@ -19,7 +19,9 @@ objects, keyed by account ID.
 ## Types
 
 ```
-AccountCap = 0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::AccountCap
+AccountCap<ADMIN> = 0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::AccountCap<0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::ADMIN>
+AccountCap<ASSISTANT> = 0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::AccountCap<0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::ASSISTANT>
+Account (shared) = 0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::Account
 Position Key = 0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::keys::Position
 ```
 
@@ -30,14 +32,18 @@ Position Key = 0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c506
 ```graphql
 {
   address(address: "<wallet>") {
-    objects(filter: { type: "0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::AccountCap" }, first: 5) {
-      nodes { contents { json } }
+    adminCaps: objects(filter: { type: "0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::AccountCap<0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::ADMIN>" }, first: 25) {
+      nodes { address contents { type { repr } json } }
+    }
+    assistantCaps: objects(filter: { type: "0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::AccountCap<0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068::account::ASSISTANT>" }, first: 25) {
+      nodes { address contents { type { repr } json } }
     }
   }
 }
 ```
 
-Each cap's `json.account_id` is a u64.
+Each cap's `json.account_id` is a u64 and maps to one shared `account::Account` object.
+`ADMIN` caps represent the primary owner wallet; `ASSISTANT` caps represent delegated agent wallets.
 
 ### Step 2: Fetch Positions from Clearing Houses
 
@@ -126,14 +132,16 @@ function u64Bcs(n) {
 
 ## Gotchas
 
-1. **IFixed 256-bit signed.** Values >= 2^255 are negative (two's complement). Divide
+1. **Account caps are role-typed.** Query both `AccountCap<ADMIN>` and `AccountCap<ASSISTANT>`
+   for full wallet coverage.
+2. **IFixed 256-bit signed.** Values >= 2^255 are negative (two's complement). Divide
    by 1e18 after sign correction.
-2. **Account ID is u64.** The dynamic field key type is `keys::Position` but the BCS
+3. **Account ID is u64.** The dynamic field key type is `keys::Position` but the BCS
    encoding is the account_id as a u64.
-3. **Multiple clearing houses.** Each market (BTC/USD, XAUT/USD) is a separate clearing
+4. **Multiple clearing houses.** Each market (BTC/USD, XAUT/USD) is a separate clearing
    house object. Query each one per account.
-4. **Positive = long.** `base_asset_amount > 0` means long, negative means short.
-5. **Orderbook pagination matters.** Open-order detail is incomplete if asks/bids map
+5. **Positive = long.** `base_asset_amount > 0` means long, negative means short.
+6. **Orderbook pagination matters.** Open-order detail is incomplete if asks/bids map
    pagination is capped; surface this explicitly.
-6. **Open positions and open orders are distinct.** A user may have no filled position but
+7. **Open positions and open orders are distinct.** A user may have no filled position but
    still have resting orders/collateral in a market.
