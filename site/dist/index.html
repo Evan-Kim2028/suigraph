@@ -1582,6 +1582,8 @@ const DEFI_WINDOW_SAMPLE_PROJECTIONS = Object.freeze({
 });
 const DEFI_WINDOW_SAMPLE_TTL_MS = 20 * 1000;
 const DASH_EPOCHS_TTL_MS = 60 * 1000;
+const DASHBOARD_HEAD_TTL_MS = 10 * 1000;
+const DASHBOARD_ACTIVITY_TTL_MS = 10 * 1000;
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
 const LENDING_RATES_TTL_MS = 60 * 1000;
@@ -1604,6 +1606,8 @@ const defiWindowSampleCacheByProjection = {
   package: {},
   full: {},
 };
+let dashboardHeadCache = { data: null, ts: 0, inFlight: null };
+let dashboardActivityCache = { data: null, ts: 0, inFlight: null };
 let dashboardEpochsCache = { data: null, ts: 0, inFlight: null };
 
 // Known coin type address prefixes → { symbol, decimals }
@@ -4575,22 +4579,64 @@ async function fetchDashboardEpochTrends(force = false) {
   });
 }
 
+async function fetchDashboardHead(force = false) {
+  return withTimedCache(dashboardHeadCache, DASHBOARD_HEAD_TTL_MS, force, async () => {
+    const data = await gql(`{
+      checkpoint {
+        sequenceNumber digest timestamp
+        networkTotalTransactions
+      }
+      epoch {
+        epochId referenceGasPrice startTimestamp
+        totalCheckpoints totalTransactions
+      }
+    }`);
+    return {
+      checkpoint: data?.checkpoint || {},
+      epoch: data?.epoch || {},
+    };
+  });
+}
+
+async function fetchDashboardActivitySnapshot(force = false) {
+  return withTimedCache(dashboardActivityCache, DASHBOARD_ACTIVITY_TTL_MS, force, async () => {
+    const data = await gql(`{
+      transactions(last: 10, filter: {}) {
+        nodes {
+          digest
+          sender { address }
+          kind {
+            __typename
+            ... on ProgrammableTransaction {
+              commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
+            }
+          }
+          effects {
+            status timestamp
+            gasEffects { gasSummary { computationCost storageCost storageRebate } }
+            events(first: 3) { nodes { contents { type { repr } } } }
+          }
+        }
+      }
+      checkpoints(last: 6) {
+        nodes { sequenceNumber digest timestamp networkTotalTransactions rollingGasSummary { computationCost storageCost storageRebate } }
+      }
+    }`);
+    return {
+      txRows: (data?.transactions?.nodes || []).reverse(),
+      cpRows: (data?.checkpoints?.nodes || []).reverse(),
+    };
+  });
+}
+
 async function renderDashboard(app) {
-  const dashHead = await gql(`{
-    checkpoint {
-      sequenceNumber digest timestamp
-      networkTotalTransactions
-    }
-    epoch {
-      epochId referenceGasPrice startTimestamp
-      totalCheckpoints totalTransactions
-    }
-  }`);
+  const dashHead = peekTimedCache(dashboardHeadCache, DASHBOARD_HEAD_TTL_MS) || { checkpoint: {}, epoch: {} };
+  const cachedActivity = peekTimedCache(dashboardActivityCache, DASHBOARD_ACTIVITY_TTL_MS) || { txRows: [], cpRows: [] };
   const cp = dashHead?.checkpoint || {};
   const ep = dashHead?.epoch || {};
   let lastHeadSeq = Number(cp?.sequenceNumber || 0);
   let activityInFlight = null;
-  let latestCheckpointRows = [];
+  let latestCheckpointRows = cachedActivity.cpRows || [];
   const categoryColors = { "Lending": "var(--green)", "Dexes": "var(--blue)", "Dexs": "var(--blue)", "Liquid Staking": "var(--purple)", "CDP": "var(--yellow)", "Yield": "var(--accent)", "Other": "var(--text-dim)" };
 
   function dashGas(t) {
@@ -4668,33 +4714,38 @@ async function renderDashboard(app) {
   async function loadDashboardActivity(force = false) {
     if (!force && activityInFlight) return activityInFlight;
     activityInFlight = (async () => {
-      const data = await gql(`{
-        transactions(last: 10, filter: {}) {
-          nodes {
-            digest
-            sender { address }
-            kind {
-              __typename
-              ... on ProgrammableTransaction {
-                commands(first: 3) { nodes { __typename ... on MoveCallCommand { function { name module { name package { address } } } } } }
-              }
-            }
-            effects {
-              status timestamp
-              gasEffects { gasSummary { computationCost storageCost storageRebate } }
-              events(first: 3) { nodes { contents { type { repr } } } }
-            }
-          }
-        }
-        checkpoints(last: 6) {
-          nodes { sequenceNumber digest timestamp networkTotalTransactions rollingGasSummary { computationCost storageCost storageRebate } }
-        }
-      }`);
-      const txRows = (data?.transactions?.nodes || []).reverse();
-      const cpRows = (data?.checkpoints?.nodes || []).reverse();
-      applyDashboardActivity(txRows, cpRows);
+      const snapshot = await fetchDashboardActivitySnapshot(force);
+      applyDashboardActivity(snapshot?.txRows || [], snapshot?.cpRows || []);
     })().finally(() => { activityInFlight = null; });
     return activityInFlight;
+  }
+
+  function applyDashboardHead(headData) {
+    const nextCp = headData?.checkpoint || {};
+    const nextEp = headData?.epoch || {};
+    const cpEl = document.querySelector('[data-stat="checkpoint"]');
+    if (cpEl) cpEl.textContent = nextCp?.sequenceNumber ? fmtNumber(nextCp.sequenceNumber) : "...";
+    const cpTimeEl = document.querySelector('[data-stat-sub="cp-time"]');
+    if (cpTimeEl) {
+      cpTimeEl.textContent = nextCp?.timestamp ? timeAgo(nextCp.timestamp) : "Loading...";
+      cpTimeEl.title = nextCp?.timestamp ? fmtTime(nextCp.timestamp) : "";
+    }
+    const epochLinkEl = document.querySelector('[data-stat-link="epoch"]');
+    if (epochLinkEl) epochLinkEl.setAttribute("href", nextEp?.epochId != null ? `#/epoch/${nextEp.epochId}` : "#/epoch/0");
+    const epochEl = document.querySelector('[data-stat="epoch"]');
+    if (epochEl) epochEl.textContent = nextEp?.epochId != null ? fmtNumber(nextEp.epochId) : "...";
+    const epochStartEl = document.querySelector('[data-stat-sub="epoch-start"]');
+    if (epochStartEl) epochStartEl.textContent = nextEp?.startTimestamp ? `Started ${fmtTime(nextEp.startTimestamp)}` : "Loading...";
+    const totalTxEl = document.querySelector('[data-stat="total-txns"]');
+    if (totalTxEl) totalTxEl.textContent = nextCp?.networkTotalTransactions ? fmtCompact(nextCp.networkTotalTransactions) : "...";
+    const epochTxEl = document.querySelector('[data-stat-sub="epoch-txns"]');
+    if (epochTxEl) epochTxEl.textContent = nextEp?.totalTransactions ? `Epoch: ${fmtCompact(nextEp.totalTransactions)}` : "Epoch: ...";
+    const gasEl = document.querySelector('[data-stat="gas-price"]');
+    if (gasEl) gasEl.textContent = nextEp?.referenceGasPrice != null ? fmtNumber(nextEp.referenceGasPrice) : "...";
+    const checkpointsEl = document.querySelector('[data-stat-sub="gas-checkpoints"]');
+    if (checkpointsEl) checkpointsEl.textContent = nextEp?.totalCheckpoints != null ? `${fmtNumber(nextEp.totalCheckpoints)} checkpoints` : "Loading...";
+    const seq = Number(nextCp?.sequenceNumber || 0);
+    if (Number.isFinite(seq) && seq > 0) lastHeadSeq = seq;
   }
 
   app.innerHTML = `
@@ -4715,24 +4766,26 @@ async function renderDashboard(app) {
     <div class="dash-grid-6">
       <div class="stat-box">
         <div class="stat-label">Latest Checkpoint</div>
-        <div class="stat-value" data-stat="checkpoint">${fmtNumber(cp.sequenceNumber)}</div>
-        <div class="stat-sub" data-stat-sub="cp-time" title="${fmtTime(cp.timestamp)}" style="cursor:help">${timeAgo(cp.timestamp)}</div>
+        <div class="stat-value" data-stat="checkpoint">${cp?.sequenceNumber ? fmtNumber(cp.sequenceNumber) : "..."}</div>
+        <div class="stat-sub" data-stat-sub="cp-time" title="${cp?.timestamp ? fmtTime(cp.timestamp) : ""}" style="cursor:help">${cp?.timestamp ? timeAgo(cp.timestamp) : "Loading..."}</div>
       </div>
-      <a class="stat-box" href="#/epoch/${ep.epochId}" style="display:block;cursor:pointer;text-decoration:none;color:inherit">
+      <a class="stat-box" data-stat-link="epoch" href="${ep?.epochId != null ? `#/epoch/${ep.epochId}` : '#/epoch/0'}" style="display:block;cursor:pointer;text-decoration:none;color:inherit">
         <div class="stat-label">Current Epoch</div>
-        <div class="stat-value u-c-accent" data-stat="epoch">${fmtNumber(ep.epochId)}</div>
-        <div class="stat-sub">Started ${fmtTime(ep.startTimestamp)}</div>
+        <div class="stat-value u-c-accent" data-stat="epoch">${ep?.epochId != null ? fmtNumber(ep.epochId) : "..."}</div>
+        <div class="stat-sub" data-stat-sub="epoch-start">${ep?.startTimestamp ? `Started ${fmtTime(ep.startTimestamp)}` : "Loading..."}</div>
       </a>
       <div class="stat-box">
         <div class="stat-label">Total Transactions</div>
-        <div class="stat-value" data-stat="total-txns">${fmtCompact(cp.networkTotalTransactions)}</div>
-        <div class="stat-sub">Epoch: ${fmtCompact(ep.totalTransactions)}</div>
-        <div class="sparkline-wrap" id="dash-tx-delta-spark"><span class="u-fs11-dim">loading...</span></div>
+        <div class="stat-value" data-stat="total-txns">${cp?.networkTotalTransactions ? fmtCompact(cp.networkTotalTransactions) : "..."}</div>
+        <div class="stat-sub" data-stat-sub="epoch-txns">${ep?.totalTransactions ? `Epoch: ${fmtCompact(ep.totalTransactions)}` : "Epoch: ..."}</div>
+        <div class="sparkline-wrap" id="dash-tx-delta-spark">${(cachedActivity.cpRows || []).length
+          ? renderSparkline(checkpointTxDeltas(cachedActivity.cpRows || []), { prefix: "Δ ", suffix: " tx/checkpoint", color: "var(--blue)" })
+          : '<span class="u-fs11-dim">loading...</span>'}</div>
       </div>
       <div class="stat-box">
         <div class="stat-label">Gas Price</div>
-        <div class="stat-value">${fmtNumber(ep.referenceGasPrice)} <span class="u-fs12-dim">MIST</span></div>
-        <div class="stat-sub">${fmtNumber(ep.totalCheckpoints)} checkpoints</div>
+        <div class="stat-value"><span data-stat="gas-price">${ep?.referenceGasPrice != null ? fmtNumber(ep.referenceGasPrice) : "..."}</span> <span class="u-fs12-dim">MIST</span></div>
+        <div class="stat-sub" data-stat-sub="gas-checkpoints">${ep?.totalCheckpoints != null ? `${fmtNumber(ep.totalCheckpoints)} checkpoints` : "Loading..."}</div>
       </div>
       <div class="stat-box">
         <div class="stat-label">SUI Price</div>
@@ -4771,7 +4824,7 @@ async function renderDashboard(app) {
         <div class="card-body">
           <table>
             <thead><tr><th>Checkpoint</th><th>Txns</th><th>Gas</th><th>Time</th></tr></thead>
-            <tbody id="dash-cp-tbody">${renderCpRows([])}</tbody>
+            <tbody id="dash-cp-tbody">${renderCpRows(cachedActivity.cpRows || [])}</tbody>
           </table>
           <a class="view-more" href="#/checkpoints">View all checkpoints</a>
         </div>
@@ -4781,7 +4834,7 @@ async function renderDashboard(app) {
         <div class="card-body">
           <table>
             <thead><tr><th>Digest</th><th>Action</th><th>Sender</th><th>Status</th><th>Gas</th><th>Time</th></tr></thead>
-            <tbody id="dash-tx-tbody">${renderTxRows([])}</tbody>
+            <tbody id="dash-tx-tbody">${renderTxRows(cachedActivity.txRows || [])}</tbody>
           </table>
           <a class="view-more" href="#/txs">View all transactions</a>
         </div>
@@ -4794,7 +4847,15 @@ async function renderDashboard(app) {
     </div>
   `;
 
-  loadDashboardActivity().catch(() => null);
+  if (dashHead?.checkpoint || dashHead?.epoch) applyDashboardHead(dashHead);
+  setTimeout(() => {
+    if (!app.isConnected) return;
+    fetchDashboardHead(false).then((head) => {
+      if (!app.isConnected) return;
+      applyDashboardHead(head);
+    }).catch(() => null);
+    loadDashboardActivity(false).catch(() => null);
+  }, 0);
 
   runWhenVisible("epoch-trends-card", () => {
     return fetchDashboardEpochTrends().then((trendData) => {
@@ -4935,25 +4996,16 @@ async function renderDashboard(app) {
       return;
     }
     try {
-      const freshHead = await gql(`{
-        checkpoint { sequenceNumber digest timestamp networkTotalTransactions }
-      }`);
+      const freshHead = await fetchDashboardHead(true);
       const fcp = freshHead?.checkpoint || {};
-      const cpEl = document.querySelector('[data-stat="checkpoint"]');
-      if (cpEl) cpEl.textContent = fmtNumber(fcp.sequenceNumber);
-      const txEl = document.querySelector('[data-stat="total-txns"]');
-      if (txEl) txEl.textContent = fmtNumber(fcp.networkTotalTransactions);
-      const cpTimeEl = document.querySelector('[data-stat-sub="cp-time"]');
-      if (cpTimeEl) {
-        cpTimeEl.textContent = timeAgo(fcp.timestamp);
-        cpTimeEl.title = fmtTime(fcp.timestamp);
-      }
+      const prevSeq = lastHeadSeq;
+      applyDashboardHead(freshHead);
       const seq = Number(fcp?.sequenceNumber || 0);
-      if (Number.isFinite(seq) && seq > 0 && seq !== lastHeadSeq) {
+      if (Number.isFinite(seq) && seq > 0 && seq !== prevSeq) {
         lastHeadSeq = seq;
-        loadDashboardActivity().catch(() => null);
+        loadDashboardActivity(true).catch(() => null);
       } else if (!latestCheckpointRows.length) {
-        loadDashboardActivity().catch(() => null);
+        loadDashboardActivity(false).catch(() => null);
       }
     } catch (_) { /* ignore refresh errors */ }
   }, 5000);
@@ -16683,7 +16735,10 @@ async function renderDefiRates(app) {
   let statusFilter = ["all", "live", "unavailable"].includes(routeParams.get("status")) ? routeParams.get("status") : "all";
   let showAllTokens = routeParams.get("all") === "1";
   let loadErr = "";
-  let data = null;
+  let data = peekTimedCache(lendingRatesCache, LENDING_RATES_TTL_MS) || null;
+  let dataLoading = !data;
+  let pricesLoading = false;
+  let loadReqId = 0;
 
   function persistDefiRateState() {
     setRouteParams({
@@ -16701,15 +16756,38 @@ async function renderDefiRates(app) {
   };
   const fmtUtil = (u) => Number.isFinite(u) ? `${(u * 100).toFixed(1)}%` : "—";
 
-  async function load(force = false) {
-    try {
-      await fetchDefiPrices();
-      data = await fetchLendingRatesOverview(force);
+  function syncDefiRateToken() {
+    const available = Object.keys(data?.byToken || {}).filter(t => showAllTokens || isCoreToken(t));
+    if (!available.length) return;
+    if (available.includes(token)) return;
+    token = available.includes("SUI") ? "SUI" : available[0];
+  }
+  if (data) syncDefiRateToken();
+
+  async function load(force = false, rerender = true) {
+    const reqId = ++loadReqId;
+    dataLoading = !data;
+    pricesLoading = true;
+    if (rerender) app.innerHTML = renderContent();
+    const [ratesRes, pricesRes] = await Promise.allSettled([
+      fetchLendingRatesOverview(force),
+      fetchDefiPrices(force),
+    ]);
+    if (reqId !== loadReqId) return;
+    if (ratesRes.status === "fulfilled") {
+      data = ratesRes.value;
       loadErr = "";
-    } catch (e) {
+      syncDefiRateToken();
+    } else {
       data = null;
-      loadErr = e?.message || "Failed to load lending rates.";
+      loadErr = ratesRes.reason?.message || "Failed to load lending rates.";
     }
+    pricesLoading = false;
+    if (pricesRes.status === "rejected" && !loadErr && !data) {
+      loadErr = pricesRes.reason?.message || "Failed to load lending rates.";
+    }
+    dataLoading = false;
+    if (rerender) app.innerHTML = renderContent();
   }
 
   function sortedRows(allRows) {
@@ -16733,6 +16811,14 @@ async function renderDefiRates(app) {
   }
 
   function renderContent() {
+    if (!data && dataLoading) {
+      return `
+        <div class="page-title">Lending Markets <span class="type-tag">On-Chain</span></div>
+        <div class="card">
+          <div class="card-body">${renderLoading()}</div>
+        </div>
+      `;
+    }
     if (loadErr) return `<div class="page-title">Lending Markets</div>${renderEmpty(escapeHtml(loadErr))}`;
     const allRows = data?.byToken?.[token] || [];
     const rows = sortedRows(allRows);
@@ -16792,6 +16878,7 @@ async function renderDefiRates(app) {
     return `
       <div class="page-title">Lending Markets <span class="type-tag">On-Chain</span></div>
       ${scope}
+      ${pricesLoading ? `<div class="u-fs12-dim u-mb12">Refreshing price context...</div>` : ""}
 
       <div class="stats-grid">
         <div class="stat-box">
@@ -16881,7 +16968,6 @@ async function renderDefiRates(app) {
     `;
   }
 
-  await load(false);
   const setDefiToken = (nextToken) => {
     token = (data?.byToken?.[nextToken]) ? nextToken : "SUI";
     persistDefiRateState();
@@ -16898,9 +16984,7 @@ async function renderDefiRates(app) {
     app.innerHTML = renderContent();
   };
   const refreshDefiRates = async () => {
-    app.innerHTML = renderLoading();
     await load(true);
-    app.innerHTML = renderContent();
   };
   if (app._defiRatesChangeHandler) app.removeEventListener("change", app._defiRatesChangeHandler);
   app._defiRatesChangeHandler = (ev) => {
@@ -16939,6 +17023,10 @@ async function renderDefiRates(app) {
   };
   app.addEventListener("click", app._defiRatesClickHandler);
   app.innerHTML = renderContent();
+  setTimeout(() => {
+    if (!app.isConnected) return;
+    load(false).catch(() => null);
+  }, 0);
 }
 
 // ── Protocol Config ───────────────────────────────────────────────────

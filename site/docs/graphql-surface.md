@@ -1,14 +1,14 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T12:21:13.349Z`
+Generated: `2026-03-10T12:28:15.725Z`
 
 | Metric | Value |
 |---|---:|
-| Total `gql(...)` call sites | 97 |
-| Awaited `gql(...)` call sites | 95 |
-| Static template-literal query call sites | 92 |
+| Total `gql(...)` call sites | 96 |
+| Awaited `gql(...)` call sites | 94 |
+| Static template-literal query call sites | 91 |
 | Dynamic/non-literal query call sites | 5 |
-| Unique static query signatures | 87 |
+| Unique static query signatures | 86 |
 
 ## Operations
 
@@ -23,7 +23,6 @@ Generated: `2026-03-10T12:21:13.349Z`
 | `anonymous:0399123075` | 1 | `query($seq: UInt53) { checkpoint(sequenceNumber: $seq) { sequenceNumber timestamp } }` |
 | `anonymous:056d3c957d` | 1 | `{ address(address: "${NAVI_RESERVES_TABLE}") { ${reserveParts.join("\n")} } }` |
 | `anonymous:0635c6a255` | 1 | `{ checkpoint { timestamp } epochs(last: 8) { nodes { epochId startTimestamp endTimestamp totalTr` |
-| `anonymous:0684d0b1f7` | 1 | `{ checkpoint { sequenceNumber digest timestamp networkTotalTransactions } }` |
 | `anonymous:0c11c259bf` | 1 | `query($seq: UInt53!) { checkpoint(sequenceNumber: $seq) { sequenceNumber digest timestamp previo` |
 | `anonymous:0e00ae4262` | 1 | `{ address(address: "${SCALLOP_BORROW_DYNAMICS_TABLE}") { dynamicFields(first: 30) { nodes { name` |
 | `anonymous:10f7ba4e21` | 1 | `{ address(address: "${addr}") { objects(filter: { type: "${CETUS_CLMM_PKG}::position::Position" ` |
