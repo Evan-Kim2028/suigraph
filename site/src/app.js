@@ -705,6 +705,15 @@ async function withTimedCache(cacheState, ttlMs, force, loader) {
   return cacheState.inFlight;
 }
 
+function peekTimedCache(cacheState, ttlMs) {
+  const now = Date.now();
+  if (cacheState?.data && (now - Number(cacheState.ts || 0)) < ttlMs) {
+    notePerfCache(true);
+    return cacheState.data;
+  }
+  return null;
+}
+
 function getKeyedCacheState(cacheMap, key) {
   const k = String(key || "");
   if (!cacheMap[k]) cacheMap[k] = { data: null, ts: 0, inFlight: null };
@@ -9776,6 +9785,9 @@ async function renderDeletedObjectDetail(app, id) {
   let historyCursor = baseConn?.pageInfo?.startCursor || null;
   let historyLoading = false;
   let historyErr = "";
+  let summaryHydrated = false;
+  let boundaryHydrated = false;
+  let initialHydrationStarted = false;
   const txMetaByDigest = {};
   const summaryState = {
     deletedEvent: null,
@@ -10035,6 +10047,8 @@ async function renderDeletedObjectDetail(app, id) {
     const deleted = boundaryState.deletedEvent || summaryState.deletedEvent;
     const created = boundaryState.createdEvent || summaryState.createdEvent;
     const totalVersions = historyRows.length;
+    const createdLoading = !created && (!summaryHydrated || !boundaryHydrated);
+    const deletedLoading = !deleted && (!summaryHydrated || !boundaryHydrated);
     return `
       <div class="detail-row">
         <div class="detail-key">Object ID</div>
@@ -10062,11 +10076,17 @@ async function renderDeletedObjectDetail(app, id) {
       </div>
       <div class="detail-row">
         <div class="detail-key">Created In Tx</div>
-        <div class="detail-val">${created?.digest ? `${fullHashLink(created.digest, '/tx/' + created.digest)}${Number.isFinite(created.checkpoint) ? ` · checkpoint ${fmtNumber(created.checkpoint)}` : ""}` : (summaryState.completeStart ? '<span class="u-c-dim">Not detected</span>' : '<span class="u-c-dim">Load older versions to resolve</span>')}</div>
+        <div class="detail-val">${created?.digest
+          ? `${fullHashLink(created.digest, '/tx/' + created.digest)}${Number.isFinite(created.checkpoint) ? ` · checkpoint ${fmtNumber(created.checkpoint)}` : ""}`
+          : (createdLoading
+            ? '<span class="u-c-dim">Loading...</span>'
+            : (summaryState.completeStart ? '<span class="u-c-dim">Not detected</span>' : '<span class="u-c-dim">Load older versions to resolve</span>'))}</div>
       </div>
       <div class="detail-row">
         <div class="detail-key">Deleted In Tx</div>
-        <div class="detail-val">${deleted?.digest ? `${fullHashLink(deleted.digest, '/tx/' + deleted.digest)}${Number.isFinite(deleted.checkpoint) ? ` · checkpoint ${fmtNumber(deleted.checkpoint)}` : ""}` : '<span class="u-c-dim">Not detected in loaded window</span>'}</div>
+        <div class="detail-val">${deleted?.digest
+          ? `${fullHashLink(deleted.digest, '/tx/' + deleted.digest)}${Number.isFinite(deleted.checkpoint) ? ` · checkpoint ${fmtNumber(deleted.checkpoint)}` : ""}`
+          : (deletedLoading ? '<span class="u-c-dim">Loading...</span>' : '<span class="u-c-dim">Not detected in loaded window</span>')}</div>
       </div>
     `;
   }
@@ -10091,10 +10111,6 @@ async function renderDeletedObjectDetail(app, id) {
     ).join("");
     document.getElementById("obj-tab-content").innerHTML = tabContent[active]();
   }
-
-  await hydrateTxMeta(historyRows);
-  recomputeSummary();
-  await loadBoundaryLifecycle();
 
   app.innerHTML = `
     <div class="page-title">
@@ -10127,7 +10143,41 @@ async function renderDeletedObjectDetail(app, id) {
     }
   };
   app.addEventListener("click", app._deletedObjectClickHandler);
+
+  function refreshDeletedObjectView(activeTab = null) {
+    const summaryCardEl = document.getElementById("deleted-obj-card");
+    if (summaryCardEl) summaryCardEl.innerHTML = renderOverviewBody();
+    const summaryTabEl = document.getElementById("deleted-obj-summary");
+    if (summaryTabEl) summaryTabEl.innerHTML = renderOverviewBody();
+    const activeLabel = activeTab || document.querySelector(".inner-tab.active")?.textContent || "";
+    const activeContentEl = document.getElementById("obj-tab-content");
+    if (!activeContentEl) return;
+    if (activeLabel.includes("History")) activeContentEl.innerHTML = renderHistoryTable();
+    else if (activeLabel.includes("Overview")) activeContentEl.innerHTML = tabContent.overview();
+  }
+
+  function ensureInitialDeletedObjectHydration() {
+    if (initialHydrationStarted) return;
+    initialHydrationStarted = true;
+    setTimeout(() => {
+      Promise.allSettled([
+        (async () => {
+          await hydrateTxMeta(historyRows);
+          summaryHydrated = true;
+          recomputeSummary();
+        })(),
+        (async () => {
+          await loadBoundaryLifecycle();
+          boundaryHydrated = true;
+        })(),
+      ]).finally(() => {
+        if (app.isConnected) refreshDeletedObjectView();
+      });
+    }, 0);
+  }
+
   renderTabs("overview");
+  ensureInitialDeletedObjectHydration();
 }
 
 async function renderObjectDetail(app, id) {
@@ -12377,9 +12427,6 @@ const TRACKED_TOKENS = {
 };
 
 async function renderTransfers(app) {
-  await fetchDefiPrices();
-  await ensurePrices(Object.keys(TRACKED_TOKENS));
-
   const data = await gql(`{
     transactions(last: 50, filter: { kind: PROGRAMMABLE_TX }) {
       nodes {
@@ -12396,95 +12443,149 @@ async function renderTransfers(app) {
   }`);
 
   const txs = (data.transactions?.nodes || []).reverse();
-  const transfers = [];
-  const tokenCounts = {};
-  let largest = { usd: 0, symbol: "", amount: 0 };
+  syncPeggedPrices();
+  const trackedCoinTypes = [...new Set(txs.flatMap(tx =>
+    (tx.effects?.balanceChanges?.nodes || [])
+      .map(bc => bc.coinType?.repr)
+      .filter(ct => ct && TRACKED_TOKENS[ct])
+  ))];
+  let pricesLoading = false;
 
-  // Group balance changes per tx per coin type to pair senders and receivers
-  for (const tx of txs) {
-    const bcs = tx.effects?.balanceChanges?.nodes || [];
-    // Group by coin type
-    const byCoin = {};
-    for (const bc of bcs) {
-      const ct = bc.coinType?.repr;
-      if (!ct || !TRACKED_TOKENS[ct]) continue;
-      if (!byCoin[ct]) byCoin[ct] = [];
-      byCoin[ct].push(bc);
-    }
-    for (const [ct, changes] of Object.entries(byCoin)) {
-      const symbol = TRACKED_TOKENS[ct];
+  function unresolvedTransferCoinTypes() {
+    syncPeggedPrices();
+    return trackedCoinTypes.filter((ct) => {
       const resolved = resolveCoinType(ct);
-      const price = defiPrices[symbol] || 0;
-      // Separate senders (negative) and receivers (positive)
-      const senders = changes.filter(c => Number(c.amount) < 0);
-      const receivers = changes.filter(c => Number(c.amount) > 0);
-      // Pair up: use the largest absolute flow as the transfer amount
-      const totalSent = senders.reduce((s, c) => s + Math.abs(Number(c.amount)), 0);
-      const humanAmount = totalSent / Math.pow(10, resolved.decimals);
-      const usdValue = humanAmount * price;
-      if (humanAmount === 0) continue;
-      tokenCounts[symbol] = (tokenCounts[symbol] || 0) + 1;
-      if (usdValue > largest.usd) largest = { usd: usdValue, symbol, amount: humanAmount };
-      transfers.push({
-        symbol, humanAmount, usdValue,
-        from: senders.length ? senders[0].owner?.address : tx.sender?.address,
-        to: receivers.length ? receivers[0].owner?.address : null,
-        multiFrom: senders.length > 1 ? senders.map(s => s.owner?.address) : null,
-        multiTo: receivers.length > 1 ? receivers.map(r => r.owner?.address) : null,
-        digest: tx.digest, timestamp: tx.effects?.timestamp,
-      });
+      return !(Number(defiPrices[resolved.symbol] || 0) > 0);
+    });
+  }
+
+  function buildTransferSnapshot() {
+    syncPeggedPrices();
+    const transfers = [];
+    const tokenCounts = {};
+    let largest = { usd: 0, symbol: "", amount: 0 };
+
+    // Group balance changes per tx per coin type to pair senders and receivers
+    for (const tx of txs) {
+      const bcs = tx.effects?.balanceChanges?.nodes || [];
+      const byCoin = {};
+      for (const bc of bcs) {
+        const ct = bc.coinType?.repr;
+        if (!ct || !TRACKED_TOKENS[ct]) continue;
+        if (!byCoin[ct]) byCoin[ct] = [];
+        byCoin[ct].push(bc);
+      }
+      for (const [ct, changes] of Object.entries(byCoin)) {
+        const symbol = TRACKED_TOKENS[ct];
+        const resolved = resolveCoinType(ct);
+        const price = Number(defiPrices[symbol] || 0);
+        const senders = changes.filter(c => Number(c.amount) < 0);
+        const receivers = changes.filter(c => Number(c.amount) > 0);
+        const totalSent = senders.reduce((s, c) => s + Math.abs(Number(c.amount)), 0);
+        const humanAmount = totalSent / Math.pow(10, resolved.decimals);
+        const usdValue = humanAmount * price;
+        if (humanAmount === 0) continue;
+        tokenCounts[symbol] = (tokenCounts[symbol] || 0) + 1;
+        if (usdValue > largest.usd) largest = { usd: usdValue, symbol, amount: humanAmount };
+        transfers.push({
+          symbol, humanAmount, usdValue,
+          from: senders.length ? senders[0].owner?.address : tx.sender?.address,
+          to: receivers.length ? receivers[0].owner?.address : null,
+          multiFrom: senders.length > 1 ? senders.map(s => s.owner?.address) : null,
+          multiTo: receivers.length > 1 ? receivers.map(r => r.owner?.address) : null,
+          digest: tx.digest, timestamp: tx.effects?.timestamp,
+        });
+      }
+    }
+
+    transfers.sort((a, b) => b.usdValue - a.usdValue);
+    return {
+      transfers,
+      tokenEntries: Object.entries(tokenCounts).sort((a, b) => b[1] - a[1]),
+      largest,
+    };
+  }
+
+  function renderContent() {
+    const { transfers, tokenEntries, largest } = buildTransferSnapshot();
+    const pricingPending = pricesLoading && unresolvedTransferCoinTypes().length > 0;
+    return `
+      <div class="page-title">Top Token Transfers <span class="type-tag">Recent</span></div>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="stat-label">Total Transfers</div>
+          <div class="stat-value">${fmtNumber(transfers.length)}</div>
+          <div class="stat-sub">From ${txs.length} recent txs</div>
+        </div>
+        ${tokenEntries.map(([sym, count]) => {
+          const price = Number(defiPrices[sym] || 0);
+          const priceLabel = price > 0
+            ? `$${price.toFixed(sym === "SUI" || sym === "DEEP" || sym === "WAL" ? 4 : 2)}`
+            : (pricingPending ? "Loading price..." : "Price unavailable");
+          return `
+            <div class="stat-box">
+              <div class="stat-label">${sym}</div>
+              <div class="stat-value">${fmtNumber(count)}</div>
+              <div class="stat-sub">${priceLabel}</div>
+            </div>
+          `;
+        }).join("")}
+        <div class="stat-box">
+          <div class="stat-label">Largest Transfer</div>
+          <div class="stat-value u-c-green">${largest.usd > 0 ? `$${fmtCompact(largest.usd)}` : "—"}</div>
+          <div class="stat-sub">${largest.usd > 0
+            ? `${largest.amount.toLocaleString(undefined, {maximumFractionDigits: 2})} ${largest.symbol}`
+            : (pricingPending ? "Pricing recent transfers..." : "Price unavailable")}</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">Transfers by USD Value</div>
+        <div class="card-body">
+          ${transfers.length ? `<table>
+            <thead><tr><th>Token</th><th class="u-ta-right">Amount</th><th class="u-ta-right">USD Value</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
+            <tbody>
+              ${transfers.slice(0, 100).map(t => {
+                const amtFmt = t.humanAmount < 0.001 ? t.humanAmount.toExponential(2) : t.humanAmount.toLocaleString(undefined, {maximumFractionDigits: 4});
+                const fromLabel = t.multiFrom ? `${hashLink(t.from, '/address/' + t.from)} <span class="u-fs10-dim">+${t.multiFrom.length - 1}</span>` : (t.from ? hashLink(t.from, '/address/' + t.from) : "—");
+                const toLabel = t.multiTo ? `${hashLink(t.to, '/address/' + t.to)} <span class="u-fs10-dim">+${t.multiTo.length - 1}</span>` : (t.to ? hashLink(t.to, '/address/' + t.to) : '<span class="u-c-dim">contract</span>');
+                const usdLabel = t.usdValue > 0
+                  ? `$${t.usdValue < 0.01 ? t.usdValue.toFixed(4) : fmtCompact(t.usdValue)}`
+                  : (pricingPending ? '<span class="u-c-dim">Loading...</span>' : '<span class="u-c-dim">—</span>');
+                return `<tr>
+                  <td class="u-fw-600">${t.symbol}</td>
+                  <td class="u-ta-right-mono">${amtFmt}</td>
+                  <td style="text-align:right;font-family:var(--mono);color:var(--green)">${usdLabel}</td>
+                  <td>${fromLabel}</td>
+                  <td>${toLabel}</td>
+                  <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
+                  <td>${timeTag(t.timestamp)}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>` : renderEmpty("No token transfers found in recent transactions.")}
+        </div>
+      </div>
+    `;
+  }
+
+  async function hydrateTransferPrices(force = false) {
+    const missing = unresolvedTransferCoinTypes();
+    if (!missing.length || pricesLoading) return;
+    pricesLoading = true;
+    if (app.isConnected) app.innerHTML = renderContent();
+    try {
+      await fetchDefiPrices(force);
+      await ensurePrices(missing);
+    } catch (_) {
+      // Keep the shell rendered even if pricing enrichment fails.
+    } finally {
+      pricesLoading = false;
+      if (app.isConnected) app.innerHTML = renderContent();
     }
   }
 
-  transfers.sort((a, b) => b.usdValue - a.usdValue);
-  const tokenEntries = Object.entries(tokenCounts).sort((a, b) => b[1] - a[1]);
-
-  app.innerHTML = `
-    <div class="page-title">Top Token Transfers <span class="type-tag">Recent</span></div>
-    <div class="stats-grid">
-      <div class="stat-box">
-        <div class="stat-label">Total Transfers</div>
-        <div class="stat-value">${fmtNumber(transfers.length)}</div>
-        <div class="stat-sub">From ${txs.length} recent txs</div>
-      </div>
-      ${tokenEntries.map(([sym, count]) => `
-        <div class="stat-box">
-          <div class="stat-label">${sym}</div>
-          <div class="stat-value">${fmtNumber(count)}</div>
-          <div class="stat-sub">$${(defiPrices[sym] || 0).toFixed(sym === "SUI" || sym === "DEEP" || sym === "WAL" ? 4 : 2)}</div>
-        </div>
-      `).join("")}
-      ${largest.usd > 0 ? `<div class="stat-box">
-        <div class="stat-label">Largest Transfer</div>
-        <div class="stat-value u-c-green">$${fmtCompact(largest.usd)}</div>
-        <div class="stat-sub">${largest.amount.toLocaleString(undefined, {maximumFractionDigits: 2})} ${largest.symbol}</div>
-      </div>` : ""}
-    </div>
-    <div class="card">
-      <div class="card-header">Transfers by USD Value</div>
-      <div class="card-body">
-        ${transfers.length ? `<table>
-          <thead><tr><th>Token</th><th class="u-ta-right">Amount</th><th class="u-ta-right">USD Value</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
-          <tbody>
-            ${transfers.slice(0, 100).map(t => {
-              const amtFmt = t.humanAmount < 0.001 ? t.humanAmount.toExponential(2) : t.humanAmount.toLocaleString(undefined, {maximumFractionDigits: 4});
-              const fromLabel = t.multiFrom ? `${hashLink(t.from, '/address/' + t.from)} <span class="u-fs10-dim">+${t.multiFrom.length - 1}</span>` : (t.from ? hashLink(t.from, '/address/' + t.from) : "—");
-              const toLabel = t.multiTo ? `${hashLink(t.to, '/address/' + t.to)} <span class="u-fs10-dim">+${t.multiTo.length - 1}</span>` : (t.to ? hashLink(t.to, '/address/' + t.to) : '<span class="u-c-dim">contract</span>');
-              return `<tr>
-                <td class="u-fw-600">${t.symbol}</td>
-                <td class="u-ta-right-mono">${amtFmt}</td>
-                <td style="text-align:right;font-family:var(--mono);color:var(--green)">$${t.usdValue < 0.01 ? t.usdValue.toFixed(4) : fmtCompact(t.usdValue)}</td>
-                <td>${fromLabel}</td>
-                <td>${toLabel}</td>
-                <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
-                <td>${timeTag(t.timestamp)}</td>
-              </tr>`;
-            }).join("")}
-          </tbody>
-        </table>` : renderEmpty("No token transfers found in recent transactions.")}
-      </div>
-    </div>
-  `;
+  app.innerHTML = renderContent();
+  if (unresolvedTransferCoinTypes().length) hydrateTransferPrices(false).catch(() => null);
 }
 
 // ── Validators / Staking ────────────────────────────────────────────────
@@ -14592,17 +14693,29 @@ async function renderDefiDex(app) {
   let data = await fetchDefiDexSnapshot(windowKey);
   let unresolvedFallback = [];
   let fallbackLoaded = false;
+  let fallbackLoading = false;
 
   async function loadDexFallback(force = false) {
-    if (fallbackLoaded && !force) return;
+    if (fallbackLoading) return Promise.resolve();
+    if (fallbackLoaded && !force) return Promise.resolve();
+    fallbackLoading = true;
     try {
       const pkg = await fetchPackageActivitySnapshot(windowKey, force);
       unresolvedFallback = (pkg?.unresolvedPackages || []).slice(0, 20);
       fallbackLoaded = true;
     } catch (e) { /* ignore */ }
+    finally {
+      fallbackLoading = false;
+    }
   }
 
-  if (!(data?.dexProtocols || []).length) await loadDexFallback(false);
+  if (!(data?.dexProtocols || []).length) {
+    const cachedFallback = peekTimedCache(getKeyedCacheState(packageActivityCacheByWindow, windowKey), PACKAGE_ACTIVITY_TTL_MS);
+    if (cachedFallback) {
+      unresolvedFallback = (cachedFallback.unresolvedPackages || []).slice(0, 20);
+      fallbackLoaded = true;
+    }
+  }
   let query = routeParams.get("q") || "";
   let sortKey = ["tx", "success", "latest", "name"].includes(routeParams.get("sort")) ? routeParams.get("sort") : "tx";
   let statusFilter = ["all", "success", "failed"].includes(routeParams.get("status")) ? routeParams.get("status") : "all";
@@ -14722,12 +14835,12 @@ async function renderDefiDex(app) {
         </div>
       </div>
 
-      ${!top.length && fallbackRows.length ? `
+      ${!top.length && (fallbackRows.length || fallbackLoading) ? `
       <div class="card u-mb16">
         <div class="card-header">Active Unclassified Packages <span class="type-tag">Fallback</span></div>
         <div class="card-body">
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No DEX-tagged protocols were resolved. Showing high-activity unresolved packages from the same sampling window.</div>
-          <table>
+          ${fallbackRows.length ? `<table>
             <thead><tr><th>Package</th><th class="u-ta-right">Tx Count</th><th class="u-ta-right">Call Count</th></tr></thead>
             <tbody>
               ${fallbackRows.map(r => `<tr>
@@ -14736,7 +14849,7 @@ async function renderDefiDex(app) {
                 <td class="u-ta-right-mono">${fmtNumber(r.callCount)}</td>
               </tr>`).join("")}
             </tbody>
-          </table>
+          </table>` : `<div style="padding:8px 0">${renderLoading()}</div>`}
         </div>
       </div>` : ""}
 
@@ -14784,16 +14897,32 @@ async function renderDefiDex(app) {
     persistDefiDexState();
     app.innerHTML = renderLoading();
     fallbackLoaded = false;
+    fallbackLoading = false;
     unresolvedFallback = [];
     data = await fetchDefiDexSnapshot(windowKey, false);
-    if (!(data?.dexProtocols || []).length) await loadDexFallback(false);
     app.innerHTML = renderContent();
+    if (!(data?.dexProtocols || []).length) {
+      const pendingFallback = loadDexFallback(false);
+      app.innerHTML = renderContent();
+      pendingFallback.finally(() => {
+        if (app.isConnected) app.innerHTML = renderContent();
+      });
+    }
   };
   const refreshDefiDex = async () => {
     app.innerHTML = renderLoading();
     data = await fetchDefiDexSnapshot(windowKey, true);
-    if (!(data?.dexProtocols || []).length) await loadDexFallback(true);
+    fallbackLoaded = false;
+    fallbackLoading = false;
+    unresolvedFallback = [];
     app.innerHTML = renderContent();
+    if (!(data?.dexProtocols || []).length) {
+      const pendingFallback = loadDexFallback(true);
+      app.innerHTML = renderContent();
+      pendingFallback.finally(() => {
+        if (app.isConnected) app.innerHTML = renderContent();
+      });
+    }
   };
   if (app._defiDexInputHandler) app.removeEventListener("input", app._defiDexInputHandler);
   const _debouncedDexQuery = debounce((val) => setDefiDexQuery(val), 300);
@@ -14833,6 +14962,13 @@ async function renderDefiDex(app) {
   };
   app.addEventListener("click", app._defiDexClickHandler);
   app.innerHTML = renderContent();
+  if (!(data?.dexProtocols || []).length && !fallbackLoaded) {
+    const pendingFallback = loadDexFallback(false);
+    app.innerHTML = renderContent();
+    pendingFallback.finally(() => {
+      if (app.isConnected) app.innerHTML = renderContent();
+    });
+  }
 }
 
 // ── DeFi Stablecoins ───────────────────────────────────────────────────
