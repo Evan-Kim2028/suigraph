@@ -1,11 +1,11 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T12:57:32.376Z`
+Generated: `2026-03-10T13:01:34.744Z`
 
 | Metric | Value |
 |---|---:|
 | Total `gql(...)` call sites | 96 |
-| Awaited `gql(...)` call sites | 94 |
+| Awaited `gql(...)` call sites | 92 |
 | Static template-literal query call sites | 91 |
 | Dynamic/non-literal query call sites | 5 |
 | Unique static query signatures | 86 |

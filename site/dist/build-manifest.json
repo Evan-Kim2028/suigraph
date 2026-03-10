@@ -6,8 +6,8 @@
     "index.html",
     "dist/index.html"
   ],
-  "hashSha256": "e24b2637be49ab76b1aa660614d78e442029b1feb4f75ca6b53e3188a4bbf3df",
-  "lines": 17659,
-  "bytes": 822467,
-  "builtAt": "2026-03-10T12:56:09.653Z"
+  "hashSha256": "2bdaaa83a7340f4ea4ab9d0c9c4de5e151254309a139d792c2049e5911197625",
+  "lines": 17688,
+  "bytes": 823915,
+  "builtAt": "2026-03-10T13:00:06.858Z"
 }

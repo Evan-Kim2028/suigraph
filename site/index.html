@@ -1633,6 +1633,7 @@ const DASH_EPOCHS_TTL_MS = 60 * 1000;
 const DASHBOARD_HEAD_TTL_MS = 10 * 1000;
 const DASHBOARD_ACTIVITY_TTL_MS = 10 * 1000;
 const DEFI_PRICE_PERSIST_TTL_MS = 15 * 1000;
+const LIST_PAGE_TTL_MS = 15 * 1000;
 const PERSISTED_CACHE_KEYS = Object.freeze({
   dashboardHead: "suigraph_cache_dashboard_head_v1",
   dashboardActivity: "suigraph_cache_dashboard_activity_v1",
@@ -1647,6 +1648,8 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   dashboardEpochs: "suigraph_cache_dashboard_epochs_v1",
   ecosystemStats: "suigraph_cache_ecosystem_stats_v1",
   stablecoinSupply: "suigraph_cache_stablecoin_supply_v1",
+  checkpointsListFirstPage: "suigraph_cache_checkpoints_first_page_v1",
+  transactionsListFirstPage: "suigraph_cache_transactions_first_page_v1",
 });
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
@@ -1675,6 +1678,8 @@ const defiWindowSampleCacheByProjection = {
 let dashboardHeadCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardHead, DASHBOARD_HEAD_TTL_MS);
 let dashboardActivityCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardActivity, DASHBOARD_ACTIVITY_TTL_MS);
 let dashboardEpochsCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardEpochs, DASH_EPOCHS_TTL_MS);
+let checkpointsListCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.checkpointsListFirstPage, LIST_PAGE_TTL_MS);
+let transactionsListCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.transactionsListFirstPage, LIST_PAGE_TTL_MS);
 
 // Known coin type address prefixes → { symbol, decimals }
 // Fixes decimal parsing for bridge tokens whose type ends in ::coin::COIN etc.
@@ -5100,7 +5105,7 @@ async function renderDashboard(app) {
 // ── Checkpoints List ────────────────────────────────────────────────────
 let checkpointsCursor = null;
 async function renderCheckpoints(app, after = null) {
-  const data = await gql(`query($after: String) {
+  const loadPage = () => gql(`query($after: String) {
     checkpoints(last: 25, before: $after) {
       pageInfo { hasPreviousPage startCursor hasNextPage endCursor }
       nodes {
@@ -5109,10 +5114,21 @@ async function renderCheckpoints(app, after = null) {
         rollingGasSummary { computationCost storageCost }
       }
     }
-  }`, { after });
+  }`, { after }).then((data) => ({
+    nodes: data?.checkpoints?.nodes || [],
+    pageInfo: data?.checkpoints?.pageInfo || { hasPreviousPage: false, startCursor: "", hasNextPage: false, endCursor: "" },
+  }));
 
-  const cps = data.checkpoints.nodes.reverse();
-  const pi = data.checkpoints.pageInfo;
+  const page = after
+    ? await loadPage()
+    : await withTimedCache(checkpointsListCache, LIST_PAGE_TTL_MS, false, async () => {
+        const result = await loadPage();
+        writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.checkpointsListFirstPage, result, 18000);
+        return result;
+      });
+
+  const cps = page.nodes.reverse();
+  const pi = page.pageInfo;
 
   app.innerHTML = `
     <div class="page-title">Checkpoints</div>
@@ -5798,7 +5814,7 @@ async function renderTransactions(app, before = null, dateState = null) {
   let pi = { hasPreviousPage: false, startCursor: "", hasNextPage: false, endCursor: "" };
   if (!txLoadError) {
     try {
-      const data = await gql(`query($before: String, $filter: TransactionFilter) {
+      const loadPage = () => gql(`query($before: String, $filter: TransactionFilter) {
         transactions(last: 25, before: $before, filter: $filter) {
           pageInfo { hasPreviousPage startCursor hasNextPage endCursor }
           nodes {
@@ -5822,14 +5838,27 @@ async function renderTransactions(app, before = null, dateState = null) {
             }
           }
         }
-      }`, { before, filter: dateFilter.filter });
-      txs = (data?.transactions?.nodes || []).reverse().filter((t) => txListWithinRange(t, dateFilter.fromMs, dateFilter.toMs));
+      }`, { before, filter: dateFilter.filter }).then((data) => ({
+        nodes: data?.transactions?.nodes || [],
+        pageInfo: data?.transactions?.pageInfo || pi,
+      }));
+
+      const useCachedFirstPage = !before && state.preset === "all" && !dateFilter.filter;
+      const page = useCachedFirstPage
+        ? await withTimedCache(transactionsListCache, LIST_PAGE_TTL_MS, false, async () => {
+            const result = await loadPage();
+            writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.transactionsListFirstPage, result, 90000);
+            return result;
+          })
+        : await loadPage();
+
+      txs = page.nodes.reverse().filter((t) => txListWithinRange(t, dateFilter.fromMs, dateFilter.toMs));
       for (const tx of txs) {
         const seq = Number(tx?.effects?.checkpoint?.sequenceNumber);
         const tsMs = parseTsMs(tx?.effects?.timestamp);
         if (Number.isFinite(seq) && Number.isFinite(tsMs)) txListRememberCheckpointHint(tsMs, seq);
       }
-      pi = data?.transactions?.pageInfo || pi;
+      pi = page.pageInfo || pi;
     } catch (e) {
       txLoadError = e?.message || "Failed to load transactions.";
     }
