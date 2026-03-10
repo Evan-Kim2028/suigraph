@@ -15,7 +15,10 @@ const css = readFileSync(CSS_PATH, "utf8");
 const appSource = readAppSource(SITE_ROOT);
 const js = appSource.source;
 const jsLabel = appSource.jsSourceLabel;
-const rendered = template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => js);
+const rendered = template
+  .replace("{{APP_STYLE_TAG}}", () => `<style>${css}</style>`)
+  .replace("{{APP_EXTRA_META}}", () => "")
+  .replace("{{APP_SCRIPT_TAG}}", () => `<script>${js}</script>`);
 
 const MAX_INLINE_STYLE_ATTRS = 500;
 const MAX_PREVIEW = 5;

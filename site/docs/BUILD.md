@@ -19,9 +19,9 @@
 - `src/index.template.html`
 - `src/styles.css`
 - `src/app/*.js`
-2. Run `npm run build` to generate minified `index.html` and `dist/index.html`.
+2. Run `npm run build` to generate minified `index.html`, `assets/`, `dist/index.html`, and `dist/assets/`.
 3. Run `npm run validate` before commit.
-4. Use `dist/index.html` as the explicit deployment artifact target.
+4. Use `dist/` as the explicit deployment artifact target.
 5. Run `npm run smoke:coin` (or pass custom `--coin`) when touching coin-search logic.
 
 `npm run validate` includes:
@@ -31,12 +31,13 @@
   - no inline event handler attributes
   - no `window.*` handler assignments
   - no duplicate `class` attributes in app HTML snippets
-  - inline-style budget cap on generated single-file output
+  - inline-style budget cap on generated app HTML snippets
   - route pages must have explicit entries in `PAGE_PERF_BUDGETS`
 - schema coverage drift check (`schema:check`) against `docs/schema-root-fields.json`
 
 ## Artifacts
-- `dist/index.html`: deployable single-file output with minified inline CSS/JS.
+- `dist/index.html`: deployable HTML entrypoint.
+- `dist/assets/`: deployable minified JS/CSS assets.
 - `dist/build-manifest.json`: build hash and metadata.
 - `docs/baseline.md`: static maintainability baseline metrics.
 - `docs/graphql-surface.md`: static GraphQL call-surface summary.

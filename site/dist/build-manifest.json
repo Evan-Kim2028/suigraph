@@ -1,13 +1,40 @@
 {
   "source": "src/index.template.html + src/styles.css + src/app/*.js",
-  "buildMode": "templated-inline-minified",
+  "buildMode": "templated-external-assets",
   "sourceDescriptor": "src/index.template.html + src/styles.css + src/app/*.js",
   "outputs": [
     "index.html",
-    "dist/index.html"
+    "dist/index.html",
+    "assets/styles.css",
+    "dist/assets/styles.css",
+    "assets/app.js",
+    "dist/assets/app.js",
+    "assets/app-extra.js",
+    "dist/assets/app-extra.js"
   ],
-  "hashSha256": "ab18fa5e5ff28ac245e12ea05a1423bcf59f209d22c465ca78b99f53048d0bfb",
-  "lines": 74,
-  "bytes": 535602,
-  "builtAt": "2026-03-10T14:55:54.903Z"
+  "htmlHashSha256": "3f6eb4d9647e09dc45fc81a229a4c41218065320ee6d33a65673858545b1ba59",
+  "htmlLines": 68,
+  "htmlBytes": 4819,
+  "totalBytes": 584325,
+  "assets": [
+    {
+      "path": "assets/styles.css",
+      "bytes": 29215,
+      "hashSha256": "56ab3191d6d407e43bf67c19a9749dda187d03dc5095fdff3d50ca874f688629",
+      "version": "56ab3191d6d4"
+    },
+    {
+      "path": "assets/app.js",
+      "bytes": 186817,
+      "hashSha256": "52ed4c6e464eaef204601f962e0266367dd23fc6822b6af1cb16b84b5acba642",
+      "version": "52ed4c6e464e"
+    },
+    {
+      "path": "assets/app-extra.js",
+      "bytes": 363474,
+      "hashSha256": "a545aeacb119d1e83f8e92d0b617fa2ac0ac538dcb6965f75225b74274e1c746",
+      "version": "a545aeacb119"
+    }
+  ],
+  "builtAt": "2026-03-10T15:39:43.481Z"
 }

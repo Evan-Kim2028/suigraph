@@ -4,10 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>suigraph block explorer</title>
-  <style>
-/* @build-inline styles.css */
-{{INLINE_CSS}}
-  </style>
+  {{APP_STYLE_TAG}}
+  {{APP_EXTRA_META}}
+  {{APP_SCRIPT_TAG}}
 </head>
 <body>
 
@@ -64,10 +63,5 @@
 <div class="main" id="app">
   <div class="loading"><div class="spinner"></div><br>Loading...</div>
 </div>
-
-<script>
-/* @build-inline app/*.js */
-{{INLINE_JS}}
-  </script>
 </body>
 </html>

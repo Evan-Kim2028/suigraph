@@ -1,7 +1,7 @@
 # Walrus Sites Deployment
 
-suigraph is deployed as a Walrus Site on Sui mainnet. The site is a single `index.html`
-file with all CSS and JS inlined.
+suigraph is deployed as a Walrus Site on Sui mainnet. The site is a static bundle with
+an SPA `index.html` entrypoint plus generated JS/CSS assets under `assets/`.
 
 ## Prerequisites
 
@@ -29,10 +29,11 @@ npm run build
 
 This runs `node scripts/build-single-file.mjs` which:
 1. Reads `src/index.template.html`
-2. Minifies and inlines `src/styles.css` at the `{{INLINE_CSS}}` placeholder
-3. Concatenates `src/app/*.js`, minifies the result, and inlines it at the `{{INLINE_JS}}` placeholder
-4. Writes the result to both `index.html` and `dist/index.html`
-5. Outputs a sha256 hash for verification
+2. Minifies `src/styles.css` into `assets/styles.css` and `dist/assets/styles.css`
+3. Splits `src/app/*.js` into a bootstrap bundle (`app.js`) and lazy extra bundle (`app-extra.js`)
+4. Writes versioned asset references into both `index.html` and `dist/index.html`
+5. Copies deploy config to `dist/ws-resources.json`
+6. Outputs build hashes and metadata for verification
 
 ## Deploy / Update
 
@@ -62,6 +63,18 @@ The `ws-resources.json` file controls routing, headers, and metadata:
     "/index.html": {
       "Cache-Control": "no-cache, must-revalidate",
       "Content-Type": "text/html; charset=utf-8"
+    },
+    "/assets/styles.css": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "/assets/app.js": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "/assets/app-extra.js": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
     }
   },
   "routes": {
@@ -79,7 +92,7 @@ The `ws-resources.json` file controls routing, headers, and metadata:
 
 Key settings:
 - **`routes`**: `/*` → `/index.html` makes it a single-page app (all paths serve index.html)
-- **`headers`**: `no-cache` ensures users always get the latest version
+- **`headers`**: `index.html` stays revalidated, while generated assets can be cached aggressively
 - **`object_id`**: Auto-updated by `site-builder update`
 
 ## Browsing the Site
@@ -113,7 +126,7 @@ python3 -m http.server 8080
 ```bash
 # Full deploy workflow
 cd site
-npm run build                    # Build single-file site
+npm run build                    # Build HTML + asset bundle
 site-builder --context=mainnet deploy ./dist --epochs 10 --ws-resources ./ws-resources.json
 
 # Verify

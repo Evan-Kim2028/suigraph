@@ -7,7 +7,7 @@ This repo is designed to be deployable on [Walrus Sites](https://docs.wal.app/) 
 ## What This Explorer Is Designed To Do
 
 - Expose core Sui chain data through a fast, static UI backed by GraphQL queries.
-- Keep deployment simple: one generated HTML artifact, zero runtime dependencies in the browser.
+- Keep deployment simple: a static Walrus-ready HTML + asset bundle, zero runtime dependencies in the browser.
 - Support both regular users (search, chain views, DeFi views) and power users (query playground, simulator, package inspection).
 
 ## What It Supports
@@ -46,18 +46,20 @@ This repo is designed to be deployable on [Walrus Sites](https://docs.wal.app/) 
 - `site/src/index.template.html`: source HTML template
 - `site/src/styles.css`: source styles
 - `site/src/app/*.js`: ordered source application logic
-- `site/scripts/build-single-file.mjs`: concatenates/minifies source files into deploy outputs
+- `site/scripts/build-single-file.mjs`: builds minified HTML + JS + CSS deploy outputs
 - `site/ws-resources.json`: Walrus Sites routing/headers/metadata source config
-- `site/index.html`: generated single-file output (root compatibility output)
-- `site/dist/index.html`: generated deploy artifact
+- `site/index.html`: generated compatibility output
+- `site/assets/`: generated local JS/CSS assets
+- `site/dist/index.html`: generated deploy HTML
+- `site/dist/assets/`: generated deploy JS/CSS assets
 - `site/dist/ws-resources.json`: generated Walrus config copied at build time
 - `site/docs/`: architecture/build/perf/schema docs and generated reports
 
 ## Architecture Design Rationale
 
-- Single-file runtime output:
+- Static runtime bundle:
   - optimized for static hosting and Walrus Sites deployment
-  - minimizes moving parts and operational overhead
+  - keeps initial bootstrap smaller by lazy-loading the secondary route bundle
 - Source modularity with build inlining:
   - author in separated `src/` files for maintainability
   - emit one file for deployment portability
@@ -92,7 +94,7 @@ npm run validate
 ```
 
 Primary commands:
-- `npm run build`: regenerate `index.html` and `dist/index.html`
+- `npm run build`: regenerate `index.html`, `assets/`, `dist/index.html`, and `dist/assets/`
 - `npm run build:check`: verify generated outputs match `src/*`
 - `npm run validate`: run all quality checks
 - `npm run baseline`: refresh baseline metrics doc

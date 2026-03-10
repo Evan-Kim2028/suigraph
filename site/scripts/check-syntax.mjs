@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
 const htmlPath = resolve(SITE_ROOT, "index.html");
+const externalJsPaths = [
+  resolve(SITE_ROOT, "assets/app.js"),
+  resolve(SITE_ROOT, "assets/app-extra.js"),
+];
 const html = readFileSync(htmlPath, "utf8");
 
-const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]);
+const inlineScripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
+const externalScripts = externalJsPaths.filter((path) => existsSync(path)).map((path) => readFileSync(path, "utf8"));
+const scripts = [...inlineScripts, ...externalScripts];
+
 if (!scripts.length) {
-  console.error("check-syntax: no <script> blocks found in index.html");
+  console.error("check-syntax: no built script sources found");
   process.exit(1);
 }
 
@@ -25,4 +32,4 @@ for (let i = 0; i < scripts.length; i++) {
   }
 }
 
-console.log(`check-syntax: ${scripts.length} script block(s) parsed successfully`);
+console.log(`check-syntax: ${scripts.length} built script source(s) parsed successfully`);

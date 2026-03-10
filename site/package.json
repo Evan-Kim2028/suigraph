@@ -1,7 +1,7 @@
 {
   "name": "suigraph-site",
   "version": "1.0.0",
-  "description": "a graphql based block explorer (single-file site)",
+  "description": "a graphql based block explorer (static Walrus site)",
   "private": true,
   "type": "module",
   "engines": {

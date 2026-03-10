@@ -476,6 +476,7 @@ async function renderDashboard(app) {
   if (cachedEcosystemStats) applyDashboardEcosystemStats(cachedEcosystemStats);
   const priceBox = document.querySelector('[data-stat="sui-price"]');
   if (priceBox && defiPrices.SUI) priceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
+  const loadDashboardExtraBundle = () => ensureExtraRoutesLoaded().catch(() => null);
   setTimeout(() => {
     if (!isActiveRoute()) return;
     fetchDashboardHead(false).then((head) => {
@@ -493,24 +494,36 @@ async function renderDashboard(app) {
   }, { rootMargin: "200px 0px", timeoutMs: 1800 });
 
   runWhenVisible("stablecoin-card", () => {
-    return fetchStablecoinSupply().then((data) => {
-      if (!isActiveRoute()) return;
-      applyDashboardStablecoinSupply(data);
-    });
+    return new Promise((resolve) => setTimeout(resolve, 900))
+      .then(loadDashboardExtraBundle)
+      .then(() => fetchStablecoinSupply())
+      .then((data) => {
+        if (!isActiveRoute()) return;
+        applyDashboardStablecoinSupply(data);
+      });
   }, { rootMargin: "240px 0px", timeoutMs: 2200 });
 
   runWhenVisible("protocol-rankings", () => {
-    return fetchEcosystemStats().then((stats) => {
-      if (!isActiveRoute()) return;
-      applyDashboardEcosystemStats(stats);
-    });
+    return new Promise((resolve) => setTimeout(resolve, 1100))
+      .then(loadDashboardExtraBundle)
+      .then(() => fetchEcosystemStats())
+      .then((stats) => {
+        if (!isActiveRoute()) return;
+        applyDashboardEcosystemStats(stats);
+      });
   }, { rootMargin: "260px 0px", timeoutMs: 2500 });
 
-  fetchDefiPrices().then(() => {
+  setTimeout(() => {
     if (!isActiveRoute()) return;
-    const nextPriceBox = document.querySelector('[data-stat="sui-price"]');
-    if (nextPriceBox && defiPrices.SUI) nextPriceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
-  });
+    loadDashboardExtraBundle()
+      .then(() => fetchDefiPrices())
+      .then(() => {
+        if (!isActiveRoute()) return;
+        const nextPriceBox = document.querySelector('[data-stat="sui-price"]');
+        if (nextPriceBox && defiPrices.SUI) nextPriceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
+      })
+      .catch(() => null);
+  }, 1200);
 
   if (dashboardTimer) clearInterval(dashboardTimer);
   dashboardTimer = setInterval(async () => {

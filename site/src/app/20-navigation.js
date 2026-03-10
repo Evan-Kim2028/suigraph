@@ -90,6 +90,38 @@ function parseRoute(route) {
   return { page: "home" };
 }
 
+const CORE_ROUTE_PAGES = new Set(["home", "checkpoints", "checkpoint", "txs", "tx"]);
+let extraRoutesLoadPromise = null;
+
+function areExtraRoutesLoaded() {
+  return globalThis.__SUIGRAPH_EXTRA_LOADED__ === true;
+}
+
+function getExtraRoutesSrc() {
+  return document.querySelector('meta[name="suigraph-extra-src"]')?.getAttribute("content") || "./assets/app-extra.js";
+}
+
+function ensureExtraRoutesLoaded() {
+  if (areExtraRoutesLoaded()) return Promise.resolve();
+  if (extraRoutesLoadPromise) return extraRoutesLoadPromise;
+  extraRoutesLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = getExtraRoutesSrc();
+    script.async = true;
+    script.onload = () => {
+      globalThis.__SUIGRAPH_EXTRA_LOADED__ = true;
+      resolve();
+    };
+    script.onerror = () => {
+      extraRoutesLoadPromise = null;
+      script.remove();
+      reject(new Error("Failed to load explorer extra bundle."));
+    };
+    document.head.appendChild(script);
+  });
+  return extraRoutesLoadPromise;
+}
+
 async function routeTo(route) {
   const r = parseRoute(route);
   if (routeRequestController) routeRequestController.abort();
@@ -131,6 +163,7 @@ async function routeTo(route) {
   }
 
   try {
+    if (!CORE_ROUTE_PAGES.has(r.page)) await ensureExtraRoutesLoaded();
     switch (r.page) {
       case "home": await renderDashboard(app); break;
       case "checkpoints": await renderCheckpoints(app); break;
@@ -223,9 +256,11 @@ function prefetchRouteShellFromRoute(route) {
     return fetchCheckpointDetailShell(parsed.id, false);
   }
   if (parsed.page === "epoch" && parsed.id) {
+    if (!areExtraRoutesLoaded()) return Promise.resolve(null);
     return fetchEpochDetailShell(parsed.id, false);
   }
   if (parsed.page === "address" && parsed.addr) {
+    if (!areExtraRoutesLoaded()) return Promise.resolve(null);
     const addrNorm = normalizeSuiAddress(decodeURIComponent(String(parsed.addr || "")));
     if (addrNorm) return fetchAddressShell(addrNorm, false);
   }
@@ -439,4 +474,3 @@ document.getElementById("searchForm").addEventListener("submit", async (evt) => 
     navigate("/tx/" + q);
   }
 });
-

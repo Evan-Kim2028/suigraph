@@ -18,7 +18,10 @@ try {
   const css = readFileSync(CSS_PATH, "utf8");
   const appSource = readAppSource(SITE_ROOT);
   const js = appSource.source;
-  html = template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => js);
+  html = template
+    .replace("{{APP_STYLE_TAG}}", () => `<style>${css}</style>`)
+    .replace("{{APP_EXTRA_META}}", () => "")
+    .replace("{{APP_SCRIPT_TAG}}", () => `<script>${js}</script>`);
   sourceLabel = appSource.sourceDescriptor;
 } catch (_) {
   html = readFileSync(LEGACY_PATH, "utf8");
