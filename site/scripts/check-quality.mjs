@@ -3,16 +3,18 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAppSource } from "./lib/app-source.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
 const TEMPLATE_PATH = resolve(SITE_ROOT, "src/index.template.html");
 const CSS_PATH = resolve(SITE_ROOT, "src/styles.css");
-const JS_PATH = resolve(SITE_ROOT, "src/app.js");
 
 const template = readFileSync(TEMPLATE_PATH, "utf8");
 const css = readFileSync(CSS_PATH, "utf8");
-const js = readFileSync(JS_PATH, "utf8");
+const appSource = readAppSource(SITE_ROOT);
+const js = appSource.source;
+const jsLabel = appSource.jsSourceLabel;
 const rendered = template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => js);
 
 const MAX_INLINE_STYLE_ATTRS = 500;
@@ -66,7 +68,7 @@ if (templateInlineHandlers) issues.push(templateInlineHandlers);
 const jsInlineHandlers = collectIssue(
   js,
   INLINE_EVENT_ATTR_RE,
-  "src/app.js",
+  jsLabel,
   "Inline event handler attributes are not allowed in app source"
 );
 if (jsInlineHandlers) issues.push(jsInlineHandlers);
@@ -74,7 +76,7 @@ if (jsInlineHandlers) issues.push(jsInlineHandlers);
 const duplicateClass = collectIssue(
   js,
   DUPLICATE_CLASS_ATTR_RE,
-  "src/app.js",
+  jsLabel,
   "Duplicate class attributes detected in HTML snippets"
 );
 if (duplicateClass) issues.push(duplicateClass);

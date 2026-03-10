@@ -18,7 +18,7 @@
 1. Edit:
 - `src/index.template.html`
 - `src/styles.css`
-- `src/app.js`
+- `src/app/*.js`
 2. Run `npm run build` to generate `index.html` and `dist/index.html`.
 3. Run `npm run validate` before commit.
 4. Use `dist/index.html` as the explicit deployment artifact target.
@@ -42,7 +42,7 @@
 - `docs/graphql-surface.md`: static GraphQL call-surface summary.
 - `docs/perf-budgets.md`: per-route runtime query/render budgets.
 - `docs/schema-root-fields.json`: introspected root-field snapshot from Sui GraphQL.
-- `docs/schema-coverage.md`: static query-root coverage report from `src/app.js`.
+- `docs/schema-coverage.md`: static query-root coverage report from `src/app/*.js`.
 
 ## Coin Smoke Check
 - Default run: `npm run smoke:coin`

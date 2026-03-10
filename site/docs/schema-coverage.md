@@ -61,6 +61,6 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 
 ## Notes
 
-- Coverage is based on static template-literal query scans in `src/app.js`.
+- Coverage is based on static template-literal query scans in `src/app/*.js`.
 - Dynamic query construction can undercount true runtime root-field usage.
 - Refresh schema snapshot with `npm run schema:refresh` when upstream schema changes.

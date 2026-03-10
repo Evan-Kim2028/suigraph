@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAppSource } from "./lib/app-source.mjs";
 import { collectStaticGqlQueries } from "./lib/gql-static-analysis.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
-const JS_PATH = resolve(SITE_ROOT, "src/app.js");
 const OUT_PATH = resolve(SITE_ROOT, "docs/graphql-surface.md");
 
-const src = readFileSync(JS_PATH, "utf8");
+const appSource = readAppSource(SITE_ROOT);
+const src = appSource.source;
 const totalCalls = (src.match(/\bgql\s*\(/g) || []).length;
 const awaitedCalls = (src.match(/await\s+gql\s*\(/g) || []).length;
 const staticQueries = collectStaticGqlQueries(src);
@@ -62,7 +63,7 @@ const md = [
     : ["| _None detected_ | 0 | _n/a_ |"]),
   "",
   "Notes:",
-  "- This is a static source scan of `src/app.js`.",
+  `- This is a static source scan of \`${appSource.jsSourceLabel}\`.`,
   "- Runtime call count/latency remains available in the in-app perf badge.",
   "",
 ].join("\n");

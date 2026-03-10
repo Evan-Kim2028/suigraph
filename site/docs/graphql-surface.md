@@ -1,6 +1,6 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T14:18:12.574Z`
+Generated: `2026-03-10T14:25:47.987Z`
 
 | Metric | Value |
 |---|---:|
@@ -103,5 +103,5 @@ Generated: `2026-03-10T14:18:12.574Z`
 | `anonymous:ff941e9100` | 1 | `query($keys:[UInt53!]!){ multiGetCheckpoints(keys:$keys){ sequenceNumber timestamp networkTotalT` |
 
 Notes:
-- This is a static source scan of `src/app.js`.
+- This is a static source scan of `src/app/*.js`.
 - Runtime call count/latency remains available in the in-app perf badge.

@@ -5,7 +5,7 @@
 - Authoring source uses:
 - `src/index.template.html`
 - `src/styles.css`
-- `src/app.js`
+- `src/app/*.js`
 - Build outputs:
 - `index.html` (compatibility for current local/tunnel serving flow)
 - `dist/index.html` (explicit deployment artifact)
@@ -15,7 +15,7 @@
 - Allows structured authoring and quality gates without changing browser runtime dependencies.
 
 ## Current Phase
-- Source split is active (`index.template.html`, `styles.css`, `app.js`) with single-file build output.
+- Source split is active (`index.template.html`, `styles.css`, `app/*.js`) with single-file build output.
 - Delegated UI actions replaced global `window.*` handlers and inline event attributes.
 - Quality gates enforce:
 - no inline event attributes
@@ -25,7 +25,7 @@
 - Runtime perf badge now includes per-page GraphQL/render budgets.
 
 ## Next Refactor Phases
-- Extract source into internal modules while preserving one-file output.
+- Continue carving `src/app/*.js` into clearer internal modules while preserving one-file output.
 - Centralize GraphQL query definitions and fragments (reduce repeated anonymous query literals).
 - Calibrate per-page perf budgets using observed p95 data and adjust defaults conservatively.
 
