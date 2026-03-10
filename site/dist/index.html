@@ -1644,6 +1644,7 @@ const DASHBOARD_ACTIVITY_TTL_MS = 10 * 1000;
 const DEFI_PRICE_PERSIST_TTL_MS = 15 * 1000;
 const LIST_PAGE_TTL_MS = 15 * 1000;
 const ENTITY_SHELL_TTL_MS = 20 * 1000;
+const SEARCH_CLASSIFIER_TTL_MS = 10 * 60 * 1000;
 const PERSISTED_CACHE_KEYS = Object.freeze({
   dashboardHead: "suigraph_cache_dashboard_head_v1",
   dashboardActivity: "suigraph_cache_dashboard_activity_v1",
@@ -1663,6 +1664,7 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   addressShellPrefix: "suigraph_cache_address_shell",
   checkpointDetailPrefix: "suigraph_cache_checkpoint_detail",
   epochDetailPrefix: "suigraph_cache_epoch_detail",
+  searchTargetPrefix: "suigraph_cache_search_target",
 });
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
@@ -1676,6 +1678,7 @@ let stablecoinCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.stableco
 const defiHistoryCache = {};
 const packageDetailCache = {};
 const txShellCache = {};
+const searchClassificationCache = {};
 const addressShellCache = {};
 const checkpointDetailCache = {};
 const epochDetailCache = {};
@@ -4693,6 +4696,28 @@ document.addEventListener("focusin", handleRouteShellPrefetchHint);
 document.addEventListener("touchstart", handleRouteShellPrefetchHint, { passive: true });
 
 // ── Search ──────────────────────────────────────────────────────────────
+async function classifyHexSearchTarget(rawQuery, force = false) {
+  const addrNorm = normalizeSuiAddress(rawQuery);
+  if (!addrNorm) return { route: "/address/" + encodeURIComponent(String(rawQuery || "")) };
+  const storageKey = persistedEntityCacheKey(PERSISTED_CACHE_KEYS.searchTargetPrefix, addrNorm);
+  const cacheState = getKeyedCacheState(searchClassificationCache, addrNorm);
+  hydratePersistedTimedCacheState(cacheState, storageKey, SEARCH_CLASSIFIER_TTL_MS);
+  return withTimedCache(cacheState, SEARCH_CLASSIFIER_TTL_MS, force, async () => {
+    const probe = await gql(`query($address: SuiAddress!) {
+      object(address: $address) {
+        asMovePackage { modules(first: 1) { nodes { name } } }
+        ${GQL_F_MOVE_TYPE}
+      }
+    }`, { address: addrNorm });
+    const route = (probe?.object?.asMovePackage || probe?.object?.asMoveObject)
+      ? "/object/" + addrNorm
+      : "/address/" + addrNorm;
+    const result = { route };
+    writePersistedTimedCacheRecord(storageKey, result, 4000);
+    return result;
+  });
+}
+
 document.getElementById("searchForm").addEventListener("submit", async (evt) => {
   evt.preventDefault();
   const input = document.getElementById("searchInput");
@@ -4713,12 +4738,8 @@ document.getElementById("searchForm").addEventListener("submit", async (evt) => 
   } else if (/^0x[0-9a-fA-F]{64}$/.test(q)) {
     // Could be an address or an object (package). Query GQL to find out.
     try {
-      const probe = await gql(`{ object(address: "${q}") { asMovePackage { modules { nodes { name } } } ${GQL_F_MOVE_TYPE} } }`);
-      if (probe?.object?.asMovePackage || probe?.object?.asMoveObject) {
-        navigate("/object/" + q);
-      } else {
-        navigate("/address/" + q);
-      }
+      const target = await classifyHexSearchTarget(q, false);
+      navigate(target?.route || ("/address/" + q));
     } catch {
       navigate("/address/" + q);
     }

@@ -1,6 +1,6 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T14:06:20.396Z`
+Generated: `2026-03-10T14:09:17.270Z`
 
 | Metric | Value |
 |---|---:|
@@ -68,7 +68,6 @@ Generated: `2026-03-10T14:06:20.396Z`
 | `anonymous:8a3c1e6888` | 1 | `{ ${parts.join("\n")} }` |
 | `anonymous:8e3af7bf61` | 1 | `query($pkg: SuiAddress!, $mod: String!) { object(address: $pkg) { asMovePackage { module(name: $` |
 | `anonymous:8e5f6a5c6d` | 1 | `{ address(address: "${POOL_REGISTRY_TABLE}") { dynamicFields(first: 10) { nodes { name { json } ` |
-| `anonymous:91659f0281` | 1 | `{ object(address: "${q}") { asMovePackage { modules { nodes { name } } } asMoveObject { contents` |
 | `anonymous:9817231a82` | 1 | `{ transactions(last: 10, filter: {}) { nodes { digest sender { address } kind { __typename ... o` |
 | `anonymous:989331d688` | 1 | `query($digest: String!) { transaction(digest: $digest) { effects { balanceChanges(first: 50) { p` |
 | `anonymous:9b53003ec9` | 1 | `query($id: SuiAddress!) { objectVersions(address: $id, last: 20) { pageInfo { hasPreviousPage st` |
@@ -96,6 +95,7 @@ Generated: `2026-03-10T14:06:20.396Z`
 | `anonymous:e60dab97bc` | 1 | `query($id: SuiAddress!, $before: String) { objectVersions(address: $id, last: 20, before: $befor` |
 | `anonymous:f1dbd91c19` | 1 | `{ ${balParts.join("\n")} }` |
 | `anonymous:f2b1818c3d` | 1 | `query($id: SuiAddress!, $before: String) { objectVersions(address: $id, last: 20, before: $befor` |
+| `anonymous:f3163eec4f` | 1 | `query($address: SuiAddress!) { object(address: $address) { asMovePackage { modules(first: 1) { n` |
 | `anonymous:f8a5904526` | 1 | `{ address(address: "${BLUEFIN_PRO_ACCOUNTS_TABLE}") { dynamicField(name: { type: "address", bcs:` |
 | `anonymous:fbf414902c` | 1 | `{ address(address: "${addr}") { objects(filter: { type: "${SUILEND_PKG}::lending_market::Obligat` |
 | `anonymous:fc8916eda7` | 1 | `{ ssui: object(address: "0x15eda7330c8f99c30e430b4d82fd7ab2af3ead4ae17046fcb224aa9bad394f6b") { ` |
