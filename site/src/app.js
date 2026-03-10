@@ -452,6 +452,7 @@ const DEFI_HISTORY_TTL_MS = 10 * 60 * 1000;
 const GQL_SERVICE_CONFIG_TTL_MS = 30 * 60 * 1000;
 const PACKAGE_ACTIVITY_TTL_MS = 30 * 1000;
 const PACKAGE_DETAIL_TTL_MS = 2 * 60 * 1000;
+const ECOSYSTEM_TTL = 10 * 60 * 1000;
 const DEFI_HISTORY_DAY_MS = 24 * 60 * 60 * 1000;
 const DEFI_HISTORY_BOOTSTRAP_CP_DELTA = 1_000_000;
 const DEFAULT_DEFI_HISTORY_OBJECT = "0x53041c6f86c4782aabbfc1d4fe234a6d37160310c7ee740c915f0a01b7127344";
@@ -515,6 +516,9 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   defiStablecoinsPrefix: "suigraph_cache_defi_stablecoins",
   defiFlowsPrefix: "suigraph_cache_defi_flows",
   defiLst: "suigraph_cache_defi_lst_v1",
+  dashboardEpochs: "suigraph_cache_dashboard_epochs_v1",
+  ecosystemStats: "suigraph_cache_ecosystem_stats_v1",
+  stablecoinSupply: "suigraph_cache_stablecoin_supply_v1",
 });
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
@@ -523,6 +527,8 @@ let lendingRatesCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.lendin
 let lendingRatesInFlight = null;
 let defiLstCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.defiLst, DEFI_LST_TTL_MS);
 let gqlServiceConfigCache = { data: null, ts: 0, inFlight: null };
+let ecosystemCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.ecosystemStats, ECOSYSTEM_TTL);
+let stablecoinCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.stablecoinSupply, ECOSYSTEM_TTL);
 const defiHistoryCache = {};
 const packageDetailCache = {};
 const defiActivityCacheByWindow = {};
@@ -540,7 +546,7 @@ const defiWindowSampleCacheByProjection = {
 };
 let dashboardHeadCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardHead, DASHBOARD_HEAD_TTL_MS);
 let dashboardActivityCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardActivity, DASHBOARD_ACTIVITY_TTL_MS);
-let dashboardEpochsCache = { data: null, ts: 0, inFlight: null };
+let dashboardEpochsCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardEpochs, DASH_EPOCHS_TTL_MS);
 
 // Known coin type address prefixes → { symbol, decimals }
 // Fixes decimal parsing for bridge tokens whose type ends in ::coin::COIN etc.
@@ -3503,11 +3509,13 @@ async function fetchDashboardEpochTrends(force = false) {
       })
       .filter(Boolean)
       .sort((a, b) => a.epochId - b.epochId);
-    return {
+    const result = {
       rows,
       nowMs,
       sourceTimestamp: data?.checkpoint?.timestamp || "",
     };
+    writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.dashboardEpochs, result, 24000);
+    return result;
   });
 }
 
@@ -3568,6 +3576,9 @@ async function fetchDashboardActivitySnapshot(force = false) {
 async function renderDashboard(app) {
   const dashHead = peekTimedCache(dashboardHeadCache, DASHBOARD_HEAD_TTL_MS) || { checkpoint: {}, epoch: {} };
   const cachedActivity = peekTimedCache(dashboardActivityCache, DASHBOARD_ACTIVITY_TTL_MS) || { txRows: [], cpRows: [] };
+  const cachedEpochTrends = peekTimedCache(dashboardEpochsCache, DASH_EPOCHS_TTL_MS) || null;
+  const cachedStablecoinSupply = peekTimedCache(stablecoinCache, ECOSYSTEM_TTL) || null;
+  const cachedEcosystemStats = peekTimedCache(ecosystemCache, ECOSYSTEM_TTL) || null;
   const cp = dashHead?.checkpoint || {};
   const ep = dashHead?.epoch || {};
   let lastHeadSeq = Number(cp?.sequenceNumber || 0);
@@ -3684,6 +3695,126 @@ async function renderDashboard(app) {
     if (Number.isFinite(seq) && seq > 0) lastHeadSeq = seq;
   }
 
+  function applyDashboardEpochTrends(trendData) {
+    const el = document.getElementById("epoch-trends-card");
+    if (!el) return;
+    const rowsAsc = trendData?.rows || [];
+    if (!rowsAsc.length) {
+      el.querySelector(".card-body").innerHTML = '<div class="empty">Epoch trend data unavailable</div>';
+      return;
+    }
+    const rows = [...rowsAsc].sort((a, b) => b.epochId - a.epochId);
+    const txSeries = rowsAsc.map((r) => r.txCount);
+    const tpsSeries = rowsAsc.map((r) => r.avgTps);
+    const latest = rows[0];
+    const sourceTs = trendData?.sourceTimestamp || "";
+    el.querySelector(".card-body").innerHTML = `
+      <div style="padding:12px 16px 6px">
+        <div class="u-fs12-dim">
+          Epoch-level throughput and gas trend from on-chain epoch aggregates.
+          ${sourceTs ? `Updated ${timeAgo(sourceTs)}.` : ""}
+        </div>
+        <div class="two-col" style="margin:8px 0 0">
+          <div>
+            <div class="u-fs11-dim">Transactions per Epoch</div>
+            <div class="sparkline-wrap">${renderSparkline(txSeries, { prefix: "", suffix: " tx/epoch", color: "var(--accent)" })}</div>
+          </div>
+          <div>
+            <div class="u-fs11-dim">Average TPS per Epoch</div>
+            <div class="sparkline-wrap">${renderSparkline(tpsSeries, { prefix: "", suffix: " TPS", color: "var(--green)" })}</div>
+          </div>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Epoch</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Avg TPS</th><th class="u-ta-right">Ref Gas (MIST)</th><th class="u-ta-right">Checkpoints</th><th>Duration</th><th>End</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `<tr>
+            <td><a class="hash-link" href="#/epoch/${r.epochId}">${fmtNumber(r.epochId)}</a>${r.isLive ? ' <span class="badge badge-success">Live</span>' : ''}</td>
+            <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
+            <td class="u-ta-right-mono">${r.avgTps.toFixed(2)}</td>
+            <td class="u-ta-right-mono">${fmtNumber(r.gasPrice)}</td>
+            <td class="u-ta-right-mono">${fmtNumber(r.checkpointCount)}</td>
+            <td>${fmtDurationCompact(r.durationMs)}</td>
+            <td>${r.isLive ? '<span class="u-c-dim">in progress</span>' : timeTag(r.endMs)}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+      <div class="u-fs12-dim u-p12-16">Latest epoch ${fmtNumber(latest.epochId)}: ${fmtNumber(latest.txCount)} tx, ${latest.avgTps.toFixed(2)} TPS, gas ${fmtNumber(latest.gasPrice)} MIST.</div>
+    `;
+  }
+
+  function applyDashboardStablecoinSupply(data) {
+    const el = document.getElementById("stablecoin-card");
+    if (!el) return;
+    if (!data || !data.coins?.length) {
+      el.querySelector(".card-body").innerHTML = '<div class="empty">Supply data unavailable</div>';
+      return;
+    }
+    el.querySelector(".card-body").innerHTML = `
+      <div class="stablecoin-layout">
+        ${renderDonutChart(data.coins, data.totalSupply)}
+        <ul class="stablecoin-legend">
+          ${data.coins.map((c) => `<li>
+            <span class="dot" style="background:${c.color}"></span>
+            <span>${c.symbol}</span>
+            <span class="val">$${fmtCompact(c.supply)}</span>
+            <span class="pct">${c.pct.toFixed(1)}%</span>
+          </li>`).join("")}
+        </ul>
+      </div>`;
+  }
+
+  function applyDashboardEcosystemStats(stats) {
+    const tvlBox = document.querySelector('[data-stat="tvl"]');
+    if (tvlBox && stats) tvlBox.textContent = "$" + fmtCompact(stats.totalTvl);
+    const tvlEl = document.getElementById("tvl-breakdown-card");
+    if (tvlEl && stats) {
+      const otherTvl = Math.max(0, stats.totalTvl - stats.lendingTvl - stats.dexTvl - stats.lstTvl);
+      const pctL = stats.totalTvl > 0 ? (stats.lendingTvl / stats.totalTvl * 100) : 0;
+      const pctD = stats.totalTvl > 0 ? (stats.dexTvl / stats.totalTvl * 100) : 0;
+      const pctS = stats.totalTvl > 0 ? (stats.lstTvl / stats.totalTvl * 100) : 0;
+      const pctO = Math.max(0, 100 - pctL - pctD - pctS);
+      tvlEl.querySelector(".card-body").innerHTML = `
+        <div style="padding:16px 16px 0">
+          <div style="font-size:24px;font-weight:700">$${fmtCompact(stats.totalTvl)}</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Total Value Locked</div>
+          <div class="tvl-bar">
+            <div style="width:${pctL.toFixed(1)}%;background:var(--green)" title="Lending ${pctL.toFixed(1)}%"></div>
+            <div style="width:${pctD.toFixed(1)}%;background:var(--blue)" title="DEX ${pctD.toFixed(1)}%"></div>
+            <div style="width:${pctS.toFixed(1)}%;background:var(--purple)" title="Liquid Staking ${pctS.toFixed(1)}%"></div>
+            <div style="width:${pctO.toFixed(1)}%;background:var(--text-dim)" title="Other ${pctO.toFixed(1)}%"></div>
+          </div>
+        </div>
+        <div style="padding:0 16px 12px">
+          <div class="tvl-row"><span class="dot" style="background:var(--green)"></span> Lending <span class="tvl-val u-c-green">$${fmtCompact(stats.lendingTvl)} <span style="color:var(--text-dim);font-size:11px">${pctL.toFixed(1)}%</span></span></div>
+          <div class="tvl-row"><span class="dot" style="background:var(--blue)"></span> DEX <span class="tvl-val u-c-blue">$${fmtCompact(stats.dexTvl)} <span style="color:var(--text-dim);font-size:11px">${pctD.toFixed(1)}%</span></span></div>
+          <div class="tvl-row"><span class="dot" style="background:var(--purple)"></span> Liquid Staking <span class="tvl-val u-c-purple">$${fmtCompact(stats.lstTvl)} <span style="color:var(--text-dim);font-size:11px">${pctS.toFixed(1)}%</span></span></div>
+          <div class="tvl-row"><span class="dot" style="background:var(--text-dim)"></span> Other <span class="tvl-val">$${fmtCompact(otherTvl)} <span style="color:var(--text-dim);font-size:11px">${pctO.toFixed(1)}%</span></span></div>
+          <div class="tvl-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px"><span class="u-c-accent">24h DEX Volume</span> <span class="tvl-val u-c-accent">$${fmtCompact(stats.dexVolume24h)}</span></div>
+        </div>`;
+    }
+    const prEl = document.getElementById("protocol-rankings");
+    if (prEl && stats) {
+      prEl.querySelector(".card-body").innerHTML = `<table>
+        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="u-ta-right">TVL</th><th class="u-ta-right">24h Change</th></tr></thead>
+        <tbody>
+          ${stats.protocols.slice(0, 10).map((p, i) => {
+            const catColor = categoryColors[p.category] || "var(--text-dim)";
+            const changeStr = p.change24h != null ? `${p.change24h >= 0 ? "+" : ""}${p.change24h.toFixed(2)}%` : "—";
+            const changeColor = p.change24h > 0 ? "var(--green)" : p.change24h < 0 ? "var(--red)" : "var(--text-dim)";
+            return `<tr>
+              <td style="color:var(--text-dim);font-size:12px">${i + 1}</td>
+              <td style="font-weight:500">${p.name}</td>
+              <td><span class="badge" style="background:${catColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${p.category}</span></td>
+              <td class="u-ta-right-mono">$${fmtCompact(p.tvl)}</td>
+              <td style="text-align:right;color:${changeColor};font-family:var(--mono)">${changeStr}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>`;
+    }
+  }
+
   app.innerHTML = `
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Live dashboard snapshot · Source: Sui GraphQL Mainnet · Auto-refresh every 5s</div>
     <div class="card u-mb16">
@@ -3784,6 +3915,11 @@ async function renderDashboard(app) {
   `;
 
   if (dashHead?.checkpoint || dashHead?.epoch) applyDashboardHead(dashHead);
+  if (cachedEpochTrends) applyDashboardEpochTrends(cachedEpochTrends);
+  if (cachedStablecoinSupply) applyDashboardStablecoinSupply(cachedStablecoinSupply);
+  if (cachedEcosystemStats) applyDashboardEcosystemStats(cachedEcosystemStats);
+  const priceBox = document.querySelector('[data-stat="sui-price"]');
+  if (priceBox && defiPrices.SUI) priceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
   setTimeout(() => {
     if (!app.isConnected) return;
     fetchDashboardHead(false).then((head) => {
@@ -3794,134 +3930,20 @@ async function renderDashboard(app) {
   }, 0);
 
   runWhenVisible("epoch-trends-card", () => {
-    return fetchDashboardEpochTrends().then((trendData) => {
-      const el = document.getElementById("epoch-trends-card");
-      if (!el) return;
-      const rowsAsc = trendData?.rows || [];
-      if (!rowsAsc.length) {
-        el.querySelector(".card-body").innerHTML = '<div class="empty">Epoch trend data unavailable</div>';
-        return;
-      }
-      const rows = [...rowsAsc].sort((a, b) => b.epochId - a.epochId);
-      const txSeries = rowsAsc.map((r) => r.txCount);
-      const tpsSeries = rowsAsc.map((r) => r.avgTps);
-      const latest = rows[0];
-      const sourceTs = trendData?.sourceTimestamp || "";
-      el.querySelector(".card-body").innerHTML = `
-        <div style="padding:12px 16px 6px">
-          <div class="u-fs12-dim">
-            Epoch-level throughput and gas trend from on-chain epoch aggregates.
-            ${sourceTs ? `Updated ${timeAgo(sourceTs)}.` : ""}
-          </div>
-          <div class="two-col" style="margin:8px 0 0">
-            <div>
-              <div class="u-fs11-dim">Transactions per Epoch</div>
-              <div class="sparkline-wrap">${renderSparkline(txSeries, { prefix: "", suffix: " tx/epoch", color: "var(--accent)" })}</div>
-            </div>
-            <div>
-              <div class="u-fs11-dim">Average TPS per Epoch</div>
-              <div class="sparkline-wrap">${renderSparkline(tpsSeries, { prefix: "", suffix: " TPS", color: "var(--green)" })}</div>
-            </div>
-          </div>
-        </div>
-        <table>
-          <thead><tr><th>Epoch</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Avg TPS</th><th class="u-ta-right">Ref Gas (MIST)</th><th class="u-ta-right">Checkpoints</th><th>Duration</th><th>End</th></tr></thead>
-          <tbody>
-            ${rows.map((r) => `<tr>
-              <td><a class="hash-link" href="#/epoch/${r.epochId}">${fmtNumber(r.epochId)}</a>${r.isLive ? ' <span class="badge badge-success">Live</span>' : ''}</td>
-              <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
-              <td class="u-ta-right-mono">${r.avgTps.toFixed(2)}</td>
-              <td class="u-ta-right-mono">${fmtNumber(r.gasPrice)}</td>
-              <td class="u-ta-right-mono">${fmtNumber(r.checkpointCount)}</td>
-              <td>${fmtDurationCompact(r.durationMs)}</td>
-              <td>${r.isLive ? '<span class="u-c-dim">in progress</span>' : timeTag(r.endMs)}</td>
-            </tr>`).join("")}
-          </tbody>
-        </table>
-        <div class="u-fs12-dim u-p12-16">Latest epoch ${fmtNumber(latest.epochId)}: ${fmtNumber(latest.txCount)} tx, ${latest.avgTps.toFixed(2)} TPS, gas ${fmtNumber(latest.gasPrice)} MIST.</div>
-      `;
-    });
+    return fetchDashboardEpochTrends().then((trendData) => applyDashboardEpochTrends(trendData));
   }, { rootMargin: "200px 0px", timeoutMs: 1800 });
 
   runWhenVisible("stablecoin-card", () => {
-    return fetchStablecoinSupply().then((data) => {
-      const el = document.getElementById("stablecoin-card");
-      if (!el) return;
-      if (!data || !data.coins.length) {
-        el.querySelector(".card-body").innerHTML = '<div class="empty">Supply data unavailable</div>';
-        return;
-      }
-      el.querySelector(".card-body").innerHTML = `
-        <div class="stablecoin-layout">
-          ${renderDonutChart(data.coins, data.totalSupply)}
-          <ul class="stablecoin-legend">
-            ${data.coins.map((c) => `<li>
-              <span class="dot" style="background:${c.color}"></span>
-              <span>${c.symbol}</span>
-              <span class="val">$${fmtCompact(c.supply)}</span>
-              <span class="pct">${c.pct.toFixed(1)}%</span>
-            </li>`).join("")}
-          </ul>
-        </div>`;
-    });
+    return fetchStablecoinSupply().then((data) => applyDashboardStablecoinSupply(data));
   }, { rootMargin: "240px 0px", timeoutMs: 2200 });
 
   runWhenVisible("protocol-rankings", () => {
-    return fetchEcosystemStats().then((stats) => {
-      const tvlBox = document.querySelector('[data-stat="tvl"]');
-      if (tvlBox && stats) tvlBox.textContent = "$" + fmtCompact(stats.totalTvl);
-      const tvlEl = document.getElementById("tvl-breakdown-card");
-      if (tvlEl && stats) {
-        const otherTvl = Math.max(0, stats.totalTvl - stats.lendingTvl - stats.dexTvl - stats.lstTvl);
-        const pctL = stats.totalTvl > 0 ? (stats.lendingTvl / stats.totalTvl * 100) : 0;
-        const pctD = stats.totalTvl > 0 ? (stats.dexTvl / stats.totalTvl * 100) : 0;
-        const pctS = stats.totalTvl > 0 ? (stats.lstTvl / stats.totalTvl * 100) : 0;
-        const pctO = Math.max(0, 100 - pctL - pctD - pctS);
-        tvlEl.querySelector(".card-body").innerHTML = `
-          <div style="padding:16px 16px 0">
-            <div style="font-size:24px;font-weight:700">$${fmtCompact(stats.totalTvl)}</div>
-            <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Total Value Locked</div>
-            <div class="tvl-bar">
-              <div style="width:${pctL.toFixed(1)}%;background:var(--green)" title="Lending ${pctL.toFixed(1)}%"></div>
-              <div style="width:${pctD.toFixed(1)}%;background:var(--blue)" title="DEX ${pctD.toFixed(1)}%"></div>
-              <div style="width:${pctS.toFixed(1)}%;background:var(--purple)" title="Liquid Staking ${pctS.toFixed(1)}%"></div>
-              <div style="width:${pctO.toFixed(1)}%;background:var(--text-dim)" title="Other ${pctO.toFixed(1)}%"></div>
-            </div>
-          </div>
-          <div style="padding:0 16px 12px">
-            <div class="tvl-row"><span class="dot" style="background:var(--green)"></span> Lending <span class="tvl-val u-c-green">$${fmtCompact(stats.lendingTvl)} <span style="color:var(--text-dim);font-size:11px">${pctL.toFixed(1)}%</span></span></div>
-            <div class="tvl-row"><span class="dot" style="background:var(--blue)"></span> DEX <span class="tvl-val u-c-blue">$${fmtCompact(stats.dexTvl)} <span style="color:var(--text-dim);font-size:11px">${pctD.toFixed(1)}%</span></span></div>
-            <div class="tvl-row"><span class="dot" style="background:var(--purple)"></span> Liquid Staking <span class="tvl-val u-c-purple">$${fmtCompact(stats.lstTvl)} <span style="color:var(--text-dim);font-size:11px">${pctS.toFixed(1)}%</span></span></div>
-            <div class="tvl-row"><span class="dot" style="background:var(--text-dim)"></span> Other <span class="tvl-val">$${fmtCompact(otherTvl)} <span style="color:var(--text-dim);font-size:11px">${pctO.toFixed(1)}%</span></span></div>
-            <div class="tvl-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px"><span class="u-c-accent">24h DEX Volume</span> <span class="tvl-val u-c-accent">$${fmtCompact(stats.dexVolume24h)}</span></div>
-          </div>`;
-      }
-      const prEl = document.getElementById("protocol-rankings");
-      if (prEl && stats) {
-        prEl.querySelector(".card-body").innerHTML = `<table>
-          <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="u-ta-right">TVL</th><th class="u-ta-right">24h Change</th></tr></thead>
-          <tbody>
-            ${stats.protocols.slice(0, 10).map((p, i) => {
-              const catColor = categoryColors[p.category] || "var(--text-dim)";
-              const changeStr = p.change24h != null ? `${p.change24h >= 0 ? "+" : ""}${p.change24h.toFixed(2)}%` : "—";
-              const changeColor = p.change24h > 0 ? "var(--green)" : p.change24h < 0 ? "var(--red)" : "var(--text-dim)";
-              return `<tr>
-                <td style="color:var(--text-dim);font-size:12px">${i + 1}</td>
-                <td style="font-weight:500">${p.name}</td>
-                <td><span class="badge" style="background:${catColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${p.category}</span></td>
-                <td class="u-ta-right-mono">$${fmtCompact(p.tvl)}</td>
-                <td style="text-align:right;color:${changeColor};font-family:var(--mono)">${changeStr}</td>
-              </tr>`;
-            }).join("")}
-          </tbody>
-        </table>`;
-      }
-    });
+    return fetchEcosystemStats().then((stats) => applyDashboardEcosystemStats(stats));
   }, { rootMargin: "260px 0px", timeoutMs: 2500 });
 
   fetchDefiPrices().then(() => {
-    const priceBox = document.querySelector('[data-stat="sui-price"]');
-    if (priceBox && defiPrices.SUI) priceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
+    const nextPriceBox = document.querySelector('[data-stat="sui-price"]');
+    if (nextPriceBox && defiPrices.SUI) nextPriceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
   });
 
   if (dashboardTimer) clearInterval(dashboardTimer);
@@ -6149,16 +6171,8 @@ async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
 }
 
 // ── DeFi Ecosystem Stats (DeFiLlama) ──────────────────────────────────
-let ecosystemCache = { data: null, ts: 0 };
-const ECOSYSTEM_TTL = 10 * 60 * 1000; // 10 minutes
-
-async function fetchEcosystemStats() {
-  if (ecosystemCache.data && Date.now() - ecosystemCache.ts < ECOSYSTEM_TTL) {
-    notePerfCache(true);
-    return ecosystemCache.data;
-  }
-  notePerfCache(false);
-  try {
+async function fetchEcosystemStats(force = false) {
+  return withTimedCache(ecosystemCache, ECOSYSTEM_TTL, force, async () => {
     const [protocolsRes, dexRes, chainsRes] = await Promise.all([
       fetch("https://api.llama.fi/protocols"),
       fetch("https://api.llama.fi/overview/dexs/Sui"),
@@ -6195,20 +6209,14 @@ async function fetchEcosystemStats() {
     const dexVolume24h = dexData?.total24h ?? 0;
 
     const result = { totalTvl, lendingTvl, dexTvl, lstTvl, dexVolume24h, protocols: suiProtocols.slice(0, 15) };
-    ecosystemCache = { data: result, ts: Date.now() };
+    writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.ecosystemStats, result, 40000);
     return result;
-  } catch (e) { return null; }
+  }).catch(() => null);
 }
 
 // ── Stablecoin Supply (all via GraphQL) ──────────────────────────────
-let stablecoinCache = { data: null, ts: 0 };
-async function fetchStablecoinSupply() {
-  if (stablecoinCache.data && Date.now() - stablecoinCache.ts < ECOSYSTEM_TTL) {
-    notePerfCache(true);
-    return stablecoinCache.data;
-  }
-  notePerfCache(false);
-  try {
+async function fetchStablecoinSupply(force = false) {
+  return withTimedCache(stablecoinCache, ECOSYSTEM_TTL, force, async () => {
     const coins = [];
     const pushCoin = (symbol, supply, color) => {
       if (!(Number.isFinite(supply) && supply > 0)) return;
@@ -6287,9 +6295,9 @@ async function fetchStablecoinSupply() {
     const totalSupply = coins.reduce((sum, c) => sum + c.supply, 0);
     coins.forEach(c => c.pct = totalSupply > 0 ? (c.supply / totalSupply * 100) : 0);
     const result = { coins, totalSupply };
-    stablecoinCache = { data: result, ts: Date.now() };
+    writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.stablecoinSupply, result, 18000);
     return result;
-  } catch (e) { return null; }
+  }).catch(() => null);
 }
 
 function renderDonutChart(coins, totalSupply) {
