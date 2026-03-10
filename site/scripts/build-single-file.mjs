@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { transform } from "esbuild";
+import { minify } from "terser";
 import { readAppSource } from "./lib/app-source.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,7 +33,43 @@ function readUtf8(path) {
   }
 }
 
-function buildSource() {
+async function minifyInlineAsset(source, loader, label) {
+  try {
+    const result = await transform(source, {
+      loader,
+      minify: true,
+      legalComments: "none",
+      target: loader === "js" ? "es2020" : undefined,
+    });
+    return result.code.trim();
+  } catch (err) {
+    fail(`failed to minify ${label}: ${err.message}`);
+  }
+}
+
+async function minifyInlineScript(source, label) {
+  try {
+    const result = await minify(source, {
+      ecma: 2020,
+      toplevel: true,
+      compress: {
+        ecma: 2020,
+        passes: 3,
+      },
+      mangle: {
+        toplevel: true,
+      },
+      format: {
+        comments: false,
+      },
+    });
+    return String(result.code || "").trim();
+  } catch (err) {
+    fail(`failed to minify ${label}: ${err.message}`);
+  }
+}
+
+async function buildSource() {
   if (!existsSync(TEMPLATE_PATH)) {
     return {
       mode: "legacy-html",
@@ -41,21 +79,22 @@ function buildSource() {
   }
 
   const template = readUtf8(TEMPLATE_PATH);
-  const css = readUtf8(CSS_PATH);
+  const css = await minifyInlineAsset(readUtf8(CSS_PATH), "css", "src/styles.css");
   const appSource = readAppSource(SITE_ROOT);
+  const js = await minifyInlineScript(appSource.source, appSource.jsSourceLabel);
 
   if (!template.includes("{{INLINE_CSS}}") || !template.includes("{{INLINE_JS}}")) {
     fail("src/index.template.html must include {{INLINE_CSS}} and {{INLINE_JS}} placeholders");
   }
 
   return {
-    mode: "templated-inline",
+    mode: "templated-inline-minified",
     sourcePath: appSource.sourceDescriptor,
-    source: template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => appSource.source),
+    source: template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => js),
   };
 }
 
-const built = buildSource();
+const built = await buildSource();
 const source = built.source;
 if (!source.trim().startsWith("<!DOCTYPE html>") && !source.trim().startsWith("<!doctype html>")) {
   fail("generated html must begin with <!DOCTYPE html>");

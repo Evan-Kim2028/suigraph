@@ -29,8 +29,8 @@ npm run build
 
 This runs `node scripts/build-single-file.mjs` which:
 1. Reads `src/index.template.html`
-2. Inlines `src/styles.css` at the `{{INLINE_CSS}}` placeholder
-3. Inlines `src/app.js` at the `{{INLINE_JS}}` placeholder
+2. Minifies and inlines `src/styles.css` at the `{{INLINE_CSS}}` placeholder
+3. Concatenates `src/app/*.js`, minifies the result, and inlines it at the `{{INLINE_JS}}` placeholder
 4. Writes the result to both `index.html` and `dist/index.html`
 5. Outputs a sha256 hash for verification
 

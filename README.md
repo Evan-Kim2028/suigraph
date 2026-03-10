@@ -45,8 +45,8 @@ This repo is designed to be deployable on [Walrus Sites](https://docs.wal.app/) 
 
 - `site/src/index.template.html`: source HTML template
 - `site/src/styles.css`: source styles
-- `site/src/app.js`: source application logic
-- `site/scripts/build-single-file.mjs`: inlines source files into deploy outputs
+- `site/src/app/*.js`: ordered source application logic
+- `site/scripts/build-single-file.mjs`: concatenates/minifies source files into deploy outputs
 - `site/ws-resources.json`: Walrus Sites routing/headers/metadata source config
 - `site/index.html`: generated single-file output (root compatibility output)
 - `site/dist/index.html`: generated deploy artifact
@@ -71,7 +71,7 @@ This repo is designed to be deployable on [Walrus Sites](https://docs.wal.app/) 
 
 ## Coin Search Classification Notes
 
-- Coin transfer `Action` and `Kind` now share one classifier pipeline in `site/src/app.js`:
+- Coin transfer `Action` and `Kind` now share one classifier pipeline in `site/src/app/*.js`:
   - `classifyTransactionAction(...)`
   - `classifyCoinTransferFlow(...)`
 - This avoids drift where `Action` said one thing while `Kind` was computed by a different path.

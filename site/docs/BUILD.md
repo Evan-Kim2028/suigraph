@@ -19,7 +19,7 @@
 - `src/index.template.html`
 - `src/styles.css`
 - `src/app/*.js`
-2. Run `npm run build` to generate `index.html` and `dist/index.html`.
+2. Run `npm run build` to generate minified `index.html` and `dist/index.html`.
 3. Run `npm run validate` before commit.
 4. Use `dist/index.html` as the explicit deployment artifact target.
 5. Run `npm run smoke:coin` (or pass custom `--coin`) when touching coin-search logic.
@@ -36,7 +36,7 @@
 - schema coverage drift check (`schema:check`) against `docs/schema-root-fields.json`
 
 ## Artifacts
-- `dist/index.html`: deployable single-file output.
+- `dist/index.html`: deployable single-file output with minified inline CSS/JS.
 - `dist/build-manifest.json`: build hash and metadata.
 - `docs/baseline.md`: static maintainability baseline metrics.
 - `docs/graphql-surface.md`: static GraphQL call-surface summary.

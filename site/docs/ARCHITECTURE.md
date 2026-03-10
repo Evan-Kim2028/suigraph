@@ -8,7 +8,7 @@
 - `src/app/*.js`
 - Build outputs:
 - `index.html` (compatibility for current local/tunnel serving flow)
-- `dist/index.html` (explicit deployment artifact)
+- `dist/index.html` (explicit deployment artifact, with minified inline CSS/JS)
 
 ## Why This Shape
 - Keeps Walrus-compatible single-file deployment.

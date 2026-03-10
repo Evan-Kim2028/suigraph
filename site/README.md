@@ -11,7 +11,7 @@ a graphql based block explorer, focused on GraphQL-powered chain introspection, 
 - `src/index.template.html`: HTML shell (authoring source)
 - `src/styles.css`: shared styles
 - `src/app/*.js`: ordered client source parts concatenated into one inline script
-- `scripts/build-single-file.mjs`: inlines `src/*` into deploy outputs
+- `scripts/build-single-file.mjs`: inlines `src/*`, minifies CSS/JS, and writes deploy outputs
 - `scripts/check-syntax.mjs`: validates embedded JS syntax in generated HTML
 - `scripts/report-baseline.mjs`: updates static maintainability metrics
 - `scripts/report-gql-surface.mjs`: static GraphQL call-surface report
@@ -34,7 +34,7 @@ a graphql based block explorer, focused on GraphQL-powered chain introspection, 
 
 ## Development Workflow
 1. Edit only `src/index.template.html`, `src/styles.css`, and `src/app/*.js`.
-2. Run `npm run build`.
+2. Run `npm run build` to regenerate the minified single-file artifact.
 3. Run `npm run validate`.
 4. Run `npm run baseline` when maintainability metrics should be updated.
 
