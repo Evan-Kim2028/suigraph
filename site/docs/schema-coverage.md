@@ -9,8 +9,8 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 
 | Metric | Value |
 |---|---:|
-| Total gql call sites | 96 |
-| Static template query call sites | 91 |
+| Total gql call sites | 97 |
+| Static template query call sites | 92 |
 | Dynamic/non-literal call sites | 5 |
 | Query root fields in schema snapshot | 32 |
 | Query root fields used (static scan) | 22 |
@@ -31,12 +31,12 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 | `checkpoints` | 3 |
 | `objects` | 3 |
 | `objectVersions` | 3 |
+| `transaction` | 3 |
 | `multiGetCheckpoints` | 2 |
 | `multiGetObjects` | 2 |
 | `multiGetTransactionEffects` | 2 |
 | `packageVersions` | 2 |
 | `serviceConfig` | 2 |
-| `transaction` | 2 |
 | `chainIdentifier` | 1 |
 | `coinMetadata` | 1 |
 | `epochs` | 1 |

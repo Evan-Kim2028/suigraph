@@ -4897,7 +4897,8 @@ function fmtCoinAmount(amount, coinRepr) {
 }
 
 async function renderTxDetail(app, digest) {
-  const data = await gql(`query($digest: String!) {
+  const localRouteToken = routeRenderToken;
+  const shellData = await gql(`query($digest: String!) {
     transaction(digest: $digest) {
       digest
       sender { address }
@@ -4946,53 +4947,27 @@ async function renderTxDetail(app, digest) {
           gasSummary { computationCost storageCost storageRebate nonRefundableStorageFee }
           gasObject { address }
         }
-        balanceChanges(first: 50) {
-          pageInfo { hasNextPage }
-          nodes {
-            ${GQL_F_BAL_NODE}
-          }
-        }
-        objectChanges(first: 50) {
-          pageInfo { hasNextPage }
-          nodes {
-            address idCreated idDeleted
-            inputState { version digest ${GQL_F_MOVE_TYPE} }
-            outputState { version digest owner {
-              ${GQL_F_OWNER}
-            } ${GQL_F_MOVE_TYPE} }
-          }
-        }
-        events(first: 50) {
-          pageInfo { hasNextPage }
-          nodes {
-            ${GQL_F_EVENT_NODE}
-          }
-        }
       }
     }
   }`, { digest });
 
-  const tx = data.transaction;
+  let tx = shellData.transaction;
   if (!tx) { app.innerHTML = renderEmpty("Transaction not found."); return; }
+
   const routeParams = splitRouteAndParams(getRoute()).params;
   let showIntentOverlay = routeParams.get("intent") === "1";
   const useRootEffects = routeParams.get("effects") === "1";
-  let effectsSource = "embedded transaction.effects";
+  let effectsSource = useRootEffects ? "root transactionEffects (loading detail)" : "embedded transaction.effects (loading detail)";
   let effectsSourceError = "";
+  let detailLoadError = "";
+  let effectsDetailState = "loading";
+  let detailHydrating = false;
   let eff = tx.effects;
-  if (useRootEffects) {
-    try {
-      const effData = await gql(`query($digest: String!) {
-        transactionEffects(digest: $digest) {
-          status
-          timestamp
-          executionError { message abortCode sourceLineNumber instructionOffset identifier module { name package { address } } function { name } }
-          checkpoint { sequenceNumber }
-          epoch { epochId }
-          gasEffects {
-            gasSummary { computationCost storageCost storageRebate nonRefundableStorageFee }
-            gasObject { address }
-          }
+
+  async function loadEmbeddedEffectsDetail() {
+    const data = await gql(`query($digest: String!) {
+      transaction(digest: $digest) {
+        effects {
           balanceChanges(first: 50) {
             pageInfo { hasNextPage }
             nodes {
@@ -5016,824 +4991,886 @@ async function renderTxDetail(app, digest) {
             }
           }
         }
-      }`, { digest });
-      if (effData?.transactionEffects) {
-        eff = effData.transactionEffects;
-        effectsSource = "root transactionEffects";
+      }
+    }`, { digest });
+    return data?.transaction?.effects || null;
+  }
+
+  async function hydrateTxEffectsDetail() {
+    try {
+      let nextEff = null;
+      if (useRootEffects) {
+        try {
+          const effData = await gql(`query($digest: String!) {
+            transactionEffects(digest: $digest) {
+              status
+              timestamp
+              executionError { message abortCode sourceLineNumber instructionOffset identifier module { name package { address } } function { name } }
+              checkpoint { sequenceNumber }
+              epoch { epochId }
+              gasEffects {
+                gasSummary { computationCost storageCost storageRebate nonRefundableStorageFee }
+                gasObject { address }
+              }
+              balanceChanges(first: 50) {
+                pageInfo { hasNextPage }
+                nodes {
+                  ${GQL_F_BAL_NODE}
+                }
+              }
+              objectChanges(first: 50) {
+                pageInfo { hasNextPage }
+                nodes {
+                  address idCreated idDeleted
+                  inputState { version digest ${GQL_F_MOVE_TYPE} }
+                  outputState { version digest owner {
+                    ${GQL_F_OWNER}
+                  } ${GQL_F_MOVE_TYPE} }
+                }
+              }
+              events(first: 50) {
+                pageInfo { hasNextPage }
+                nodes {
+                  ${GQL_F_EVENT_NODE}
+                }
+              }
+            }
+          }`, { digest });
+          if (!effData?.transactionEffects) throw new Error("transactionEffects returned null");
+          nextEff = effData.transactionEffects;
+          effectsSource = "root transactionEffects";
+          effectsSourceError = "";
+        } catch (e) {
+          effectsSourceError = e?.message || "transactionEffects query failed";
+          nextEff = await loadEmbeddedEffectsDetail();
+          effectsSource = "embedded transaction.effects";
+        }
       } else {
-        effectsSourceError = "transactionEffects returned null";
+        nextEff = await loadEmbeddedEffectsDetail();
+        effectsSource = "embedded transaction.effects";
+        effectsSourceError = "";
       }
+      if (!nextEff) throw new Error("Detailed effects payload unavailable");
+      eff = { ...eff, ...nextEff };
+      tx = { ...tx, effects: eff };
+      effectsDetailState = "loaded";
+      detailLoadError = "";
+
+      const coinTypes = (eff?.balanceChanges?.nodes || []).map((b) => b?.coinType?.repr).filter(Boolean);
+      const moveCallPkgs = (tx?.kind?.commands?.nodes || [])
+        .filter((c) => c.__typename === "MoveCallCommand")
+        .map((c) => c.function?.module?.package?.address)
+        .filter(Boolean);
+      const eventPkgs = (eff?.events?.nodes || []).map((e) => e?.transactionModule?.package?.address).filter(Boolean);
+      const allPkgs = [...new Set([...moveCallPkgs, ...eventPkgs])];
+      await Promise.allSettled([
+        coinTypes.length ? prefetchCoinMeta(coinTypes) : Promise.resolve(),
+        allPkgs.length ? resolvePackageNames(allPkgs) : Promise.resolve(),
+      ]);
     } catch (e) {
-      effectsSourceError = e?.message || "transactionEffects query failed";
+      if (isAbortError(e)) return;
+      detailLoadError = e?.message || "Detailed effect query failed";
+      effectsDetailState = "error";
+      if (!effectsSourceError) effectsSourceError = detailLoadError;
+      if (!useRootEffects) effectsSource = "embedded transaction.effects";
     }
-  }
-  const gs = eff?.gasEffects?.gasSummary;
-  const gasUsed = gs ? Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate) : 0;
-  const kind = tx.kind;
-  const isPTB = !!(kind?.commands);
-  const commandsConn = kind?.commands;
-  const inputsConn = kind?.inputs;
-  const balancesConn = eff?.balanceChanges;
-  const objChangesConn = eff?.objectChanges;
-  const eventsConn = eff?.events;
-  const commands = commandsConn?.nodes || [];
-  const inputs = inputsConn?.nodes || [];
-  const balances = balancesConn?.nodes || [];
-  const objChanges = objChangesConn?.nodes || [];
-  const events = eventsConn?.nodes || [];
-  const commandsTruncated = !!commandsConn?.pageInfo?.hasNextPage;
-  const inputsTruncated = !!inputsConn?.pageInfo?.hasNextPage;
-  const balancesTruncated = !!balancesConn?.pageInfo?.hasNextPage;
-  const objectsTruncated = !!objChangesConn?.pageInfo?.hasNextPage;
-  const eventsTruncated = !!eventsConn?.pageInfo?.hasNextPage;
-
-  // Prefetch coin metadata + MVR package names in parallel
-  const coinTypes = balances.map(b => b.coinType?.repr).filter(Boolean);
-  const moveCallPkgs = commands
-    .filter(c => c.__typename === "MoveCallCommand")
-    .map(c => c.function?.module?.package?.address)
-    .filter(Boolean);
-  const eventPkgs = events.map(e => e.transactionModule?.package?.address).filter(Boolean);
-  const allPkgs = [...new Set([...moveCallPkgs, ...eventPkgs])];
-  await Promise.all([
-    prefetchCoinMeta(coinTypes),
-    allPkgs.length ? resolvePackageNames(allPkgs) : Promise.resolve(),
-  ]);
-
-  let kindLabel = "System Transaction";
-  if (isPTB) kindLabel = "Programmable Transaction";
-  else if (kind?.__typename === "ConsensusCommitPrologueTransaction") kindLabel = "Consensus Commit";
-  else if (kind?.__typename === "EndOfEpochTransaction") kindLabel = "End of Epoch";
-  const txIntent = analyzeTxIntent(tx);
-
-  // ── Structural summary (deterministic, no protocol heuristics) ──
-  function deriveStructuralSummary() {
-    if (!isPTB) return kindLabel;
-    const moveCalls = commands.filter(c => c.__typename === "MoveCallCommand");
-    const packages = new Set(moveCalls.map(c => normalizeSuiAddress(c.function?.module?.package?.address || "")).filter(Boolean));
-    return `${commands.length} commands · ${moveCalls.length} move calls · ${packages.size} packages · ${objChanges.length} object changes · ${events.length} events`;
+    if (!app.isConnected || localRouteToken !== routeRenderToken) return;
+    renderTxView();
+    setRouteViewCacheEntry(routeCacheKey(getRoute()), app.innerHTML);
+    scheduleUiEnhancements();
   }
 
-  // ── Best-effort intent summary (optional overlay) ──
-  function deriveIntentSummary() {
-    if (!isPTB) return kindLabel;
-    const moveCalls = commands.filter(c => c.__typename === "MoveCallCommand");
-    const transfers = commands.filter(c => c.__typename === "TransferObjectsCommand");
-    const splits = commands.filter(c => c.__typename === "SplitCoinsCommand");
-    const merges = commands.filter(c => c.__typename === "MergeCoinsCommand");
-    const publishes = commands.filter(c => c.__typename === "PublishCommand");
-    const modules = [...new Set(moveCalls.map(c => c.function?.module?.name).filter(Boolean))];
-    const funcs = [...new Set(moveCalls.map(c => c.function?.name).filter(Boolean))];
-    if (publishes.length) return `Published ${publishes.length} package${publishes.length > 1 ? "s" : ""}`;
-    if (moveCalls.length === 0 && transfers.length) return `Transferred objects to ${transfers.length} recipient${transfers.length > 1 ? "s" : ""}`;
-    if (moveCalls.length === 0 && splits.length) return "Split coins";
-    if (moveCalls.length === 0 && merges.length) return "Merged coins";
-    if (moveCalls.length === 1) {
-      const pkg = moveCalls[0].function?.module?.package?.address;
-      const mvrPkg = pkg && mvrNameCache[pkg] ? `@${mvrNameCache[pkg]}` : "";
-      return `Called ${mvrPkg ? mvrPkg + "::" : ""}${modules[0]}::${funcs[0]}`;
-    }
-    if (modules.length === 1) {
-      const pkg = moveCalls[0].function?.module?.package?.address;
-      const mvrPkg = pkg && mvrNameCache[pkg] ? `@${mvrNameCache[pkg]}` : "";
-      return `${moveCalls.length} calls to ${mvrPkg ? mvrPkg + "::" : ""}${modules[0]} (${funcs.slice(0, 3).join(", ")}${funcs.length > 3 ? "..." : ""})`;
-    }
-    return `${commands.length} commands across ${modules.length} modules`;
-  }
+  function renderTxView() {
+    const detailLoaded = effectsDetailState === "loaded";
+    const detailError = effectsDetailState === "error" ? detailLoadError : "";
+    const gs = eff?.gasEffects?.gasSummary;
+    const gasUsed = gs ? Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate) : 0;
+    const kind = tx.kind;
+    const isPTB = !!(kind?.commands);
+    const commandsConn = kind?.commands;
+    const inputsConn = kind?.inputs;
+    const balancesConn = eff?.balanceChanges;
+    const objChangesConn = eff?.objectChanges;
+    const eventsConn = eff?.events;
+    const commands = commandsConn?.nodes || [];
+    const inputs = inputsConn?.nodes || [];
+    const balances = balancesConn?.nodes || [];
+    const objChanges = objChangesConn?.nodes || [];
+    const events = eventsConn?.nodes || [];
+    const commandsTruncated = !!commandsConn?.pageInfo?.hasNextPage;
+    const inputsTruncated = !!inputsConn?.pageInfo?.hasNextPage;
+    const balancesTruncated = !!balancesConn?.pageInfo?.hasNextPage;
+    const objectsTruncated = !!objChangesConn?.pageInfo?.hasNextPage;
+    const eventsTruncated = !!eventsConn?.pageInfo?.hasNextPage;
 
-  // ── Categorize object changes ──
-  const created = objChanges.filter(o => o.idCreated);
-  const mutated = objChanges.filter(o => !o.idCreated && !o.idDeleted);
-  const deleted = objChanges.filter(o => o.idDeleted);
-  const commandMix = isPTB ? (() => {
-    const counts = {};
-    for (const c of commands) {
-      const key = String(c?.__typename || "Other").replace("Command", "");
-      counts[key] = (counts[key] || 0) + 1;
+    let kindLabel = "System Transaction";
+    if (isPTB) kindLabel = "Programmable Transaction";
+    else if (kind?.__typename === "ConsensusCommitPrologueTransaction") kindLabel = "Consensus Commit";
+    else if (kind?.__typename === "EndOfEpochTransaction") kindLabel = "End of Epoch";
+
+    const moveCalls = commands.filter((c) => c.__typename === "MoveCallCommand");
+    const uniqueMovePackages = [...new Set(moveCalls.map((c) => normalizeSuiAddress(c.function?.module?.package?.address || "")).filter(Boolean))];
+    const uniqueMoveModules = [...new Set(moveCalls.map((c) => `${normalizeSuiAddress(c.function?.module?.package?.address || "")}::${c.function?.module?.name || ""}`).filter((s) => !s.endsWith("::")))];
+    const uniqueMoveFunctions = [...new Set(moveCalls.map((c) => `${normalizeSuiAddress(c.function?.module?.package?.address || "")}::${c.function?.module?.name || ""}::${c.function?.name || ""}`).filter((s) => !s.endsWith("::")))];
+    const uniqueEventTypes = [...new Set(events.map((e) => e?.contents?.type?.repr).filter(Boolean))].length;
+
+    const txIntent = analyzeTxIntent(tx);
+
+    function deriveStructuralSummary() {
+      if (!isPTB) return kindLabel;
+      const packages = new Set(moveCalls.map((c) => normalizeSuiAddress(c.function?.module?.package?.address || "")).filter(Boolean));
+      if (!detailLoaded) {
+        return `${commands.length} commands · ${moveCalls.length} move calls · ${packages.size} packages`;
+      }
+      return `${commands.length} commands · ${moveCalls.length} move calls · ${packages.size} packages · ${objChanges.length} object changes · ${events.length} events`;
     }
-    return Object.entries(counts).map(([label, value], i) => ({
-      label,
-      value,
-      color: ["var(--accent)", "var(--green)", "var(--blue)", "var(--purple)", "var(--yellow)", "var(--red)"][i % 6],
-    }));
-  })() : [];
-  const objectMix = [
-    { label: "Created", value: created.length, color: "var(--green)" },
-    { label: "Mutated", value: mutated.length, color: "var(--accent)" },
-    { label: "Deleted", value: deleted.length, color: "var(--red)" },
-  ];
-  const truncatedNotes = [
-    commandsTruncated ? "commands" : "",
-    inputsTruncated ? "inputs" : "",
-    balancesTruncated ? "balance changes" : "",
-    objectsTruncated ? "object changes" : "",
-    eventsTruncated ? "events" : "",
-  ].filter(Boolean);
 
-  function isSuiCoinType(coinType) {
-    return String(coinType || "").toLowerCase().includes("::sui::sui");
-  }
+    function deriveIntentSummary() {
+      if (!isPTB) return kindLabel;
+      const transfers = commands.filter((c) => c.__typename === "TransferObjectsCommand");
+      const splits = commands.filter((c) => c.__typename === "SplitCoinsCommand");
+      const merges = commands.filter((c) => c.__typename === "MergeCoinsCommand");
+      const publishes = commands.filter((c) => c.__typename === "PublishCommand");
+      const modules = [...new Set(moveCalls.map((c) => c.function?.module?.name).filter(Boolean))];
+      const funcs = [...new Set(moveCalls.map((c) => c.function?.name).filter(Boolean))];
+      if (publishes.length) return `Published ${publishes.length} package${publishes.length > 1 ? "s" : ""}`;
+      if (moveCalls.length === 0 && transfers.length) return `Transferred objects to ${transfers.length} recipient${transfers.length > 1 ? "s" : ""}`;
+      if (moveCalls.length === 0 && splits.length) return "Split coins";
+      if (moveCalls.length === 0 && merges.length) return "Merged coins";
+      if (moveCalls.length === 1) {
+        const pkg = moveCalls[0].function?.module?.package?.address;
+        const mvrPkg = pkg && mvrNameCache[pkg] ? `@${mvrNameCache[pkg]}` : "";
+        return `Called ${mvrPkg ? mvrPkg + "::" : ""}${modules[0]}::${funcs[0]}`;
+      }
+      if (modules.length === 1) {
+        const pkg = moveCalls[0].function?.module?.package?.address;
+        const mvrPkg = pkg && mvrNameCache[pkg] ? `@${mvrNameCache[pkg]}` : "";
+        return `${moveCalls.length} calls to ${mvrPkg ? mvrPkg + "::" : ""}${modules[0]} (${funcs.slice(0, 3).join(", ")}${funcs.length > 3 ? "..." : ""})`;
+      }
+      return `${commands.length} commands across ${modules.length} modules`;
+    }
 
-  function resolveCoinMetaForTx(coinType) {
-    const meta = coinType ? coinMetaCache[coinType] : null;
-    if (meta && Number.isFinite(Number(meta.decimals))) {
+    const created = objChanges.filter((o) => o.idCreated);
+    const mutated = objChanges.filter((o) => !o.idCreated && !o.idDeleted);
+    const deleted = objChanges.filter((o) => o.idDeleted);
+    const commandMix = isPTB ? (() => {
+      const counts = {};
+      for (const c of commands) {
+        const key = String(c?.__typename || "Other").replace("Command", "");
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      return Object.entries(counts).map(([label, value], i) => ({
+        label,
+        value,
+        color: ["var(--accent)", "var(--green)", "var(--blue)", "var(--purple)", "var(--yellow)", "var(--red)"][i % 6],
+      }));
+    })() : [];
+    const objectMix = [
+      { label: "Created", value: created.length, color: "var(--green)" },
+      { label: "Mutated", value: mutated.length, color: "var(--accent)" },
+      { label: "Deleted", value: deleted.length, color: "var(--red)" },
+    ];
+    const truncatedNotes = [
+      commandsTruncated ? "commands" : "",
+      inputsTruncated ? "inputs" : "",
+      detailLoaded && balancesTruncated ? "balance changes" : "",
+      detailLoaded && objectsTruncated ? "object changes" : "",
+      detailLoaded && eventsTruncated ? "events" : "",
+    ].filter(Boolean);
+
+    function isSuiCoinType(coinType) {
+      return String(coinType || "").toLowerCase().includes("::sui::sui");
+    }
+
+    function resolveCoinMetaForTx(coinType) {
+      const meta = coinType ? coinMetaCache[coinType] : null;
+      if (meta && Number.isFinite(Number(meta.decimals))) {
+        return {
+          symbol: String(meta.symbol || coinName(coinType) || "?"),
+          decimals: Number(meta.decimals),
+          source: "coinMetadata",
+        };
+      }
+      const known = coinType ? KNOWN_COIN_TYPES[coinType] : null;
+      if (known) {
+        return {
+          symbol: String(known.symbol || coinName(coinType) || "?"),
+          decimals: Number(known.decimals || 9),
+          source: "knownRegistry",
+        };
+      }
+      const sym = coinType ? (coinType.split("::").pop() || "?") : "?";
       return {
-        symbol: String(meta.symbol || coinName(coinType) || "?"),
-        decimals: Number(meta.decimals),
-        source: "coinMetadata",
+        symbol: sym,
+        decimals: COMMON_DECIMALS[sym] || 9,
+        source: "fallbackGuess",
       };
     }
-    const known = coinType ? KNOWN_COIN_TYPES[coinType] : null;
-    if (known) {
-      return {
-        symbol: String(known.symbol || coinName(coinType) || "?"),
-        decimals: Number(known.decimals || 9),
-        source: "knownRegistry",
-      };
+
+    function decimalsSourceLabel(source) {
+      if (source === "coinMetadata") return "on-chain";
+      if (source === "knownRegistry") return "known";
+      return "fallback";
     }
-    const sym = coinType ? (coinType.split("::").pop() || "?") : "?";
-    return {
-      symbol: sym,
-      decimals: COMMON_DECIMALS[sym] || 9,
-      source: "fallbackGuess",
-    };
-  }
 
-  function decimalsSourceLabel(source) {
-    if (source === "coinMetadata") return "on-chain";
-    if (source === "knownRegistry") return "known";
-    return "fallback";
-  }
-
-  function fmtRawCoinValue(raw, coinType, opts = {}) {
-    const signed = !!opts.signed;
-    const resolved = resolveCoinMetaForTx(coinType);
-    const decimals = resolved.decimals || 9;
-    const n = Number(raw || 0) / Math.pow(10, decimals);
-    const abs = Math.abs(n);
-    const text = abs < 0.001 && abs > 0
-      ? abs.toExponential(2)
-      : abs.toLocaleString(undefined, { maximumFractionDigits: 6 });
-    const sign = signed ? (n >= 0 ? "+" : "-") : "";
-    return `${sign}${text} ${resolved.symbol}`;
-  }
-
-  function ownerLinkOrText(owner) {
-    if (!owner || owner === "unknown") return '<span class="u-c-dim">unknown</span>';
-    return hashLink(owner, '/address/' + owner);
-  }
-
-  function ownerStateLabel(owner) {
-    if (!owner) return '<span class="u-c-dim">—</span>';
-    if (owner?.address?.address) return hashLink(owner.address.address, '/address/' + owner.address.address);
-    if (owner?.initialSharedVersion != null) return '<span class="u-c-dim">Shared</span>';
-    if (owner?.__typename === "Immutable") return '<span class="u-c-dim">Immutable</span>';
-    return '<span class="u-c-dim">—</span>';
-  }
-
-  const moveCalls = commands.filter(c => c.__typename === "MoveCallCommand");
-  const uniqueMovePackages = [...new Set(moveCalls.map(c => normalizeSuiAddress(c.function?.module?.package?.address || "")).filter(Boolean))];
-  const uniqueMoveModules = [...new Set(moveCalls.map(c => `${normalizeSuiAddress(c.function?.module?.package?.address || "")}::${c.function?.module?.name || ""}`).filter(s => !s.endsWith("::")))];
-  const uniqueMoveFunctions = [...new Set(moveCalls.map(c => `${normalizeSuiAddress(c.function?.module?.package?.address || "")}::${c.function?.module?.name || ""}::${c.function?.name || ""}`).filter(s => !s.endsWith("::")))];
-  const uniqueEventTypes = [...new Set(events.map(e => e?.contents?.type?.repr).filter(Boolean))].length;
-
-  const ownersImpactedSet = new Set();
-  for (const b of balances) {
-    const owner = normalizeSuiAddress(b?.owner?.address || "");
-    if (owner) ownersImpactedSet.add(owner);
-  }
-  for (const o of objChanges) {
-    const owner = normalizeSuiAddress(o?.outputState?.owner?.address?.address || "");
-    if (owner) ownersImpactedSet.add(owner);
-  }
-  const ownersImpacted = ownersImpactedSet.size;
-
-  const moveTargetMap = {};
-  for (const c of moveCalls) {
-    const pkg = normalizeSuiAddress(c.function?.module?.package?.address || "");
-    const mod = String(c.function?.module?.name || "");
-    const fn = String(c.function?.name || "");
-    const key = `${pkg}|${mod}|${fn}`;
-    if (!moveTargetMap[key]) moveTargetMap[key] = { pkg, mod, fn, count: 0 };
-    moveTargetMap[key].count++;
-  }
-  const moveTargetRows = Object.values(moveTargetMap).sort((a, b) => b.count - a.count);
-
-  const eventSummaryMap = {};
-  for (const ev of events) {
-    const typeRepr = String(ev?.contents?.type?.repr || "");
-    const modPkg = normalizeSuiAddress(ev?.transactionModule?.package?.address || "");
-    const modName = String(ev?.transactionModule?.name || "");
-    const key = `${typeRepr}|${modPkg}|${modName}`;
-    if (!eventSummaryMap[key]) {
-      eventSummaryMap[key] = { typeRepr, modPkg, modName, count: 0, keyCounts: {} };
+    function fmtRawCoinValue(raw, coinType, opts = {}) {
+      const signed = !!opts.signed;
+      const resolved = resolveCoinMetaForTx(coinType);
+      const decimals = resolved.decimals || 9;
+      const n = Number(raw || 0) / Math.pow(10, decimals);
+      const abs = Math.abs(n);
+      const text = abs < 0.001 && abs > 0
+        ? abs.toExponential(2)
+        : abs.toLocaleString(undefined, { maximumFractionDigits: 6 });
+      const sign = signed ? (n >= 0 ? "+" : "-") : "";
+      return `${sign}${text} ${resolved.symbol}`;
     }
-    const row = eventSummaryMap[key];
-    row.count++;
-    const j = ev?.contents?.json;
-    if (j && typeof j === "object" && !Array.isArray(j)) {
-      for (const k of Object.keys(j)) row.keyCounts[k] = (row.keyCounts[k] || 0) + 1;
-    }
-  }
-  const eventSummaryRows = Object.values(eventSummaryMap)
-    .map(r => ({
-      ...r,
-      keyFields: Object.entries(r.keyCounts).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k]) => k),
-    }))
-    .sort((a, b) => b.count - a.count);
 
-  const balanceFlowMap = {};
-  for (const b of balances) {
-    const coinType = b?.coinType?.repr;
-    const amountRaw = Number(b?.amount || 0);
-    if (!coinType || !Number.isFinite(amountRaw) || amountRaw === 0) continue;
-    if (!balanceFlowMap[coinType]) {
-      balanceFlowMap[coinType] = {
-        coinType,
-        inRaw: 0,
-        outRaw: 0,
-        netRaw: 0,
-        toOwners: {},
-        fromOwners: {},
-      };
+    function ownerLinkOrText(owner) {
+      if (!owner || owner === "unknown") return '<span class="u-c-dim">unknown</span>';
+      return hashLink(owner, '/address/' + owner);
     }
-    const row = balanceFlowMap[coinType];
-    const owner = normalizeSuiAddress(b?.owner?.address || "") || "unknown";
-    row.netRaw += amountRaw;
-    if (amountRaw > 0) {
-      row.inRaw += amountRaw;
-      row.toOwners[owner] = (row.toOwners[owner] || 0) + amountRaw;
-    } else {
-      const outRaw = Math.abs(amountRaw);
-      row.outRaw += outRaw;
-      row.fromOwners[owner] = (row.fromOwners[owner] || 0) + outRaw;
-    }
-  }
-  const balanceFlowRows = Object.values(balanceFlowMap).sort((a, b) => Math.max(b.inRaw, b.outRaw) - Math.max(a.inRaw, a.outRaw));
-  const flowMetaCoverage = { total: 0, coinMetadata: 0, knownRegistry: 0, fallbackGuess: 0 };
-  for (const r of balanceFlowRows) {
-    const m = resolveCoinMetaForTx(r.coinType);
-    flowMetaCoverage.total++;
-    flowMetaCoverage[m.source] = (flowMetaCoverage[m.source] || 0) + 1;
-  }
-  const senderAddr = normalizeSuiAddress(tx?.sender?.address || "");
-  const gasPayerAddr = normalizeSuiAddress(tx?.gasInput?.gasSponsor?.address || tx?.sender?.address || "");
-  const hasSuiFlow = balanceFlowRows.some(r => isSuiCoinType(r.coinType));
-  const gasAdjApplied = hasSuiFlow && Number(gasUsed) > 0 && !!gasPayerAddr;
 
-  function adjustedFlowRow(row) {
-    const outRaw = Number(row?.outRaw || 0);
-    const inRaw = Number(row?.inRaw || 0);
-    const netRaw = Number(row?.netRaw || 0);
-    let outTransferRaw = outRaw;
-    let netTransferRaw = netRaw;
-    const fromOwnersTransfer = { ...(row?.fromOwners || {}) };
-    if (isSuiCoinType(row?.coinType) && gasAdjApplied) {
-      outTransferRaw = Math.max(0, outRaw - gasUsed);
-      netTransferRaw = netRaw + gasUsed;
-      if (gasPayerAddr && fromOwnersTransfer[gasPayerAddr] != null) {
-        fromOwnersTransfer[gasPayerAddr] = Math.max(0, Number(fromOwnersTransfer[gasPayerAddr] || 0) - gasUsed);
-        if (fromOwnersTransfer[gasPayerAddr] === 0) delete fromOwnersTransfer[gasPayerAddr];
+    function ownerStateLabel(owner) {
+      if (!owner) return '<span class="u-c-dim">—</span>';
+      if (owner?.address?.address) return hashLink(owner.address.address, '/address/' + owner.address.address);
+      if (owner?.initialSharedVersion != null) return '<span class="u-c-dim">Shared</span>';
+      if (owner?.__typename === "Immutable") return '<span class="u-c-dim">Immutable</span>';
+      return '<span class="u-c-dim">—</span>';
+    }
+
+    const ownersImpactedSet = new Set();
+    for (const b of balances) {
+      const owner = normalizeSuiAddress(b?.owner?.address || "");
+      if (owner) ownersImpactedSet.add(owner);
+    }
+    for (const o of objChanges) {
+      const owner = normalizeSuiAddress(o?.outputState?.owner?.address?.address || "");
+      if (owner) ownersImpactedSet.add(owner);
+    }
+    const ownersImpacted = ownersImpactedSet.size;
+
+    const moveTargetMap = {};
+    for (const c of moveCalls) {
+      const pkg = normalizeSuiAddress(c.function?.module?.package?.address || "");
+      const mod = String(c.function?.module?.name || "");
+      const fn = String(c.function?.name || "");
+      const key = `${pkg}|${mod}|${fn}`;
+      if (!moveTargetMap[key]) moveTargetMap[key] = { pkg, mod, fn, count: 0 };
+      moveTargetMap[key].count++;
+    }
+    const moveTargetRows = Object.values(moveTargetMap).sort((a, b) => b.count - a.count);
+
+    const eventSummaryMap = {};
+    for (const ev of events) {
+      const typeRepr = String(ev?.contents?.type?.repr || "");
+      const modPkg = normalizeSuiAddress(ev?.transactionModule?.package?.address || "");
+      const modName = String(ev?.transactionModule?.name || "");
+      const key = `${typeRepr}|${modPkg}|${modName}`;
+      if (!eventSummaryMap[key]) {
+        eventSummaryMap[key] = { typeRepr, modPkg, modName, count: 0, keyCounts: {} };
+      }
+      const row = eventSummaryMap[key];
+      row.count++;
+      const j = ev?.contents?.json;
+      if (j && typeof j === "object" && !Array.isArray(j)) {
+        for (const k of Object.keys(j)) row.keyCounts[k] = (row.keyCounts[k] || 0) + 1;
       }
     }
-    return {
-      outRaw,
-      inRaw,
-      netRaw,
-      outTransferRaw,
-      netTransferRaw,
-      fromOwnersTransfer,
-      toOwnersTransfer: { ...(row?.toOwners || {}) },
-    };
-  }
+    const eventSummaryRows = Object.values(eventSummaryMap)
+      .map((r) => ({
+        ...r,
+        keyFields: Object.entries(r.keyCounts).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k]) => k),
+      }))
+      .sort((a, b) => b.count - a.count);
 
-  function topOwnerFlowTags(ownerMap, coinType) {
-    const rows = Object.entries(ownerMap || {}).sort((a, b) => b[1] - a[1]).slice(0, 2);
-    if (!rows.length) return '<span class="tx-label-dim">—</span>';
-    return rows.map(([owner, raw]) => `
-      <div class="tx-owner-flow-row">
-        ${ownerLinkOrText(owner)}
-        <span class="tx-owner-flow-amt">(${fmtRawCoinValue(raw, coinType)})</span>
-      </div>
-    `).join("");
-  }
+    const balanceFlowMap = {};
+    for (const b of balances) {
+      const coinType = b?.coinType?.repr;
+      const amountRaw = Number(b?.amount || 0);
+      if (!coinType || !Number.isFinite(amountRaw) || amountRaw === 0) continue;
+      if (!balanceFlowMap[coinType]) {
+        balanceFlowMap[coinType] = {
+          coinType,
+          inRaw: 0,
+          outRaw: 0,
+          netRaw: 0,
+          toOwners: {},
+          fromOwners: {},
+        };
+      }
+      const row = balanceFlowMap[coinType];
+      const owner = normalizeSuiAddress(b?.owner?.address || "") || "unknown";
+      row.netRaw += amountRaw;
+      if (amountRaw > 0) {
+        row.inRaw += amountRaw;
+        row.toOwners[owner] = (row.toOwners[owner] || 0) + amountRaw;
+      } else {
+        const outRaw = Math.abs(amountRaw);
+        row.outRaw += outRaw;
+        row.fromOwners[owner] = (row.fromOwners[owner] || 0) + outRaw;
+      }
+    }
+    const balanceFlowRows = Object.values(balanceFlowMap).sort((a, b) => Math.max(b.inRaw, b.outRaw) - Math.max(a.inRaw, a.outRaw));
+    const flowMetaCoverage = { total: 0, coinMetadata: 0, knownRegistry: 0, fallbackGuess: 0 };
+    for (const r of balanceFlowRows) {
+      const meta = resolveCoinMetaForTx(r.coinType);
+      flowMetaCoverage.total++;
+      flowMetaCoverage[meta.source] = (flowMetaCoverage[meta.source] || 0) + 1;
+    }
+    const senderAddr = normalizeSuiAddress(tx?.sender?.address || "");
+    const gasPayerAddr = normalizeSuiAddress(tx?.gasInput?.gasSponsor?.address || tx?.sender?.address || "");
+    const hasSuiFlow = balanceFlowRows.some((r) => isSuiCoinType(r.coinType));
+    const gasAdjApplied = hasSuiFlow && Number(gasUsed) > 0 && !!gasPayerAddr;
 
-  const objectLifecycleRows = objChanges.map(o => {
-    const typeRepr = o?.outputState?.asMoveObject?.contents?.type?.repr || o?.inputState?.asMoveObject?.contents?.type?.repr || "";
-    const change = o?.idCreated ? "Created" : (o?.idDeleted ? "Deleted" : "Mutated");
-    return {
-      address: o?.address || o?.idCreated || o?.idDeleted || "",
-      change,
-      typeRepr,
-      versionIn: o?.inputState?.version,
-      versionOut: o?.outputState?.version,
-      ownerAfter: o?.outputState?.owner || null,
-    };
-  });
+    function adjustedFlowRow(row) {
+      const outRaw = Number(row?.outRaw || 0);
+      const inRaw = Number(row?.inRaw || 0);
+      const netRaw = Number(row?.netRaw || 0);
+      let outTransferRaw = outRaw;
+      let netTransferRaw = netRaw;
+      const fromOwnersTransfer = { ...(row?.fromOwners || {}) };
+      if (isSuiCoinType(row?.coinType) && gasAdjApplied) {
+        outTransferRaw = Math.max(0, outRaw - gasUsed);
+        netTransferRaw = netRaw + gasUsed;
+        if (gasPayerAddr && fromOwnersTransfer[gasPayerAddr] != null) {
+          fromOwnersTransfer[gasPayerAddr] = Math.max(0, Number(fromOwnersTransfer[gasPayerAddr] || 0) - gasUsed);
+          if (fromOwnersTransfer[gasPayerAddr] === 0) delete fromOwnersTransfer[gasPayerAddr];
+        }
+      }
+      return {
+        outRaw,
+        inRaw,
+        netRaw,
+        outTransferRaw,
+        netTransferRaw,
+        fromOwnersTransfer,
+        toOwnersTransfer: { ...(row?.toOwners || {}) },
+      };
+    }
 
-  let senderSuiDeltaRaw = 0;
-  let gasPayerSuiDeltaRaw = 0;
-  for (const b of balances) {
-    if (!isSuiCoinType(b?.coinType?.repr)) continue;
-    const owner = normalizeSuiAddress(b?.owner?.address || "");
-    const amt = Number(b?.amount || 0);
-    if (!Number.isFinite(amt) || !owner) continue;
-    if (owner === senderAddr) senderSuiDeltaRaw += amt;
-    if (owner === gasPayerAddr) gasPayerSuiDeltaRaw += amt;
-  }
-  const senderSuiDeltaExGasRaw = (senderAddr && gasPayerAddr === senderAddr)
-    ? senderSuiDeltaRaw + gasUsed
-    : senderSuiDeltaRaw;
-  const gasPayerSuiDeltaExGasRaw = gasPayerAddr
-    ? (gasPayerSuiDeltaRaw + gasUsed)
-    : 0;
+    function topOwnerFlowTags(ownerMap, coinType) {
+      const rows = Object.entries(ownerMap || {}).sort((a, b) => b[1] - a[1]).slice(0, 2);
+      if (!rows.length) return '<span class="tx-label-dim">—</span>';
+      return rows.map(([owner, raw]) => `
+        <div class="tx-owner-flow-row">
+          ${ownerLinkOrText(owner)}
+          <span class="tx-owner-flow-amt">(${fmtRawCoinValue(raw, coinType)})</span>
+        </div>
+      `).join("");
+    }
 
-  function renderExecutionOverviewCard() {
-    return `
-      <div class="card tx-card">
-        <div class="card-header">Execution Overview <span class="type-tag">Deterministic</span></div>
-        <div class="card-body tx-card-body-pad">
-          <div class="tx-overview-help">Tap any count card to expand the matching detail section.</div>
-          <div class="stats-grid tx-overview-grid">
-            <div class="stat-box stat-box-action">
-              <div class="stat-label">Commands</div>
-              <div class="stat-value">${fmtNumber(commands.length)}</div>
-              <div class="stat-sub">${isPTB ? "programmable tx" : "system tx"}</div>
-              <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-commands" ${!isPTB ? "disabled" : ""}>Expand</button>
+    const objectLifecycleRows = objChanges.map((o) => {
+      const typeRepr = o?.outputState?.asMoveObject?.contents?.type?.repr || o?.inputState?.asMoveObject?.contents?.type?.repr || "";
+      const change = o?.idCreated ? "Created" : (o?.idDeleted ? "Deleted" : "Mutated");
+      return {
+        address: o?.address || o?.idCreated || o?.idDeleted || "",
+        change,
+        typeRepr,
+        versionIn: o?.inputState?.version,
+        versionOut: o?.outputState?.version,
+        ownerAfter: o?.outputState?.owner || null,
+      };
+    });
+
+    let senderSuiDeltaRaw = 0;
+    let gasPayerSuiDeltaRaw = 0;
+    for (const b of balances) {
+      if (!isSuiCoinType(b?.coinType?.repr)) continue;
+      const owner = normalizeSuiAddress(b?.owner?.address || "");
+      const amt = Number(b?.amount || 0);
+      if (!Number.isFinite(amt) || !owner) continue;
+      if (owner === senderAddr) senderSuiDeltaRaw += amt;
+      if (owner === gasPayerAddr) gasPayerSuiDeltaRaw += amt;
+    }
+    const senderSuiDeltaExGasRaw = (senderAddr && gasPayerAddr === senderAddr)
+      ? senderSuiDeltaRaw + gasUsed
+      : senderSuiDeltaRaw;
+    const gasPayerSuiDeltaExGasRaw = gasPayerAddr
+      ? (gasPayerSuiDeltaRaw + gasUsed)
+      : 0;
+
+    function renderDeferredTxCard(title) {
+      const msg = detailError
+        ? `Detailed effect sections unavailable: ${escapeHtml(detailError)}`
+        : "Loading balance, object, and event detail...";
+      return `
+        <div class="card tx-card">
+          <div class="card-header">${title} <span class="type-tag">${detailError ? "Unavailable" : "Hydrating"}</span></div>
+          <div class="card-body">${detailError ? renderEmpty(msg) : renderLoading()}</div>
+        </div>
+      `;
+    }
+
+    function renderDeferredSectionContent(label) {
+      if (detailError) return renderEmpty(`Failed to load ${label}: ${escapeHtml(detailError)}`);
+      return renderLoading();
+    }
+
+    function renderExecutionOverviewCard() {
+      if (!detailLoaded) return renderDeferredTxCard("Execution Overview");
+      return `
+        <div class="card tx-card">
+          <div class="card-header">Execution Overview <span class="type-tag">Deterministic</span></div>
+          <div class="card-body tx-card-body-pad">
+            <div class="tx-overview-help">Tap any count card to expand the matching detail section.</div>
+            <div class="stats-grid tx-overview-grid">
+              <div class="stat-box stat-box-action">
+                <div class="stat-label">Commands</div>
+                <div class="stat-value">${fmtNumber(commands.length)}</div>
+                <div class="stat-sub">${isPTB ? "programmable tx" : "system tx"}</div>
+                <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-commands" ${!isPTB ? "disabled" : ""}>Expand</button>
+              </div>
+              <div class="stat-box stat-box-action">
+                <div class="stat-label">Move Calls</div>
+                <div class="stat-value">${fmtNumber(moveCalls.length)}</div>
+                <div class="stat-sub">${fmtNumber(uniqueMoveFunctions.length)} unique functions</div>
+                <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-commands" ${!moveCalls.length ? "disabled" : ""}>Expand</button>
+              </div>
+              <div class="stat-box stat-box-action">
+                <div class="stat-label">Packages Touched</div>
+                <div class="stat-value">${fmtNumber(uniqueMovePackages.length)}</div>
+                <div class="stat-sub">${fmtNumber(uniqueMoveModules.length)} modules</div>
+                <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-commands" data-overview="tx-ov-move-targets" ${!uniqueMovePackages.length ? "disabled" : ""}>Expand</button>
+              </div>
+              <div class="stat-box stat-box-action">
+                <div class="stat-label">Objects Changed</div>
+                <div class="stat-value">${fmtNumber(objChanges.length)}</div>
+                <div class="stat-sub">${fmtNumber(created.length)} created · ${fmtNumber(mutated.length)} mutated · ${fmtNumber(deleted.length)} deleted</div>
+                <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-objects" ${!objChanges.length ? "disabled" : ""}>Expand</button>
+              </div>
+              <div class="stat-box stat-box-action">
+                <div class="stat-label">Events</div>
+                <div class="stat-value">${fmtNumber(events.length)}</div>
+                <div class="stat-sub">${fmtNumber(uniqueEventTypes)} unique event types</div>
+                <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-events" ${!events.length ? "disabled" : ""}>Expand</button>
+              </div>
+              <div class="stat-box stat-box-action">
+                <div class="stat-label">Owners Impacted</div>
+                <div class="stat-value">${fmtNumber(ownersImpacted)}</div>
+                <div class="stat-sub">from balances + object owners</div>
+                <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-balances" ${!ownersImpacted ? "disabled" : ""}>Expand</button>
+              </div>
             </div>
-            <div class="stat-box stat-box-action">
-              <div class="stat-label">Move Calls</div>
-              <div class="stat-value">${fmtNumber(moveCalls.length)}</div>
-              <div class="stat-sub">${fmtNumber(uniqueMoveFunctions.length)} unique functions</div>
-              <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-commands" ${!moveCalls.length ? "disabled" : ""}>Expand</button>
-            </div>
-            <div class="stat-box stat-box-action">
-              <div class="stat-label">Packages Touched</div>
-              <div class="stat-value">${fmtNumber(uniqueMovePackages.length)}</div>
-              <div class="stat-sub">${fmtNumber(uniqueMoveModules.length)} modules</div>
-              <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-commands" data-overview="tx-ov-move-targets" ${!uniqueMovePackages.length ? "disabled" : ""}>Expand</button>
-            </div>
-            <div class="stat-box stat-box-action">
-              <div class="stat-label">Objects Changed</div>
-              <div class="stat-value">${fmtNumber(objChanges.length)}</div>
-              <div class="stat-sub">${fmtNumber(created.length)} created · ${fmtNumber(mutated.length)} mutated · ${fmtNumber(deleted.length)} deleted</div>
-              <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-objects" ${!objChanges.length ? "disabled" : ""}>Expand</button>
-            </div>
-            <div class="stat-box stat-box-action">
-              <div class="stat-label">Events</div>
-              <div class="stat-value">${fmtNumber(events.length)}</div>
-              <div class="stat-sub">${fmtNumber(uniqueEventTypes)} unique event types</div>
-              <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-events" ${!events.length ? "disabled" : ""}>Expand</button>
-            </div>
-            <div class="stat-box stat-box-action">
-              <div class="stat-label">Owners Impacted</div>
-              <div class="stat-value">${fmtNumber(ownersImpacted)}</div>
-              <div class="stat-sub">from balances + object owners</div>
-              <button type="button" class="stat-action-btn" data-action="tx-drill" data-section="sec-balances" ${!ownersImpacted ? "disabled" : ""}>Expand</button>
-            </div>
+            ${moveTargetRows.length ? `<details class="tx-overview-detail" id="tx-ov-move-targets">
+              <summary>Move Target Breakdown <span class="tx-section-count">${fmtNumber(moveTargetRows.length)} targets</span></summary>
+              <div class="tx-overview-detail-body">
+                <table>
+                  <thead><tr><th>Move Target</th><th>Package</th><th class="tx-cell-mono-right">Calls</th></tr></thead>
+                  <tbody>
+                    ${moveTargetRows.slice(0, 10).map((r) => {
+                      const pkgName = mvrNameCache[r.pkg] ? '@' + mvrNameCache[r.pkg] : "";
+                      return `<tr>
+                        <td class="tx-cell-mono-left-small">${escapeHtml(r.mod)}::${escapeHtml(r.fn)}</td>
+                        <td>${pkgName ? `<span class="tx-pkg-name">${escapeHtml(pkgName)}</span> ` : ""}${r.pkg ? hashLink(r.pkg, '/object/' + r.pkg) : '<span class="tx-label-dim">—</span>'}</td>
+                        <td class="tx-cell-mono-right">${fmtNumber(r.count)}</td>
+                      </tr>`;
+                    }).join("")}
+                  </tbody>
+                </table>
+              </div>
+            </details>` : '<div class="tx-overview-no-data">No move-call targets in this transaction.</div>'}
           </div>
-          ${moveTargetRows.length ? `<details class="tx-overview-detail" id="tx-ov-move-targets">
-            <summary>Move Target Breakdown <span class="tx-section-count">${fmtNumber(moveTargetRows.length)} targets</span></summary>
-            <div class="tx-overview-detail-body">
-              <table>
-                <thead><tr><th>Move Target</th><th>Package</th><th class="tx-cell-mono-right">Calls</th></tr></thead>
-                <tbody>
-                  ${moveTargetRows.slice(0, 10).map(r => {
-                    const pkgName = mvrNameCache[r.pkg] ? '@' + mvrNameCache[r.pkg] : "";
-                    return `<tr>
-                      <td class="tx-cell-mono-left-small">${escapeHtml(r.mod)}::${escapeHtml(r.fn)}</td>
-                      <td>${pkgName ? `<span class="tx-pkg-name">${escapeHtml(pkgName)}</span> ` : ""}${r.pkg ? hashLink(r.pkg, '/object/' + r.pkg) : '<span class="tx-label-dim">—</span>'}</td>
-                      <td class="tx-cell-mono-right">${fmtNumber(r.count)}</td>
-                    </tr>`;
-                  }).join("")}
-                </tbody>
-              </table>
+        </div>
+      `;
+    }
+
+    function renderBalanceFlowMatrixCard() {
+      if (!detailLoaded) return renderDeferredTxCard("Balance Flow Matrix");
+      return `
+        <div class="card tx-card">
+          <div class="card-header">Balance Flow Matrix <span class="type-tag">By Coin</span></div>
+          <div class="card-body">
+            <div class="tx-balance-note">
+              Decimal normalization: ${fmtNumber(flowMetaCoverage.coinMetadata || 0)}/${fmtNumber(flowMetaCoverage.total || 0)} coin types from on-chain metadata, ${fmtNumber(flowMetaCoverage.knownRegistry || 0)} known mappings, ${fmtNumber(flowMetaCoverage.fallbackGuess || 0)} fallback guesses.
+              ${gasAdjApplied ? ` SUI transfer columns exclude gas burn (${fmtSui(gasUsed)}) for payer ${ownerLinkOrText(gasPayerAddr)}.` : ""}
             </div>
-          </details>` : '<div class="tx-overview-no-data">No move-call targets in this transaction.</div>'}
-        </div>
-      </div>
-    `;
-  }
-
-  function renderBalanceFlowMatrixCard() {
-    return `
-      <div class="card tx-card">
-        <div class="card-header">Balance Flow Matrix <span class="type-tag">By Coin</span></div>
-        <div class="card-body">
-          <div class="tx-balance-note">
-            Decimal normalization: ${fmtNumber(flowMetaCoverage.coinMetadata || 0)}/${fmtNumber(flowMetaCoverage.total || 0)} coin types from on-chain metadata, ${fmtNumber(flowMetaCoverage.knownRegistry || 0)} known mappings, ${fmtNumber(flowMetaCoverage.fallbackGuess || 0)} fallback guesses.
-            ${gasAdjApplied ? ` SUI transfer columns exclude gas burn (${fmtSui(gasUsed)}) for payer ${ownerLinkOrText(gasPayerAddr)}.` : ""}
+            ${balanceFlowRows.length ? `<table>
+              <thead><tr><th>Coin</th><th class="tx-cell-mono-right">Decimals</th><th class="tx-cell-mono-right">Outflow (Transfer)</th><th class="tx-cell-mono-right">Inflow</th><th class="tx-cell-mono-right">Net (Transfer)</th><th class="tx-cell-mono-right">Net (Raw)</th><th>Top Senders (Transfer)</th><th>Top Receivers</th></tr></thead>
+              <tbody>
+                ${balanceFlowRows.map((r) => {
+                  const resolved = resolveCoinMetaForTx(r.coinType);
+                  const adj = adjustedFlowRow(r);
+                  const transferNetColor = adj.netTransferRaw > 0 ? "var(--green)" : (adj.netTransferRaw < 0 ? "var(--red)" : "var(--text)");
+                  const rawNetColor = adj.netRaw > 0 ? "var(--green)" : (adj.netRaw < 0 ? "var(--red)" : "var(--text)");
+                  return `<tr>
+                    <td><span class="u-fw-600">${escapeHtml(resolved.symbol)}</span></td>
+                    <td class="tx-cell-mono-right">${fmtNumber(resolved.decimals)}<div class="tx-cell-mono-dim">${decimalsSourceLabel(resolved.source)}</div></td>
+                    <td class="tx-cell-mono-right">${fmtRawCoinValue(adj.outTransferRaw, r.coinType)}</td>
+                    <td class="tx-cell-mono-right">${fmtRawCoinValue(adj.inRaw, r.coinType)}</td>
+                    <td class="tx-cell-mono-right" style="color:${transferNetColor}">${fmtRawCoinValue(adj.netTransferRaw, r.coinType, { signed: true })}</td>
+                    <td class="tx-cell-mono-right" style="color:${rawNetColor}">${fmtRawCoinValue(adj.netRaw, r.coinType, { signed: true })}</td>
+                    <td>${topOwnerFlowTags(adj.fromOwnersTransfer, r.coinType)}</td>
+                    <td>${topOwnerFlowTags(adj.toOwnersTransfer, r.coinType)}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>` : renderEmpty("No balance changes to summarize.")}
           </div>
-          ${balanceFlowRows.length ? `<table>
-            <thead><tr><th>Coin</th><th class="tx-cell-mono-right">Decimals</th><th class="tx-cell-mono-right">Outflow (Transfer)</th><th class="tx-cell-mono-right">Inflow</th><th class="tx-cell-mono-right">Net (Transfer)</th><th class="tx-cell-mono-right">Net (Raw)</th><th>Top Senders (Transfer)</th><th>Top Receivers</th></tr></thead>
-            <tbody>
-              ${balanceFlowRows.map(r => {
-                const resolved = resolveCoinMetaForTx(r.coinType);
-                const adj = adjustedFlowRow(r);
-                const transferNetColor = adj.netTransferRaw > 0 ? "var(--green)" : (adj.netTransferRaw < 0 ? "var(--red)" : "var(--text)");
-                const rawNetColor = adj.netRaw > 0 ? "var(--green)" : (adj.netRaw < 0 ? "var(--red)" : "var(--text)");
-                return `<tr>
-                  <td><span class="u-fw-600">${escapeHtml(resolved.symbol)}</span></td>
-                  <td class="tx-cell-mono-right">${fmtNumber(resolved.decimals)}<div class="tx-cell-mono-dim">${decimalsSourceLabel(resolved.source)}</div></td>
-                  <td class="tx-cell-mono-right">${fmtRawCoinValue(adj.outTransferRaw, r.coinType)}</td>
-                  <td class="tx-cell-mono-right">${fmtRawCoinValue(adj.inRaw, r.coinType)}</td>
-                  <td class="tx-cell-mono-right" style="color:${transferNetColor}">${fmtRawCoinValue(adj.netTransferRaw, r.coinType, { signed: true })}</td>
-                  <td class="tx-cell-mono-right" style="color:${rawNetColor}">${fmtRawCoinValue(adj.netRaw, r.coinType, { signed: true })}</td>
-                  <td>${topOwnerFlowTags(adj.fromOwnersTransfer, r.coinType)}</td>
-                  <td>${topOwnerFlowTags(adj.toOwnersTransfer, r.coinType)}</td>
-                </tr>`;
-              }).join("")}
-            </tbody>
-          </table>` : renderEmpty("No balance changes to summarize.")}
         </div>
-      </div>
-    `;
-  }
+      `;
+    }
 
-  function renderObjectLifecycleCard() {
-    return `
-      <div class="card tx-card">
-        <div class="card-header">Object Lifecycle <span class="type-tag">Version + Owner</span></div>
-        <div class="card-body">
-          ${objectLifecycleRows.length ? `<table>
-            <thead><tr><th>Object</th><th>Change</th><th>Type</th><th>Version</th><th>Owner After</th></tr></thead>
-            <tbody>
-              ${objectLifecycleRows.slice(0, 80).map(r => {
-                const badge = r.change === "Created" ? '<span class="badge badge-success">Created</span>'
-                  : (r.change === "Deleted" ? '<span class="badge badge-fail">Deleted</span>' : '<span class="badge">Mutated</span>');
-                const ver = (r.versionIn != null || r.versionOut != null)
-                  ? `v${r.versionIn ?? "?"} -> v${r.versionOut ?? "?"}`
-                  : "—";
-                return `<tr>
-                  <td>${r.address ? hashLink(r.address, '/object/' + r.address) : '<span class="tx-label-dim">—</span>'}</td>
-                  <td>${badge}</td>
-                  <td class="tx-cell-type-dim">${escapeHtml(shortType(r.typeRepr || "")) || "—"}</td>
-                  <td class="tx-cell-mono-left-small">${ver}</td>
-                  <td>${ownerStateLabel(r.ownerAfter)}</td>
-                </tr>`;
-              }).join("")}
-            </tbody>
-          </table>` : renderEmpty("No object lifecycle changes in this transaction.")}
+    function renderObjectLifecycleCard() {
+      if (!detailLoaded) return renderDeferredTxCard("Object Lifecycle");
+      return `
+        <div class="card tx-card">
+          <div class="card-header">Object Lifecycle <span class="type-tag">Version + Owner</span></div>
+          <div class="card-body">
+            ${objectLifecycleRows.length ? `<table>
+              <thead><tr><th>Object</th><th>Change</th><th>Type</th><th>Version</th><th>Owner After</th></tr></thead>
+              <tbody>
+                ${objectLifecycleRows.slice(0, 80).map((r) => {
+                  const badge = r.change === "Created" ? '<span class="badge badge-success">Created</span>'
+                    : (r.change === "Deleted" ? '<span class="badge badge-fail">Deleted</span>' : '<span class="badge">Mutated</span>');
+                  const ver = (r.versionIn != null || r.versionOut != null)
+                    ? `v${r.versionIn ?? "?"} -> v${r.versionOut ?? "?"}`
+                    : "—";
+                  return `<tr>
+                    <td>${r.address ? hashLink(r.address, '/object/' + r.address) : '<span class="tx-label-dim">—</span>'}</td>
+                    <td>${badge}</td>
+                    <td class="tx-cell-type-dim">${escapeHtml(shortType(r.typeRepr || "")) || "—"}</td>
+                    <td class="tx-cell-mono-left-small">${ver}</td>
+                    <td>${ownerStateLabel(r.ownerAfter)}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>` : renderEmpty("No object lifecycle changes in this transaction.")}
+          </div>
         </div>
-      </div>
-    `;
-  }
+      `;
+    }
 
-  function renderEventOutcomeCard() {
-    return `
-      <div class="card tx-card">
-        <div class="card-header">Event Outcomes <span class="type-tag">Grouped</span></div>
-        <div class="card-body">
-          ${eventSummaryRows.length ? `<table>
-            <thead><tr><th>Event Type</th><th>Module</th><th class="tx-cell-mono-right">Count</th><th>Top JSON Keys</th></tr></thead>
-            <tbody>
-              ${eventSummaryRows.slice(0, 50).map(r => {
-                const modPkgName = r.modPkg && mvrNameCache[r.modPkg] ? '@' + mvrNameCache[r.modPkg] : "";
-                const modLabel = r.modName ? `${modPkgName ? modPkgName + "::" : ""}${r.modName}` : (modPkgName || "—");
-                return `<tr>
-                  <td class="tx-cell-type-dim">${escapeHtml(shortType(r.typeRepr || "") || r.typeRepr || "—")}</td>
-                  <td>${r.modPkg ? `${r.modPkg ? hashLink(r.modPkg, '/object/' + r.modPkg) : ""}<div class="tx-cell-mono-dim">${escapeHtml(modLabel)}</div>` : `<span class="tx-label-dim">${escapeHtml(modLabel)}</span>`}</td>
-                  <td class="tx-cell-mono-right">${fmtNumber(r.count)}</td>
-                  <td class="tx-cell-mono-dim">${r.keyFields.length ? escapeHtml(r.keyFields.join(", ")) : "—"}</td>
-                </tr>`;
-              }).join("")}
-            </tbody>
-          </table>` : renderEmpty("No events emitted in this transaction.")}
+    function renderEventOutcomeCard() {
+      if (!detailLoaded) return renderDeferredTxCard("Event Outcomes");
+      return `
+        <div class="card tx-card">
+          <div class="card-header">Event Outcomes <span class="type-tag">Grouped</span></div>
+          <div class="card-body">
+            ${eventSummaryRows.length ? `<table>
+              <thead><tr><th>Event Type</th><th>Module</th><th class="tx-cell-mono-right">Count</th><th>Top JSON Keys</th></tr></thead>
+              <tbody>
+                ${eventSummaryRows.slice(0, 50).map((r) => {
+                  const modPkgName = r.modPkg && mvrNameCache[r.modPkg] ? '@' + mvrNameCache[r.modPkg] : "";
+                  const modLabel = r.modName ? `${modPkgName ? modPkgName + "::" : ""}${r.modName}` : (modPkgName || "—");
+                  return `<tr>
+                    <td class="tx-cell-type-dim">${escapeHtml(shortType(r.typeRepr || "") || r.typeRepr || "—")}</td>
+                    <td>${r.modPkg ? `${r.modPkg ? hashLink(r.modPkg, '/object/' + r.modPkg) : ""}<div class="tx-cell-mono-dim">${escapeHtml(modLabel)}</div>` : `<span class="tx-label-dim">${escapeHtml(modLabel)}</span>`}</td>
+                    <td class="tx-cell-mono-right">${fmtNumber(r.count)}</td>
+                    <td class="tx-cell-mono-dim">${r.keyFields.length ? escapeHtml(r.keyFields.join(", ")) : "—"}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>` : renderEmpty("No events emitted in this transaction.")}
+          </div>
         </div>
-      </div>
-    `;
-  }
+      `;
+    }
 
-  // ── Section renderers ──
+    const failed = eff?.status !== "SUCCESS";
+    const statusColor = failed ? "var(--red)" : "var(--green)";
+    const statusIcon = failed ? "&#x2717;" : "&#x2713;";
+    const effectsModeLabel = effectsSource.startsWith("root") ? "root" : "embedded";
+    const effectsSourceSummary = detailLoaded
+      ? `Effects source: ${escapeHtml(effectsSource)}${effectsSourceError ? ` · ${escapeHtml(effectsSourceError)} (fallback active)` : ""}`
+      : (detailError
+        ? `Effects source: ${escapeHtml(effectsSource)}${effectsSourceError ? ` · ${escapeHtml(effectsSourceError)} (fallback active)` : ""} · detailed sections unavailable: ${escapeHtml(detailError)}`
+        : `Effects source: ${escapeHtml(effectsSource)} · loading balance, object, and event detail`);
 
-  // 1. Status banner
-  const failed = eff?.status !== "SUCCESS";
-  const statusColor = failed ? "var(--red)" : "var(--green)";
-  const statusIcon = failed ? "&#x2717;" : "&#x2713;";
+    function section(id, title, count, defaultOpen, content, opts = {}) {
+      const open = defaultOpen ? "open" : "";
+      return `<details class="tx-section" id="${id}" ${open}>
+        <summary class="tx-section-head">
+          <span>${title}${opts.truncated ? '<span class="trunc-note">Partial</span>' : ""}</span>
+          ${count != null ? `<span class="tx-section-count">${count}</span>` : ""}
+        </summary>
+        <div class="tx-section-body">${content}</div>
+      </details>`;
+    }
 
-  // Expandable section helper
-  function section(id, title, count, defaultOpen, content, opts = {}) {
-    const open = defaultOpen ? "open" : "";
-    return `<details class="tx-section" id="${id}" ${open}>
-      <summary class="tx-section-head">
-        <span>${title}${opts.truncated ? '<span class="trunc-note">Partial</span>' : ""}</span>
-        ${count != null ? `<span class="tx-section-count">${count}</span>` : ""}
-      </summary>
-      <div class="tx-section-body">${content}</div>
-    </details>`;
-  }
-
-  // ── Commands section ──
-  function renderCommands() {
-    if (!commands.length) return '<div class="empty">System transaction — no PTB commands</div>';
-    return commands.map((cmd, i) => {
-      const tn = cmd.__typename;
-      if (tn === "MoveCallCommand") {
-        const fn = cmd.function;
-        const pkg = fn?.module?.package?.address || "";
-        const mod = fn?.module?.name || "";
-        const fname = fn?.name || "";
-        const mvrName = mvrNameCache[pkg];
-        const pkgDisplay = mvrName
-          ? `<a href="#/object/${pkg}" class="hash-link" title="${pkg}" style="color:var(--accent);font-weight:500">@${mvrName}</a>`
-          : hashLink(pkg, '/object/' + pkg);
-        return `<div class="cmd-card cmd-movecall">
+    function renderCommands() {
+      if (!commands.length) return '<div class="empty">System transaction — no PTB commands</div>';
+      return commands.map((cmd, i) => {
+        const tn = cmd.__typename;
+        if (tn === "MoveCallCommand") {
+          const fn = cmd.function;
+          const pkg = fn?.module?.package?.address || "";
+          const mod = fn?.module?.name || "";
+          const fname = fn?.name || "";
+          const mvrName = mvrNameCache[pkg];
+          const pkgDisplay = mvrName
+            ? `<a href="#/object/${pkg}" class="hash-link" title="${pkg}" style="color:var(--accent);font-weight:500">@${mvrName}</a>`
+            : hashLink(pkg, '/object/' + pkg);
+          return `<div class="cmd-card cmd-movecall">
+            <div class="cmd-index">${i}</div>
+            <div class="cmd-body">
+              <div class="cmd-type">MoveCall</div>
+              <div class="cmd-target">${pkgDisplay}<span class="cmd-sep">::</span>${mod}<span class="cmd-sep">::</span><span class="cmd-fn">${fname}</span></div>
+            </div>
+          </div>`;
+        }
+        const labels = {
+          TransferObjectsCommand: "TransferObjects",
+          SplitCoinsCommand: "SplitCoins",
+          MergeCoinsCommand: "MergeCoins",
+          PublishCommand: "Publish",
+          UpgradeCommand: "Upgrade",
+          MakeMoveVecCommand: "MakeMoveVec",
+        };
+        const label = labels[tn] || tn?.replace("Command", "") || "Unknown";
+        let extra = "";
+        if (tn === "UpgradeCommand" && cmd.currentPackage) {
+          extra = `<div class="cmd-target">Package: ${hashLink(cmd.currentPackage, '/object/' + cmd.currentPackage)}</div>`;
+        }
+        return `<div class="cmd-card cmd-other">
           <div class="cmd-index">${i}</div>
           <div class="cmd-body">
-            <div class="cmd-type">MoveCall</div>
-            <div class="cmd-target">${pkgDisplay}<span class="cmd-sep">::</span>${mod}<span class="cmd-sep">::</span><span class="cmd-fn">${fname}</span></div>
+            <div class="cmd-type">${label}</div>
+            ${extra}
           </div>
         </div>`;
-      }
-      const labels = {
-        TransferObjectsCommand: "TransferObjects",
-        SplitCoinsCommand: "SplitCoins",
-        MergeCoinsCommand: "MergeCoins",
-        PublishCommand: "Publish",
-        UpgradeCommand: "Upgrade",
-        MakeMoveVecCommand: "MakeMoveVec",
-      };
-      const label = labels[tn] || tn?.replace("Command", "") || "Unknown";
-      let extra = "";
-      if (tn === "UpgradeCommand" && cmd.currentPackage) {
-        extra = `<div class="cmd-target">Package: ${hashLink(cmd.currentPackage, '/object/' + cmd.currentPackage)}</div>`;
-      }
-      return `<div class="cmd-card cmd-other">
-        <div class="cmd-index">${i}</div>
-        <div class="cmd-body">
-          <div class="cmd-type">${label}</div>
-          ${extra}
-        </div>
-      </div>`;
-    }).join("");
-  }
+      }).join("");
+    }
 
-  // ── Inputs section ──
-  function renderInputs() {
-    if (!inputs.length) return '<div class="empty">No inputs</div>';
-    return `<div class="inputs-grid">${inputs.map((inp, i) => {
-      const tn = inp.__typename;
-      if (tn === "Pure") {
-        return `<div class="input-chip" title="${inp.bytes}"><span class="input-idx">${i}</span> <span class="input-type">Pure</span> <span class="input-val">${truncHash(inp.bytes, 6)}</span></div>`;
-      }
-      if (tn === "OwnedOrImmutable") {
-        const addr = inp.object?.address || "";
-        return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">Object</span> ${hashLink(addr, '/object/' + addr)}</div>`;
-      }
-      if (tn === "SharedInput") {
-        return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">Shared${inp.mutable ? "" : " (ro)"}</span> ${hashLink(inp.address, '/object/' + inp.address)}</div>`;
-      }
-      if (tn === "Receiving") {
-        const addr = inp.object?.address || "";
-        return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">Receiving</span> ${hashLink(addr, '/object/' + addr)}</div>`;
-      }
-      if (tn === "MoveValue") {
-        return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">MoveValue</span></div>`;
-      }
-      return `<div class="input-chip"><span class="input-idx">${i}</span> ${tn || "?"}</div>`;
-    }).join("")}</div>`;
-  }
+    function renderInputs() {
+      if (!inputs.length) return '<div class="empty">No inputs</div>';
+      return `<div class="inputs-grid">${inputs.map((inp, i) => {
+        const tn = inp.__typename;
+        if (tn === "Pure") {
+          return `<div class="input-chip" title="${inp.bytes}"><span class="input-idx">${i}</span> <span class="input-type">Pure</span> <span class="input-val">${truncHash(inp.bytes, 6)}</span></div>`;
+        }
+        if (tn === "OwnedOrImmutable") {
+          const addr = inp.object?.address || "";
+          return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">Object</span> ${hashLink(addr, '/object/' + addr)}</div>`;
+        }
+        if (tn === "SharedInput") {
+          return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">Shared${inp.mutable ? "" : " (ro)"}</span> ${hashLink(inp.address, '/object/' + inp.address)}</div>`;
+        }
+        if (tn === "Receiving") {
+          const addr = inp.object?.address || "";
+          return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">Receiving</span> ${hashLink(addr, '/object/' + addr)}</div>`;
+        }
+        if (tn === "MoveValue") {
+          return `<div class="input-chip"><span class="input-idx">${i}</span> <span class="input-type">MoveValue</span></div>`;
+        }
+        return `<div class="input-chip"><span class="input-idx">${i}</span> ${tn || "?"}</div>`;
+      }).join("")}</div>`;
+    }
 
-  // ── Balance changes section ──
-  function renderBalances() {
-    if (!balances.length) return '<div class="empty">No balance changes</div>';
-    // Group by owner
-    const byOwner = {};
-    balances.forEach(b => {
-      const owner = b.owner?.address || "unknown";
-      if (!byOwner[owner]) byOwner[owner] = [];
-      byOwner[owner].push(b);
-    });
-    return Object.entries(byOwner).map(([owner, bals]) => {
-      const isSender = owner === tx.sender?.address;
-      return `<div class="bal-group">
-        <div class="bal-owner">${ownerLinkOrText(owner)}${isSender ? ' <span class="bal-sender-tag">sender</span>' : ""}</div>
-        ${bals.map(b => {
-          const c = fmtCoinWithMeta(b.amount, b.coinType?.repr);
-          const color = c.raw >= 0 ? "var(--green)" : "var(--red)";
-          return `<div class="bal-row">
-            <span class="bal-amount" style="color:${color}">${c.sign}${c.abs}</span>
-            <span class="bal-coin">${c.name}</span>
+    function renderBalances() {
+      if (!detailLoaded) return renderDeferredSectionContent("balance changes");
+      if (!balances.length) return '<div class="empty">No balance changes</div>';
+      const byOwner = {};
+      balances.forEach((b) => {
+        const owner = b.owner?.address || "unknown";
+        if (!byOwner[owner]) byOwner[owner] = [];
+        byOwner[owner].push(b);
+      });
+      return Object.entries(byOwner).map(([owner, bals]) => {
+        const isSender = owner === tx.sender?.address;
+        return `<div class="bal-group">
+          <div class="bal-owner">${ownerLinkOrText(owner)}${isSender ? ' <span class="bal-sender-tag">sender</span>' : ""}</div>
+          ${bals.map((b) => {
+            const c = fmtCoinWithMeta(b.amount, b.coinType?.repr);
+            const color = c.raw >= 0 ? "var(--green)" : "var(--red)";
+            return `<div class="bal-row">
+              <span class="bal-amount" style="color:${color}">${c.sign}${c.abs}</span>
+              <span class="bal-coin">${c.name}</span>
+            </div>`;
+          }).join("")}
+        </div>`;
+      }).join("");
+    }
+
+    function renderObjectGroup(items, label, badgeClass) {
+      if (!items.length) return "";
+      return `<div class="obj-group">
+        <div class="obj-group-label"><span class="badge ${badgeClass}">${label}</span> <span class="tx-section-count">${items.length}</span></div>
+        ${items.map((o) => {
+          const type = o.outputState?.asMoveObject?.contents?.type?.repr
+            || o.inputState?.asMoveObject?.contents?.type?.repr || "";
+          const vIn = o.inputState?.version;
+          const vOut = o.outputState?.version;
+          const ownerOut = o.outputState?.owner;
+          let ownerStr = "";
+          if (ownerOut?.address?.address) ownerStr = truncHash(ownerOut.address.address, 6);
+          else if (ownerOut?.initialSharedVersion != null) ownerStr = "Shared";
+          else if (ownerOut?.__typename === "Immutable") ownerStr = "Immutable";
+          return `<div class="obj-change-row">
+            <div class="obj-change-id">${hashLink(o.address, '/object/' + o.address)}</div>
+            <div class="obj-change-type">${shortType(type)}</div>
+            ${vIn || vOut ? `<div class="obj-change-ver">v${vIn ?? "?"} &rarr; v${vOut ?? "?"}</div>` : ""}
+            ${ownerStr ? `<div class="obj-change-owner">${ownerStr}</div>` : ""}
           </div>`;
         }).join("")}
       </div>`;
-    }).join("");
-  }
+    }
 
-  // ── Object changes section ──
-  function renderObjectGroup(items, label, badgeClass) {
-    if (!items.length) return "";
-    return `<div class="obj-group">
-      <div class="obj-group-label"><span class="badge ${badgeClass}">${label}</span> <span class="tx-section-count">${items.length}</span></div>
-      ${items.map(o => {
-        const type = o.outputState?.asMoveObject?.contents?.type?.repr
-          || o.inputState?.asMoveObject?.contents?.type?.repr || "";
-        const vIn = o.inputState?.version;
-        const vOut = o.outputState?.version;
-        const ownerOut = o.outputState?.owner;
-        let ownerStr = "";
-        if (ownerOut?.address?.address) ownerStr = truncHash(ownerOut.address.address, 6);
-        else if (ownerOut?.initialSharedVersion != null) ownerStr = "Shared";
-        else if (ownerOut?.__typename === "Immutable") ownerStr = "Immutable";
-        return `<div class="obj-change-row">
-          <div class="obj-change-id">${hashLink(o.address, '/object/' + o.address)}</div>
-          <div class="obj-change-type">${shortType(type)}</div>
-          ${vIn || vOut ? `<div class="obj-change-ver">v${vIn ?? "?"} &rarr; v${vOut ?? "?"}</div>` : ""}
-          ${ownerStr ? `<div class="obj-change-owner">${ownerStr}</div>` : ""}
-        </div>`;
-      }).join("")}
-    </div>`;
-  }
+    function renderObjects() {
+      if (!detailLoaded) return renderDeferredSectionContent("object changes");
+      if (!objChanges.length) return '<div class="empty">No object changes</div>';
+      return renderObjectGroup(created, "Created", "badge-success")
+        + renderObjectGroup(mutated, "Mutated", "")
+        + renderObjectGroup(deleted, "Deleted", "badge-fail");
+    }
 
-  function renderObjects() {
-    if (!objChanges.length) return '<div class="empty">No object changes</div>';
-    return renderObjectGroup(created, "Created", "badge-success")
-      + renderObjectGroup(mutated, "Mutated", "")
-      + renderObjectGroup(deleted, "Deleted", "badge-fail");
-  }
+    function renderEvents() {
+      if (!detailLoaded) return renderDeferredSectionContent("events");
+      if (!events.length) return '<div class="empty">No events emitted</div>';
+      return events.map((ev, i) => {
+        const etype = shortType(ev.contents?.type?.repr);
+        const mod = ev.transactionModule;
+        const modPkg = mod?.package?.address;
+        const modLabel = mod ? `${mvrNameCache[modPkg] ? '@' + mvrNameCache[modPkg] : truncHash(modPkg)}::${mod.name}` : "";
+        return `<details class="event-item">
+          <summary class="event-head">
+            <span class="event-idx">${i}</span>
+            <span class="event-type">${etype}</span>
+            ${modLabel ? `<span class="tx-event-mod-label">${modLabel}</span>` : ""}
+          </summary>
+          <div class="tx-event-json-wrap">${ev.contents?.json ? jsonTreeBlock(ev.contents.json, 300) : '<span class="jtree-null">null</span>'}</div>
+        </details>`;
+      }).join("");
+    }
 
-  // ── Events section ──
-  function renderEvents() {
-    if (!events.length) return '<div class="empty">No events emitted</div>';
-    return events.map((ev, i) => {
-      const etype = shortType(ev.contents?.type?.repr);
-      const mod = ev.transactionModule;
-      const modPkg = mod?.package?.address;
-      const modLabel = mod ? `${mvrNameCache[modPkg] ? '@' + mvrNameCache[modPkg] : truncHash(modPkg)}::${mod.name}` : "";
-      return `<details class="event-item">
-        <summary class="event-head">
-          <span class="event-idx">${i}</span>
-          <span class="event-type">${etype}</span>
-          ${modLabel ? `<span class="tx-event-mod-label">${modLabel}</span>` : ""}
-        </summary>
-        <div class="tx-event-json-wrap">${ev.contents?.json ? jsonTreeBlock(ev.contents.json, 300) : '<span class="jtree-null">null</span>'}</div>
-      </details>`;
-    }).join("");
-  }
+    app.innerHTML = `
+      <div class="tx-banner-controls">
+        ${copyLinkBtn()}${viewQueryBtn('transaction', { digest })}
+        <button id="tx-effects-mode-toggle" class="tx-intent-toggle-btn" data-action="tx-toggle-effects-mode">${useRootEffects ? "Effects Source: Root" : "Effects Source: Embedded"}</button>
+        <button id="tx-intent-toggle" class="tx-intent-toggle-btn" data-action="tx-toggle-intent">${showIntentOverlay ? "Intent Overlay: On" : "Intent Overlay: Off"}</button>
+      </div>
+      <div class="tx-banner tx-banner-shadow${failed ? ' tx-failed' : ''}">
+        <div class="tx-status-icon" style="background:${failed ? 'rgba(248,81,73,0.15)' : 'rgba(63,185,80,0.15)'}; color:${statusColor}">
+          ${statusIcon}
+        </div>
+        <div class="tx-banner-info">
+          <div class="tx-banner-summary tx-banner-summary-row">
+            <span>${deriveStructuralSummary()}</span>
+            <span id="tx-intent-chip-wrap" style="display:${showIntentOverlay ? "inline-flex" : "none"}">${renderIntentChip(txIntent)}</span>
+          </div>
+          <div id="tx-intent-evidence" class="tx-intent-evidence" style="display:${showIntentOverlay && txIntent.evidence?.length ? "block" : "none"}">Best-effort intent: ${escapeHtml(deriveIntentSummary())}${txIntent.evidence?.length ? ` · Why: ${escapeHtml(txIntent.evidence.slice(0, 3).join(" • "))}` : ""}</div>
+          ${eff?.executionError ? (() => {
+            const err = eff.executionError;
+            const parts = [];
+            if (err.module?.name) parts.push(`<span class="tx-label-dim">Module:</span> ${err.module.package?.address ? hashLink(truncHash(err.module.package.address), '/object/' + err.module.package.address) + '::' : ''}${err.module.name}`);
+            if (err.function?.name) parts.push(`<span class="tx-label-dim">Function:</span> ${err.function.name}`);
+            if (err.abortCode != null) parts.push(`<span class="tx-label-dim">Abort Code:</span> <span class="tx-gas-popover-mono">${err.abortCode}</span>`);
+            if (err.sourceLineNumber != null) parts.push(`<span class="tx-label-dim">Line:</span> ${err.sourceLineNumber}`);
+            if (err.instructionOffset != null) parts.push(`<span class="tx-label-dim">Instruction:</span> ${err.instructionOffset}`);
+            return `<div class="tx-error-msg">${err.message}</div>${parts.length ? `<div class="tx-error-details">${parts.join('')}</div>` : ''}`;
+          })() : ""}
+          <div class="tx-banner-meta">
+            <span>${statusBadge(eff?.status)}</span>
+            <span title="${fmtTime(eff?.timestamp)}" class="tx-status-time">${fmtTime(eff?.timestamp)} (${timeAgo(eff?.timestamp)})</span>
+            <span>Epoch <a class="hash-link" href="#/epoch/${eff?.epoch?.epochId}">${eff?.epoch?.epochId ?? "?"}</a></span>
+            <span>Checkpoint <a class="hash-link" href="#/checkpoint/${eff?.checkpoint?.sequenceNumber}">${fmtNumber(eff?.checkpoint?.sequenceNumber)}</a></span>
+            <span>Effects <span class="u-mono">${escapeHtml(effectsModeLabel)}</span></span>
+            <span class="tx-gas-pill">Gas: <details>
+              <summary>${fmtSui(gasUsed)}</summary>
+              <div class="tx-gas-popover">
+                <div class="tx-gas-popover-mono">Compute ${fmtSui(gs?.computationCost)} | Storage ${fmtSui(gs?.storageCost)} | Rebate ${fmtSui(gs?.storageRebate)}</div>
+                <div class="tx-gas-popover-row">Payer: ${ownerLinkOrText(gasPayerAddr)} (${gasPayerAddr && senderAddr && gasPayerAddr !== senderAddr ? "sponsored" : "sender paid"})</div>
+                <div>Sender net: <span class="tx-gas-popover-mono">${fmtRawCoinValue(senderSuiDeltaRaw, "0x2::sui::SUI", { signed: true })}</span>${senderAddr && gasPayerAddr === senderAddr ? ` · ex-gas <span class="tx-gas-popover-mono">${fmtRawCoinValue(senderSuiDeltaExGasRaw, "0x2::sui::SUI", { signed: true })}</span>` : ""}</div>
+                ${gasPayerAddr && senderAddr && gasPayerAddr !== senderAddr ? `<div>Gas payer net: <span class="tx-gas-popover-mono">${fmtRawCoinValue(gasPayerSuiDeltaRaw, "0x2::sui::SUI", { signed: true })}</span> · ex-gas <span class="tx-gas-popover-mono">${fmtRawCoinValue(gasPayerSuiDeltaExGasRaw, "0x2::sui::SUI", { signed: true })}</span></div>` : ""}
+              </div>
+            </details></span>
+          </div>
+          <div class="tx-intent-evidence">${effectsSourceSummary}</div>
+          <div class="tx-digest-line">
+            ${tx.digest} ${copyBtn(tx.digest)}
+            &nbsp; from ${tx.sender ? fullHashLink(tx.sender.address, '/address/' + tx.sender.address) : "---"}
+          </div>
+          ${detailLoaded && balances.length ? `<div class="bal-summary">${balances.map((b) => {
+            const c = fmtCoinWithMeta(b.amount, b.coinType?.repr);
+            const color = c.raw >= 0 ? "var(--green)" : "var(--red)";
+            return `<span class="bal-summary-item" style="color:${color}">${c.sign}${c.abs} ${c.name}</span>`;
+          }).join("")}</div>` : ""}
+          ${isPTB ? `<div class="tx-stack-wrap">
+            <div class="tx-stack-title">PTB Command Mix</div>
+            ${renderStackBar(commandMix, { empty: '<div class="u-fs12-dim">No command mix.</div>' })}
+          </div>` : ""}
+          ${detailLoaded ? `<div class="tx-stack-wrap">
+            <div class="tx-stack-title">Object Change Mix</div>
+            ${renderStackBar(objectMix, { empty: '<div class="u-fs12-dim">No object changes.</div>' })}
+          </div>` : ""}
+          ${detailLoaded && truncatedNotes.length ? `<div class="tx-partial-window">Partial response window: ${escapeHtml(truncatedNotes.join(", "))}. Open Query and paginate for full detail.</div>` : ""}
+        </div>
+      </div>
 
-  // ── Gas details (collapsed) ──
-  function renderGasDetails() {
-    return `
-      <div class="gas-grid">
-        <div class="gas-item"><span class="gas-label">Computation</span><span class="gas-val">${fmtSui(gs?.computationCost)}</span></div>
-        <div class="gas-item"><span class="gas-label">Storage</span><span class="gas-val">${fmtSui(gs?.storageCost)}</span></div>
-        <div class="gas-item"><span class="gas-label">Rebate</span><span class="gas-val">${fmtSui(gs?.storageRebate)}</span></div>
-      <div class="gas-item"><span class="gas-label">Total</span><span class="gas-val gas-val-strong">${fmtSui(gasUsed)}</span></div>
+      ${renderExecutionOverviewCard()}
+      ${renderBalanceFlowMatrixCard()}
+      ${renderObjectLifecycleCard()}
+      ${renderEventOutcomeCard()}
+
+      <div class="tx-sections-toolbar">
+        <button data-action="tx-toggle-sections">Expand / Collapse all</button>
       </div>
-      <div class="detail-row detail-row-top-border">
-        <div class="detail-key">Gas Price</div>
-        <div class="detail-val normal-font">${fmtNumber(tx.gasInput?.gasPrice)} MIST</div>
-      </div>
-      <div class="detail-row">
-        <div class="detail-key">Budget</div>
-        <div class="detail-val normal-font">${fmtSui(tx.gasInput?.gasBudget)}</div>
-      </div>
-      <div class="detail-row">
-        <div class="detail-key">Gas Object</div>
-        <div class="detail-val">${eff?.gasEffects?.gasObject?.address ? hashLink(eff.gasEffects.gasObject.address, '/object/' + eff.gasEffects.gasObject.address) : "—"}</div>
-      </div>
-      ${tx.gasInput?.gasSponsor?.address && tx.gasInput.gasSponsor.address !== tx.sender?.address ? `<div class="detail-row">
-        <div class="detail-key">Sponsor</div>
-        <div class="detail-val">${fullHashLink(tx.gasInput.gasSponsor.address, '/address/' + tx.gasInput.gasSponsor.address)}</div>
-      </div>` : ""}
+      ${isPTB ? section("sec-commands", "Commands", `${commands.length}${commandsTruncated ? "+" : ""}`, true, renderCommands(), { truncated: commandsTruncated }) : ""}
+      ${isPTB ? section("sec-inputs", "Inputs", `${inputs.length}${inputsTruncated ? "+" : ""}`, inputs.length > 0, renderInputs(), { truncated: inputsTruncated }) : ""}
+      ${section("sec-balances", "Balance Changes", detailLoaded ? `${balances.length}${balancesTruncated ? "+" : ""}` : "loading", false, renderBalances(), { truncated: detailLoaded && balancesTruncated })}
+      ${section("sec-objects", "Object Changes", detailLoaded ? `${objChanges.length}${objectsTruncated ? "+" : ""}` : "loading", detailLoaded && objChanges.length > 0, renderObjects(), { truncated: detailLoaded && objectsTruncated })}
+      ${section("sec-events", "Events", detailLoaded ? `${events.length}${eventsTruncated ? "+" : ""}` : "loading", false, renderEvents(), { truncated: detailLoaded && eventsTruncated })}
     `;
+
+    const toggleTxIntentOverlay = () => {
+      showIntentOverlay = !showIntentOverlay;
+      setRouteParams({ intent: showIntentOverlay ? "1" : null });
+      const chip = document.getElementById("tx-intent-chip-wrap");
+      const why = document.getElementById("tx-intent-evidence");
+      const btn = document.getElementById("tx-intent-toggle");
+      if (chip) chip.style.display = showIntentOverlay ? "inline-flex" : "none";
+      if (why) why.style.display = showIntentOverlay && txIntent.evidence?.length ? "block" : "none";
+      if (btn) btn.textContent = showIntentOverlay ? "Intent Overlay: On" : "Intent Overlay: Off";
+    };
+    const txOverviewDrill = (sectionId, overviewDetailId = "") => {
+      if (overviewDetailId) {
+        const ov = document.getElementById(overviewDetailId);
+        if (ov && ov.tagName === "DETAILS") ov.open = true;
+      }
+      const sec = sectionId ? document.getElementById(sectionId) : null;
+      if (!sec) return;
+      if (sec.tagName === "DETAILS") sec.open = true;
+      sec.scrollIntoView({ behavior: "smooth", block: "start" });
+      sec.classList.add("tx-jump-highlight");
+      setTimeout(() => sec.classList.remove("tx-jump-highlight"), 900);
+    };
+    if (app._txDetailClickHandler) app.removeEventListener("click", app._txDetailClickHandler);
+    app._txDetailClickHandler = (ev) => {
+      const trigger = ev.target?.closest?.("[data-action]");
+      if (!trigger || !app.contains(trigger)) return;
+      const action = trigger.getAttribute("data-action");
+      if (!action) return;
+      if (action === "tx-toggle-intent") {
+        ev.preventDefault();
+        toggleTxIntentOverlay();
+        return;
+      }
+      if (action === "tx-toggle-effects-mode") {
+        ev.preventDefault();
+        setRouteParams({ effects: useRootEffects ? null : "1" });
+        routeTo(getRoute());
+        return;
+      }
+      if (action === "tx-drill") {
+        ev.preventDefault();
+        txOverviewDrill(trigger.getAttribute("data-section") || "", trigger.getAttribute("data-overview") || "");
+        return;
+      }
+      if (action === "tx-toggle-sections") {
+        ev.preventDefault();
+        const hasOpen = !!app.querySelector(".tx-section[open]");
+        app.querySelectorAll(".tx-section").forEach((d) => { d.open = !hasOpen; });
+      }
+    };
+    app.addEventListener("click", app._txDetailClickHandler);
   }
 
-  // ── Assemble the page ──
-  app.innerHTML = `
-    <!-- Status banner -->
-    <div class="tx-banner-controls">
-      ${copyLinkBtn()}${viewQueryBtn('transaction', { digest })}
-      <button id="tx-effects-mode-toggle" class="tx-intent-toggle-btn" data-action="tx-toggle-effects-mode">${useRootEffects ? "Effects Source: Root" : "Effects Source: Embedded"}</button>
-      <button id="tx-intent-toggle" class="tx-intent-toggle-btn" data-action="tx-toggle-intent">${showIntentOverlay ? "Intent Overlay: On" : "Intent Overlay: Off"}</button>
-    </div>
-    <div class="tx-banner tx-banner-shadow${failed ? ' tx-failed' : ''}">
-      <div class="tx-status-icon" style="background:${failed ? 'rgba(248,81,73,0.15)' : 'rgba(63,185,80,0.15)'}; color:${statusColor}">
-        ${statusIcon}
-      </div>
-      <div class="tx-banner-info">
-        <div class="tx-banner-summary tx-banner-summary-row">
-          <span>${deriveStructuralSummary()}</span>
-          <span id="tx-intent-chip-wrap" style="display:${showIntentOverlay ? "inline-flex" : "none"}">${renderIntentChip(txIntent)}</span>
-        </div>
-        <div id="tx-intent-evidence" class="tx-intent-evidence" style="display:${showIntentOverlay && txIntent.evidence?.length ? "block" : "none"}">Best-effort intent: ${escapeHtml(deriveIntentSummary())}${txIntent.evidence?.length ? ` · Why: ${escapeHtml(txIntent.evidence.slice(0, 3).join(" • "))}` : ""}</div>
-        ${eff?.executionError ? (() => {
-          const err = eff.executionError;
-          const parts = [];
-          if (err.module?.name) parts.push(`<span class="tx-label-dim">Module:</span> ${err.module.package?.address ? hashLink(truncHash(err.module.package.address), '/object/' + err.module.package.address) + '::' : ''}${err.module.name}`);
-          if (err.function?.name) parts.push(`<span class="tx-label-dim">Function:</span> ${err.function.name}`);
-          if (err.abortCode != null) parts.push(`<span class="tx-label-dim">Abort Code:</span> <span class="tx-gas-popover-mono">${err.abortCode}</span>`);
-          if (err.sourceLineNumber != null) parts.push(`<span class="tx-label-dim">Line:</span> ${err.sourceLineNumber}`);
-          if (err.instructionOffset != null) parts.push(`<span class="tx-label-dim">Instruction:</span> ${err.instructionOffset}`);
-          return `<div class="tx-error-msg">${err.message}</div>${parts.length ? `<div class="tx-error-details">${parts.join('')}</div>` : ''}`;
-        })() : ""}
-        <div class="tx-banner-meta">
-          <span>${statusBadge(eff?.status)}</span>
-          <span title="${fmtTime(eff?.timestamp)}" class="tx-status-time">${fmtTime(eff?.timestamp)} (${timeAgo(eff?.timestamp)})</span>
-          <span>Epoch <a class="hash-link" href="#/epoch/${eff?.epoch?.epochId}">${eff?.epoch?.epochId ?? "?"}</a></span>
-          <span>Checkpoint <a class="hash-link" href="#/checkpoint/${eff?.checkpoint?.sequenceNumber}">${fmtNumber(eff?.checkpoint?.sequenceNumber)}</a></span>
-          <span>Effects <span class="u-mono">${escapeHtml(useRootEffects && !effectsSourceError ? "root" : "embedded")}</span></span>
-          <span class="tx-gas-pill">Gas: <details>
-            <summary>${fmtSui(gasUsed)}</summary>
-            <div class="tx-gas-popover">
-              <div class="tx-gas-popover-mono">Compute ${fmtSui(gs?.computationCost)} | Storage ${fmtSui(gs?.storageCost)} | Rebate ${fmtSui(gs?.storageRebate)}</div>
-              <div class="tx-gas-popover-row">Payer: ${ownerLinkOrText(gasPayerAddr)} (${gasPayerAddr && senderAddr && gasPayerAddr !== senderAddr ? "sponsored" : "sender paid"})</div>
-              <div>Sender net: <span class="tx-gas-popover-mono">${fmtRawCoinValue(senderSuiDeltaRaw, "0x2::sui::SUI", { signed: true })}</span>${senderAddr && gasPayerAddr === senderAddr ? ` · ex-gas <span class="tx-gas-popover-mono">${fmtRawCoinValue(senderSuiDeltaExGasRaw, "0x2::sui::SUI", { signed: true })}</span>` : ""}</div>
-              ${gasPayerAddr && senderAddr && gasPayerAddr !== senderAddr ? `<div>Gas payer net: <span class="tx-gas-popover-mono">${fmtRawCoinValue(gasPayerSuiDeltaRaw, "0x2::sui::SUI", { signed: true })}</span> · ex-gas <span class="tx-gas-popover-mono">${fmtRawCoinValue(gasPayerSuiDeltaExGasRaw, "0x2::sui::SUI", { signed: true })}</span></div>` : ""}
-            </div>
-          </details></span>
-        </div>
-        <div class="tx-intent-evidence">
-          Effects source: ${escapeHtml(effectsSource)}${effectsSourceError ? ` · ${escapeHtml(effectsSourceError)} (fallback active)` : ""}
-        </div>
-        <div class="tx-digest-line">
-          ${tx.digest} ${copyBtn(tx.digest)}
-          &nbsp; from ${tx.sender ? fullHashLink(tx.sender.address, '/address/' + tx.sender.address) : "---"}
-        </div>
-        ${balances.length ? `<div class="bal-summary">${balances.map(b => {
-          const c = fmtCoinWithMeta(b.amount, b.coinType?.repr);
-          const color = c.raw >= 0 ? "var(--green)" : "var(--red)";
-          return `<span class="bal-summary-item" style="color:${color}">${c.sign}${c.abs} ${c.name}</span>`;
-        }).join("")}</div>` : ""}
-        ${isPTB ? `<div class="tx-stack-wrap">
-          <div class="tx-stack-title">PTB Command Mix</div>
-          ${renderStackBar(commandMix, { empty: '<div class="u-fs12-dim">No command mix.</div>' })}
-        </div>` : ""}
-        <div class="tx-stack-wrap">
-          <div class="tx-stack-title">Object Change Mix</div>
-          ${renderStackBar(objectMix, { empty: '<div class="u-fs12-dim">No object changes.</div>' })}
-        </div>
-        ${truncatedNotes.length ? `<div class="tx-partial-window">Partial response window: ${escapeHtml(truncatedNotes.join(", "))}. Open Query and paginate for full detail.</div>` : ""}
-      </div>
-    </div>
-
-    ${renderExecutionOverviewCard()}
-    ${renderBalanceFlowMatrixCard()}
-    ${renderObjectLifecycleCard()}
-    ${renderEventOutcomeCard()}
-
-    <!-- Sections -->
-    <div class="tx-sections-toolbar">
-      <button data-action="tx-toggle-sections">Expand / Collapse all</button>
-    </div>
-    ${isPTB ? section("sec-commands", "Commands", `${commands.length}${commandsTruncated ? "+" : ""}`, true, renderCommands(), { truncated: commandsTruncated }) : ""}
-    ${isPTB ? section("sec-inputs", "Inputs", `${inputs.length}${inputsTruncated ? "+" : ""}`, inputs.length > 0, renderInputs(), { truncated: inputsTruncated }) : ""}
-    ${section("sec-balances", "Balance Changes", `${balances.length}${balancesTruncated ? "+" : ""}`, balances.length > 0, renderBalances(), { truncated: balancesTruncated })}
-    ${section("sec-objects", "Object Changes", `${objChanges.length}${objectsTruncated ? "+" : ""}`, true, renderObjects(), { truncated: objectsTruncated })}
-    ${section("sec-events", "Events", `${events.length}${eventsTruncated ? "+" : ""}`, false, renderEvents(), { truncated: eventsTruncated })}
-  `;
-
-  const toggleTxIntentOverlay = () => {
-    showIntentOverlay = !showIntentOverlay;
-    setRouteParams({ intent: showIntentOverlay ? "1" : null });
-    const chip = document.getElementById("tx-intent-chip-wrap");
-    const why = document.getElementById("tx-intent-evidence");
-    const btn = document.getElementById("tx-intent-toggle");
-    if (chip) chip.style.display = showIntentOverlay ? "inline-flex" : "none";
-    if (why) why.style.display = showIntentOverlay && txIntent.evidence?.length ? "block" : "none";
-    if (btn) btn.textContent = showIntentOverlay ? "Intent Overlay: On" : "Intent Overlay: Off";
-  };
-  const txOverviewDrill = (sectionId, overviewDetailId = "") => {
-    if (overviewDetailId) {
-      const ov = document.getElementById(overviewDetailId);
-      if (ov && ov.tagName === "DETAILS") ov.open = true;
-    }
-    const sec = sectionId ? document.getElementById(sectionId) : null;
-    if (!sec) return;
-    if (sec.tagName === "DETAILS") sec.open = true;
-    sec.scrollIntoView({ behavior: "smooth", block: "start" });
-    sec.classList.add("tx-jump-highlight");
-    setTimeout(() => sec.classList.remove("tx-jump-highlight"), 900);
-  };
-  if (app._txDetailClickHandler) app.removeEventListener("click", app._txDetailClickHandler);
-  app._txDetailClickHandler = (ev) => {
-    const trigger = ev.target?.closest?.("[data-action]");
-    if (!trigger || !app.contains(trigger)) return;
-    const action = trigger.getAttribute("data-action");
-    if (!action) return;
-    if (action === "tx-toggle-intent") {
-      ev.preventDefault();
-      toggleTxIntentOverlay();
-      return;
-    }
-    if (action === "tx-toggle-effects-mode") {
-      ev.preventDefault();
-      setRouteParams({ effects: useRootEffects ? null : "1" });
-      routeTo(getRoute());
-      return;
-    }
-    if (action === "tx-drill") {
-      ev.preventDefault();
-      txOverviewDrill(trigger.getAttribute("data-section") || "", trigger.getAttribute("data-overview") || "");
-      return;
-    }
-    if (action === "tx-toggle-sections") {
-      ev.preventDefault();
-      const hasOpen = !!app.querySelector(".tx-section[open]");
-      app.querySelectorAll(".tx-section").forEach(d => { d.open = !hasOpen; });
-    }
-  };
-  app.addEventListener("click", app._txDetailClickHandler);
+  renderTxView();
+  setTimeout(() => {
+    if (!app.isConnected || localRouteToken !== routeRenderToken || detailHydrating) return;
+    detailHydrating = true;
+    hydrateTxEffectsDetail().finally(() => { detailHydrating = false; });
+  }, 0);
 }
 
 // ── DeepBook Margin Constants ───────────────────────────────────────────
