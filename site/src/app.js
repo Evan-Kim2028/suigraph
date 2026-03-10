@@ -850,8 +850,8 @@ async function fetchLstExchangeRates() {
   if (Object.keys(lstExchangeRates).length > 0) return;
   try {
     const data = await gql(`{
-      ssui: object(address: "0x15eda7330c8f99c30e430b4d82fd7ab2af3ead4ae17046fcb224aa9bad394f6b") { asMoveObject { contents { json } } }
-      hasui: object(address: "0x47b224762220393057ebf4f70501b6e657c3e56684737568439a04f80849b2ca") { asMoveObject { contents { json } } }
+      ssui: object(address: "0x15eda7330c8f99c30e430b4d82fd7ab2af3ead4ae17046fcb224aa9bad394f6b") { ${GQL_F_MOVE_JSON} }
+      hasui: object(address: "0x47b224762220393057ebf4f70501b6e657c3e56684737568439a04f80849b2ca") { ${GQL_F_MOVE_JSON} }
     }`);
     // sSUI: total_sui_supply / lst_total_supply
     const ssj = data.ssui?.asMoveObject?.contents?.json;
@@ -974,6 +974,18 @@ const AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES = 4;
 const AF_PERPS_SIZE_EPS = 1e-12;
 const AF_PERPS_COLLATERAL_DUST = 1e-6;
 let afClearingHouseDiscoveryCache = { at: 0, rows: [], partial: false };
+
+// ---------------------------------------------------------------------------
+// Reusable GraphQL field-selection fragments
+// ---------------------------------------------------------------------------
+const GQL_F_OWNER = `... on AddressOwner { address { address } } ... on ObjectOwner { address { address } } ... on Shared { initialSharedVersion } ... on Immutable { __typename }`;
+const GQL_F_MOVE_TYPE = `asMoveObject { contents { type { repr } } }`;
+const GQL_F_MOVE_JSON = `asMoveObject { contents { json } }`;
+const GQL_F_MOVE_TYPE_JSON = `asMoveObject { contents { type { repr } json } }`;
+const GQL_F_CONTENTS_TYPE_JSON = `contents { type { repr } json }`;
+const GQL_F_BAL_NODE = `owner { address } amount coinType { repr }`;
+const GQL_F_EVENT_NODE = `contents { type { repr } json } sender { address } timestamp transactionModule { name package { address } }`;
+const GQL_Q_LATEST_CHECKPOINT = `{ checkpoint { sequenceNumber timestamp } }`;
 
 const GQL_TIMEOUT_MS = 16_000;
 const GQL_RETRY_LIMIT = 2;
@@ -1276,7 +1288,7 @@ async function multiGetObjectsTypeJsonByAddress(addresses) {
   const data = await gql(`query($keys: [ObjectKey!]!) {
     multiGetObjects(keys: $keys) {
       address
-      asMoveObject { contents { type { repr } json } }
+      ${GQL_F_MOVE_TYPE_JSON}
     }
   }`, {
     keys: keys.map(address => ({ address })),
@@ -1290,7 +1302,7 @@ async function multiGetObjectsJsonByAddress(addresses) {
   const data = await gql(`query($keys: [ObjectKey!]!) {
     multiGetObjects(keys: $keys) {
       address
-      asMoveObject { contents { json } }
+      ${GQL_F_MOVE_JSON}
     }
   }`, {
     keys: keys.map(address => ({ address })),
@@ -1349,7 +1361,7 @@ async function multiGetTransactionEffectsWithObjectChanges(digests, first = 50) 
               ... on Shared { initialSharedVersion }
               ... on Immutable { __typename }
             }
-            asMoveObject { contents { type { repr } } }
+            ${GQL_F_MOVE_TYPE}
           }
         }
       }
@@ -2795,15 +2807,12 @@ async function coinSearchFetchTxDetailsByDigest(digests) {
         status timestamp
         balanceChanges(first: 50) {
           pageInfo { hasNextPage }
-          nodes { owner { address } amount coinType { repr } }
+          nodes { ${GQL_F_BAL_NODE} }
         }
         events(first: 50) {
           pageInfo { hasNextPage }
           nodes {
-            contents { type { repr } json }
-            sender { address }
-            timestamp
-            transactionModule { name package { address } }
+            ${GQL_F_EVENT_NODE}
           }
         }
         objectChanges(first: 50) {
@@ -2812,21 +2821,15 @@ async function coinSearchFetchTxDetailsByDigest(digests) {
             address idCreated idDeleted
             inputState {
               owner {
-                ... on AddressOwner { address { address } }
-                ... on ObjectOwner { address { address } }
-                ... on Shared { initialSharedVersion }
-                ... on Immutable { __typename }
+                ${GQL_F_OWNER}
               }
-              asMoveObject { contents { type { repr } } }
+              ${GQL_F_MOVE_TYPE}
             }
             outputState {
               owner {
-                ... on AddressOwner { address { address } }
-                ... on ObjectOwner { address { address } }
-                ... on Shared { initialSharedVersion }
-                ... on Immutable { __typename }
+                ${GQL_F_OWNER}
               }
-              asMoveObject { contents { type { repr } } }
+              ${GQL_F_MOVE_TYPE}
             }
           }
         }
@@ -2869,7 +2872,7 @@ async function fetchCoinObjectSupplySnapshot(coinType, { maxObjects = 1200, maxP
     const data = await gql(`query($type: String!, $after: String) {
       objects(filter: { type: $type }, first: 50, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { asMoveObject { contents { json } } }
+        nodes { ${GQL_F_MOVE_JSON} }
       }
     }`, { type: coinObjType, after });
     const conn = data?.objects;
@@ -3297,7 +3300,7 @@ document.getElementById("searchForm").addEventListener("submit", async (evt) => 
   } else if (/^0x[0-9a-fA-F]{64}$/.test(q)) {
     // Could be an address or an object (package). Query GQL to find out.
     try {
-      const probe = await gql(`{ object(address: "${q}") { asMovePackage { modules { nodes { name } } } asMoveObject { contents { type { repr } } } } }`);
+      const probe = await gql(`{ object(address: "${q}") { asMovePackage { modules { nodes { name } } } ${GQL_F_MOVE_TYPE} } }`);
       if (probe?.object?.asMovePackage || probe?.object?.asMoveObject) {
         navigate("/object/" + q);
       } else {
@@ -4235,7 +4238,7 @@ async function txListFetchLatestCheckpointHead(force = false) {
     && (now - txListLatestCheckpointCache.at) < TX_LIST_LATEST_CHECKPOINT_TTL_MS) {
     return txListLatestCheckpointCache;
   }
-  const data = await gql(`{ checkpoint { sequenceNumber timestamp } }`);
+  const data = await gql(GQL_Q_LATEST_CHECKPOINT);
   const seq = Number(data?.checkpoint?.sequenceNumber || 0);
   const tsMs = parseTsMs(data?.checkpoint?.timestamp);
   txListLatestCheckpointCache = {
@@ -4490,7 +4493,7 @@ async function renderTransactions(app, before = null, dateState = null) {
               gasEffects { gasSummary { computationCost storageCost storageRebate } }
               balanceChanges(first: 50) {
                 pageInfo { hasNextPage }
-                nodes { owner { address } amount coinType { repr } }
+                nodes { ${GQL_F_BAL_NODE} }
               }
               events(first: 3) { nodes { contents { type { repr } } } }
             }
@@ -4698,31 +4701,23 @@ async function renderTxDetail(app, digest) {
         balanceChanges(first: 50) {
           pageInfo { hasNextPage }
           nodes {
-            owner { address }
-            amount
-            coinType { repr }
+            ${GQL_F_BAL_NODE}
           }
         }
         objectChanges(first: 50) {
           pageInfo { hasNextPage }
           nodes {
             address idCreated idDeleted
-            inputState { version digest asMoveObject { contents { type { repr } } } }
+            inputState { version digest ${GQL_F_MOVE_TYPE} }
             outputState { version digest owner {
-              ... on AddressOwner { address { address } }
-              ... on ObjectOwner { address { address } }
-              ... on Shared { initialSharedVersion }
-              ... on Immutable { __typename }
-            } asMoveObject { contents { type { repr } } } }
+              ${GQL_F_OWNER}
+            } ${GQL_F_MOVE_TYPE} }
           }
         }
         events(first: 50) {
           pageInfo { hasNextPage }
           nodes {
-            contents { type { repr } json }
-            sender { address }
-            timestamp
-            transactionModule { name package { address } }
+            ${GQL_F_EVENT_NODE}
           }
         }
       }
@@ -4753,31 +4748,23 @@ async function renderTxDetail(app, digest) {
           balanceChanges(first: 50) {
             pageInfo { hasNextPage }
             nodes {
-              owner { address }
-              amount
-              coinType { repr }
+              ${GQL_F_BAL_NODE}
             }
           }
           objectChanges(first: 50) {
             pageInfo { hasNextPage }
             nodes {
               address idCreated idDeleted
-              inputState { version digest asMoveObject { contents { type { repr } } } }
+              inputState { version digest ${GQL_F_MOVE_TYPE} }
               outputState { version digest owner {
-                ... on AddressOwner { address { address } }
-                ... on ObjectOwner { address { address } }
-                ... on Shared { initialSharedVersion }
-                ... on Immutable { __typename }
-              } asMoveObject { contents { type { repr } } } }
+                ${GQL_F_OWNER}
+              } ${GQL_F_MOVE_TYPE} }
             }
           }
           events(first: 50) {
             pageInfo { hasNextPage }
             nodes {
-              contents { type { repr } json }
-              sender { address }
-              timestamp
-              transactionModule { name package { address } }
+              ${GQL_F_EVENT_NODE}
             }
           }
         }
@@ -5672,7 +5659,7 @@ async function fetchSuiPriceFromDeepBook() {
             effects {
               status
               events(first: ${DEEPBOOK_PRICE_EVENTS_PER_TX}) {
-                nodes { contents { type { repr } json } }
+                nodes { ${GQL_F_CONTENTS_TYPE_JSON} }
               }
             }
           }
@@ -5712,16 +5699,16 @@ async function _discoverPoolsForDex(needed, prefix, dex, suiType, usdcType) {
   for (const ct of needed) {
     if (ct === suiType || ct === usdcType) continue;
     // TOKEN/SUI
-    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${suiType}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${suiType}>" }, first: 3) { nodes { address ${GQL_F_MOVE_TYPE_JSON} } }`);
     aliasMeta.push({ coinType: ct, dex, quoteSymbol: "SUI", isTokenA: true });
     // SUI/TOKEN
-    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${suiType}, ${ct}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${suiType}, ${ct}>" }, first: 3) { nodes { address ${GQL_F_MOVE_TYPE_JSON} } }`);
     aliasMeta.push({ coinType: ct, dex, quoteSymbol: "SUI", isTokenA: false });
     // TOKEN/USDC
-    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${usdcType}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${ct}, ${usdcType}>" }, first: 3) { nodes { address ${GQL_F_MOVE_TYPE_JSON} } }`);
     aliasMeta.push({ coinType: ct, dex, quoteSymbol: "USDC", isTokenA: true });
     // USDC/TOKEN
-    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${usdcType}, ${ct}>" }, first: 3) { nodes { address asMoveObject { contents { json type { repr } } } } }`);
+    aliases.push(`a${aliases.length}: objects(filter: { type: "${prefix}<${usdcType}, ${ct}>" }, first: 3) { nodes { address ${GQL_F_MOVE_TYPE_JSON} } }`);
     aliasMeta.push({ coinType: ct, dex, quoteSymbol: "USDC", isTokenA: false });
   }
   if (!aliases.length) return;
@@ -6053,7 +6040,7 @@ async function fetchStablecoinSupply() {
     // Strategy 3: Protocol-specific objects (BUCK etc.)
     for (const p of STABLECOINS_PROTOCOL) {
       try {
-        const data = await gql(`{ object(address: "${p.objAddr}") { asMoveObject { contents { json } } } }`);
+        const data = await gql(`{ object(address: "${p.objAddr}") { ${GQL_F_MOVE_JSON} } }`);
         const json = data?.object?.asMoveObject?.contents?.json;
         if (json) {
           const val = p.supplyPath.split(".").reduce((o, k) => o?.[k], json);
@@ -6160,7 +6147,7 @@ async function fetchSuilendLendingRates() {
   const rows = {};
   const data = await gql(`{
     object(address: "${SUILEND_MAIN_POOL_OBJECT}") {
-      asMoveObject { contents { json } }
+      ${GQL_F_MOVE_JSON}
     }
   }`);
   const reserves = data?.object?.asMoveObject?.contents?.json?.reserves || [];
@@ -6427,7 +6414,7 @@ async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW
 
   return withTimedCache(cacheState, DEFI_WINDOW_SAMPLE_TTL_MS, force, async () => {
     const t0 = performance.now();
-    const latestData = await gql(`{ checkpoint { sequenceNumber timestamp } }`);
+    const latestData = await gql(GQL_Q_LATEST_CHECKPOINT);
     const latestCheckpoint = Number(latestData?.checkpoint?.sequenceNumber || 0);
     const latestTsMs = parseTsMs(latestData?.checkpoint?.timestamp);
     if (!latestCheckpoint || !Number.isFinite(latestTsMs)) throw new Error("Could not read latest checkpoint for DeFi window sampling.");
@@ -6452,14 +6439,14 @@ async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW
               status
               timestamp
               checkpoint { sequenceNumber }
-              balanceChanges(first: 40) { nodes { owner { address } amount coinType { repr } } }
+              balanceChanges(first: 40) { nodes { ${GQL_F_BAL_NODE} } }
               objectChanges(first: 10) {
                 nodes {
                   address
                   idCreated
                   idDeleted
-                  inputState { asMoveObject { contents { type { repr } } } }
-                  outputState { asMoveObject { contents { type { repr } } } }
+                  inputState { ${GQL_F_MOVE_TYPE} }
+                  outputState { ${GQL_F_MOVE_TYPE} }
                 }
               }
               events(first: 10) {
@@ -6967,7 +6954,7 @@ async function fetchGraphqlServiceConfig(force = false) {
 
 async function buildHistoricalCheckpointPlan(days, segmentDays = 5) {
   const t0 = performance.now();
-  const latestData = await gql(`{ checkpoint { sequenceNumber timestamp } }`);
+  const latestData = await gql(GQL_Q_LATEST_CHECKPOINT);
   const latestCp = Number(latestData?.checkpoint?.sequenceNumber || 0);
   const latestTs = new Date(latestData?.checkpoint?.timestamp || "").getTime();
   if (!latestCp || !Number.isFinite(latestTs)) throw new Error("Could not load latest checkpoint for history.");
@@ -7727,7 +7714,7 @@ async function fetchSuilendPositions(addr) {
   const caps = capData.address?.objects?.nodes || [];
   if (!caps.length) return [];
   const obligationIds = caps.map(c => c.contents.json.obligation_id);
-  const parts = obligationIds.map((id, i) => `ob${i}: object(address: "${id}") { asMoveObject { contents { json } } }`);
+  const parts = obligationIds.map((id, i) => `ob${i}: object(address: "${id}") { ${GQL_F_MOVE_JSON} }`);
   const obData = await gql(`{ ${parts.join("\n")} }`);
   const positions = [];
   for (let i = 0; i < obligationIds.length; i++) {
@@ -8305,10 +8292,7 @@ async function fetchAftermathAccountCaps(addr) {
             pageInfo { hasNextPage endCursor }
             nodes {
               address
-              contents {
-                type { repr }
-                json
-              }
+              ${GQL_F_CONTENTS_TYPE_JSON}
             }
           }
         }
@@ -8645,10 +8629,7 @@ async function fetchAftermathRecentOrderEvents(addr, accountSet) {
             timestamp
             events(first: ${AF_ORDER_EVENT_PER_TX}) {
               nodes {
-                contents {
-                  type { repr }
-                  json
-                }
+                ${GQL_F_CONTENTS_TYPE_JSON}
               }
             }
           }
@@ -8908,7 +8889,7 @@ async function renderAddress(app, addr) {
         pageInfo { hasNextPage endCursor }
         nodes {
           address version digest
-          contents { type { repr } json }
+          ${GQL_F_CONTENTS_TYPE_JSON}
         }
       }
     }
@@ -8963,7 +8944,7 @@ async function renderAddress(app, addr) {
                 checkpoint { sequenceNumber }
                 balanceChanges(first: 50) {
                   pageInfo { hasNextPage }
-                  nodes { owner { address } amount coinType { repr } }
+                  nodes { ${GQL_F_BAL_NODE} }
                 }
                 events(first: 3) { nodes { contents { type { repr } } } }
               }
@@ -9539,7 +9520,7 @@ async function renderAddress(app, addr) {
         const more = await gql(`query($addr: SuiAddress!, $after: String) {
           address(address: $addr) { objects(first: 20, after: $after) {
             pageInfo { hasNextPage endCursor }
-            nodes { address version digest contents { type { repr } json } }
+            nodes { address version digest ${GQL_F_CONTENTS_TYPE_JSON} }
           } }
         }`, { addr: addrNorm, after: objPageInfo.endCursor });
         allObjects = [...allObjects, ...(more.address.objects.nodes || [])];
@@ -9632,15 +9613,12 @@ async function renderDeletedObjectDetail(app, id) {
         digest
         storageRebate
         owner {
-          ... on AddressOwner { address { address } }
-          ... on ObjectOwner { address { address } }
-          ... on Shared { initialSharedVersion }
-          ... on Immutable { __typename }
+          ${GQL_F_OWNER}
         }
         previousTransaction { digest }
         asMoveObject {
           hasPublicTransfer
-          contents { type { repr } json }
+          ${GQL_F_CONTENTS_TYPE_JSON}
         }
       }
     }
@@ -9877,13 +9855,10 @@ async function renderDeletedObjectDetail(app, id) {
             digest
             storageRebate
             owner {
-              ... on AddressOwner { address { address } }
-              ... on ObjectOwner { address { address } }
-              ... on Shared { initialSharedVersion }
-              ... on Immutable { __typename }
+              ${GQL_F_OWNER}
             }
             previousTransaction { digest }
-            asMoveObject { hasPublicTransfer contents { type { repr } json } }
+            asMoveObject { hasPublicTransfer ${GQL_F_CONTENTS_TYPE_JSON} }
           }
         }
       }`, { id: targetId, before });
@@ -10031,15 +10006,12 @@ async function renderObjectDetail(app, id) {
     object(address: $id) {
       address version digest storageRebate
       owner {
-        ... on AddressOwner { address { address } }
-        ... on ObjectOwner { address { address } }
-        ... on Shared { initialSharedVersion }
-        ... on Immutable { __typename }
+        ${GQL_F_OWNER}
       }
       previousTransaction { digest }
       asMoveObject {
         hasPublicTransfer
-        contents { type { repr } json }
+        ${GQL_F_CONTENTS_TYPE_JSON}
       }
       asMovePackage {
         modules(first: 50) {
@@ -10053,7 +10025,7 @@ async function renderObjectDetail(app, id) {
           name { type { repr } json }
           value {
             ... on MoveValue { type { repr } json }
-            ... on MoveObject { address contents { type { repr } json } }
+            ... on MoveObject { address ${GQL_F_CONTENTS_TYPE_JSON} }
           }
         }
       }
@@ -10111,7 +10083,7 @@ async function renderObjectDetail(app, id) {
               name { type { repr } json }
               value {
                 ... on MoveValue { type { repr } json }
-                ... on MoveObject { address contents { type { repr } json } }
+                ... on MoveObject { address ${GQL_F_CONTENTS_TYPE_JSON} }
               }
             }
           }
@@ -10531,7 +10503,7 @@ async function renderObjectDetail(app, id) {
       const hData = await gql(`query($id: SuiAddress!, $before: String) {
         objectVersions(address: $id, last: 20, before: $before) {
           pageInfo { hasPreviousPage startCursor }
-          nodes { address version digest previousTransaction { digest } asMoveObject { contents { type { repr } } } }
+          nodes { address version digest previousTransaction { digest } ${GQL_F_MOVE_TYPE} }
         }
       }`, { id: idNorm, before });
       const conn = hData?.objectVersions;
@@ -10804,7 +10776,7 @@ async function renderObjectDetail(app, id) {
               effects {
                 timestamp
                 gasEffects { gasSummary { computationCost storageCost storageRebate } }
-                objectChanges(first: 50) { nodes { address idCreated idDeleted outputState { asMoveObject { contents { type { repr } } } } } }
+                objectChanges(first: 50) { nodes { address idCreated idDeleted outputState { ${GQL_F_MOVE_TYPE} } } }
                 events(first: 50) { nodes { contents { type { repr } } } }
               }
             }
@@ -11132,18 +11104,15 @@ const QUERIES = {
         gasSummary { computationCost storageCost storageRebate nonRefundableStorageFee }
         gasObject { address }
       }
-      balanceChanges(first: 50) { pageInfo { hasNextPage } nodes { owner { address } amount coinType { repr } } }
+      balanceChanges(first: 50) { pageInfo { hasNextPage } nodes { ${GQL_F_BAL_NODE} } }
       objectChanges(first: 50) { pageInfo { hasNextPage } nodes {
         address idCreated idDeleted
-        inputState { version digest asMoveObject { contents { type { repr } } } }
+        inputState { version digest ${GQL_F_MOVE_TYPE} }
         outputState { version digest owner {
-          ... on AddressOwner { address { address } }
-          ... on ObjectOwner { address { address } }
-          ... on Shared { initialSharedVersion }
-          ... on Immutable { __typename }
-        } asMoveObject { contents { type { repr } } } }
+          ${GQL_F_OWNER}
+        } ${GQL_F_MOVE_TYPE} }
       } }
-      events(first: 50) { pageInfo { hasNextPage } nodes { contents { type { repr } json } sender { address } timestamp transactionModule { name package { address } } } }
+      events(first: 50) { pageInfo { hasNextPage } nodes { ${GQL_F_EVENT_NODE} } }
     }
   }
 }`,
@@ -11188,7 +11157,7 @@ const QUERIES = {
         effects { status timestamp }
       }
     }
-    objects(first: 20) { nodes { address version digest contents { type { repr } json } } }
+    objects(first: 20) { nodes { address version digest ${GQL_F_CONTENTS_TYPE_JSON} } }
   }
 }`,
     variables: { addr: "0xffd4f043057226453aeba59732d41c6093516f54823ebc3a16d17f8a77d2f0ad" },
@@ -11199,19 +11168,16 @@ const QUERIES = {
   object(address: $id) {
     address version digest storageRebate
     owner {
-      ... on AddressOwner { address { address } }
-      ... on ObjectOwner { address { address } }
-      ... on Shared { initialSharedVersion }
-      ... on Immutable { __typename }
+      ${GQL_F_OWNER}
     }
     previousTransaction { digest }
-    asMoveObject { hasPublicTransfer contents { type { repr } json } }
+    asMoveObject { hasPublicTransfer ${GQL_F_CONTENTS_TYPE_JSON} }
     asMovePackage { modules(first: 50) { pageInfo { hasNextPage endCursor } nodes { name } } }
     dynamicFields(first: 10) { pageInfo { hasNextPage endCursor } nodes {
       name { type { repr } json }
       value {
         ... on MoveValue { type { repr } json }
-        ... on MoveObject { address contents { type { repr } json } }
+        ... on MoveObject { address ${GQL_F_CONTENTS_TYPE_JSON} }
       }
     } }
   }
@@ -11225,13 +11191,7 @@ const QUERIES = {
     type: "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809::order_info::OrderFilled"
   }) {
     nodes {
-      contents {
-        type { repr }
-        json
-      }
-      sender { address }
-      timestamp
-      transactionModule { name package { address } }
+      ${GQL_F_EVENT_NODE}
     }
   }
 }`,
@@ -11242,9 +11202,7 @@ const QUERIES = {
     query: `{
   object(address: "0xe05dafb5133bcffb8d59f4e12465dc0e9faeaa05e3e342a08fe135800e3e4407") {
     address version digest
-    asMoveObject {
-      contents { type { repr } json }
-    }
+    ${GQL_F_MOVE_TYPE_JSON}
     objectVersionsBefore(last: 5) {
       nodes {
         version digest
@@ -11254,7 +11212,7 @@ const QUERIES = {
             status timestamp
             events(first: 10) {
               nodes {
-                contents { type { repr } json }
+                ${GQL_F_CONTENTS_TYPE_JSON}
               }
             }
           }
@@ -11909,15 +11867,12 @@ async function renderCoin(app, routeCoinType = "") {
                   status timestamp
                   balanceChanges(first: 50) {
                     pageInfo { hasNextPage }
-                    nodes { owner { address } amount coinType { repr } }
+                    nodes { ${GQL_F_BAL_NODE} }
                   }
                   events(first: 50) {
                     pageInfo { hasNextPage }
                     nodes {
-                      contents { type { repr } json }
-                      sender { address }
-                      timestamp
-                      transactionModule { name package { address } }
+                      ${GQL_F_EVENT_NODE}
                     }
                   }
                   objectChanges(first: 50) {
@@ -11926,21 +11881,15 @@ async function renderCoin(app, routeCoinType = "") {
                       address idCreated idDeleted
                       inputState {
                         owner {
-                          ... on AddressOwner { address { address } }
-                          ... on ObjectOwner { address { address } }
-                          ... on Shared { initialSharedVersion }
-                          ... on Immutable { __typename }
+                          ${GQL_F_OWNER}
                         }
-                        asMoveObject { contents { type { repr } } }
+                        ${GQL_F_MOVE_TYPE}
                       }
                       outputState {
                         owner {
-                          ... on AddressOwner { address { address } }
-                          ... on ObjectOwner { address { address } }
-                          ... on Shared { initialSharedVersion }
-                          ... on Immutable { __typename }
+                          ${GQL_F_OWNER}
                         }
-                        asMoveObject { contents { type { repr } } }
+                        ${GQL_F_MOVE_TYPE}
                       }
                     }
                   }
@@ -12289,7 +12238,7 @@ async function renderTransfers(app) {
         effects {
           status timestamp
           balanceChanges(first: 50) {
-            nodes { owner { address } amount coinType { repr } }
+            nodes { ${GQL_F_BAL_NODE} }
           }
         }
       }
@@ -15775,12 +15724,12 @@ async function renderSimulator(app) {
           effects {
             status
             gasEffects { gasSummary { computationCost storageCost storageRebate } }
-            balanceChanges(first: 50) { nodes { owner { address } amount coinType { repr } } }
+            balanceChanges(first: 50) { nodes { ${GQL_F_BAL_NODE} } }
             objectChanges(first: 50) { nodes { address idCreated idDeleted
-              inputState { asMoveObject { contents { type { repr } } } }
-              outputState { asMoveObject { contents { type { repr } } } }
+              inputState { ${GQL_F_MOVE_TYPE} }
+              outputState { ${GQL_F_MOVE_TYPE} }
             } }
-            events(first: 50) { nodes { contents { type { repr } json } } }
+            events(first: 50) { nodes { ${GQL_F_CONTENTS_TYPE_JSON} } }
           }
           error
         }

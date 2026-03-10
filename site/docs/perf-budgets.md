@@ -1,12 +1,13 @@
 # Perf Budgets
 
-Generated: `2026-03-02T18:51:29.647Z`
+Generated: `2026-03-10T10:52:31.908Z`
 
 | Page | GQL call budget | Render budget (ms) | Budget source |
 |---|---:|---:|---|
 | `address` | 12 | 1900 | declared |
 | `checkpoint` | 4 | 1400 | declared |
 | `checkpoints` | 4 | 1200 | declared |
+| `coin` | 20 | 2600 | declared |
 | `congestion` | 12 | 1900 | declared |
 | `defi-dex` | 20 | 2500 | declared |
 | `defi-flows` | 18 | 2200 | declared |
@@ -30,8 +31,8 @@ Generated: `2026-03-02T18:51:29.647Z`
 
 - Default GQL call budget: 12
 - Default render budget: 1800ms
-- Route pages discovered: 23
-- Explicit budget entries: 23
+- Route pages discovered: 24
+- Explicit budget entries: 24
 - Missing explicit entries: 0
 
 Missing pages: none
