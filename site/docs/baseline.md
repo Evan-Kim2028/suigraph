@@ -1,12 +1,12 @@
 # Baseline Metrics
 
-Generated: `2026-03-10T13:06:22.682Z`
+Generated: `2026-03-10T13:13:38.554Z`
 
 | Metric | Value |
 |---|---:|
 | Source file | `src/index.template.html + src/styles.css + src/app.js` |
-| Lines | 17703 |
-| Bytes | 824748 |
+| Lines | 17727 |
+| Bytes | 826046 |
 | Inline style attributes | 462 |
 | `window.*` handler assignments | 0 |
 | `await gql(...)` call sites | 92 |

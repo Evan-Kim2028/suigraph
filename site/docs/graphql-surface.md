@@ -1,6 +1,6 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T13:06:22.696Z`
+Generated: `2026-03-10T13:13:38.641Z`
 
 | Metric | Value |
 |---|---:|

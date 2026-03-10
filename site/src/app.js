@@ -231,6 +231,10 @@ function persistedEntityCacheKey(prefix, id, version = "v1") {
   return `${prefix}_${normalized}_${version}`;
 }
 
+function persistedScalarCacheKey(prefix, id, version = "v1") {
+  return `${prefix}_${String(id ?? "").trim().toLowerCase()}_${version}`;
+}
+
 // ── Lightweight Page Perf ──────────────────────────────────────────────
 const PERF_WARN_RENDER_MS = 1800;
 const DEFAULT_PAGE_GQL_BUDGET = 12;
@@ -529,6 +533,8 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   checkpointsListFirstPage: "suigraph_cache_checkpoints_first_page_v1",
   transactionsListFirstPage: "suigraph_cache_transactions_first_page_v1",
   addressShellPrefix: "suigraph_cache_address_shell",
+  checkpointDetailPrefix: "suigraph_cache_checkpoint_detail",
+  epochDetailPrefix: "suigraph_cache_epoch_detail",
 });
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
@@ -542,6 +548,8 @@ let stablecoinCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.stableco
 const defiHistoryCache = {};
 const packageDetailCache = {};
 const addressShellCache = {};
+const checkpointDetailCache = {};
+const epochDetailCache = {};
 const defiActivityCacheByWindow = {};
 const defiOverviewCacheByWindow = {};
 const defiDexCacheByWindow = {};
@@ -4062,26 +4070,34 @@ async function renderCheckpoints(app, after = null) {
 async function renderCheckpointDetail(app, seqNum) {
   const routeParams = splitRouteAndParams(getRoute()).params;
   const useRootEffects = routeParams.get("effects") === "1";
-  const data = await gql(`query($seq: UInt53!) {
-    checkpoint(sequenceNumber: $seq) {
-      sequenceNumber digest timestamp
-      previousCheckpointDigest
-      networkTotalTransactions
-      epoch { epochId }
-      rollingGasSummary { computationCost storageCost storageRebate }
-      transactions(first: 20) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          digest
-          sender { address }
-          effects {
-            status timestamp
-            gasEffects { gasSummary { computationCost storageCost storageRebate } }
+  const seq = parseInt(seqNum);
+  const checkpointStorageKey = persistedScalarCacheKey(PERSISTED_CACHE_KEYS.checkpointDetailPrefix, seq);
+  const checkpointState = getKeyedCacheState(checkpointDetailCache, seq);
+  hydratePersistedTimedCacheState(checkpointState, checkpointStorageKey, ENTITY_SHELL_TTL_MS);
+  const data = await withTimedCache(checkpointState, ENTITY_SHELL_TTL_MS, false, async () => {
+    const result = await gql(`query($seq: UInt53!) {
+      checkpoint(sequenceNumber: $seq) {
+        sequenceNumber digest timestamp
+        previousCheckpointDigest
+        networkTotalTransactions
+        epoch { epochId }
+        rollingGasSummary { computationCost storageCost storageRebate }
+        transactions(first: 20) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            digest
+            sender { address }
+            effects {
+              status timestamp
+              gasEffects { gasSummary { computationCost storageCost storageRebate } }
+            }
           }
         }
       }
-    }
-  }`, { seq: parseInt(seqNum) });
+    }`, { seq });
+    writePersistedTimedCacheRecord(checkpointStorageKey, result, 70000);
+    return result;
+  });
 
   const cp = data.checkpoint;
   if (!cp) { app.innerHTML = renderEmpty("Checkpoint not found."); return; }
@@ -11371,14 +11387,22 @@ async function renderObjectDetail(app, id) {
 
 // ── Epoch Detail ───────────────────────────────────────────────────────
 async function renderEpochDetail(app, epochId) {
-  const data = await gql(`query($id: UInt53!) {
-    epoch(epochId: $id) {
-      epochId startTimestamp endTimestamp
-      referenceGasPrice totalCheckpoints totalTransactions
-      totalGasFees totalStakeRewards totalStakeSubsidies
-      fundSize fundInflow fundOutflow netInflow
-    }
-  }`, { id: parseInt(epochId) });
+  const id = parseInt(epochId);
+  const epochStorageKey = persistedScalarCacheKey(PERSISTED_CACHE_KEYS.epochDetailPrefix, id);
+  const epochState = getKeyedCacheState(epochDetailCache, id);
+  hydratePersistedTimedCacheState(epochState, epochStorageKey, ENTITY_SHELL_TTL_MS);
+  const data = await withTimedCache(epochState, ENTITY_SHELL_TTL_MS, false, async () => {
+    const result = await gql(`query($id: UInt53!) {
+      epoch(epochId: $id) {
+        epochId startTimestamp endTimestamp
+        referenceGasPrice totalCheckpoints totalTransactions
+        totalGasFees totalStakeRewards totalStakeSubsidies
+        fundSize fundInflow fundOutflow netInflow
+      }
+    }`, { id });
+    writePersistedTimedCacheRecord(epochStorageKey, result, 22000);
+    return result;
+  });
 
   const ep = data.epoch;
   if (!ep) { app.innerHTML = renderEmpty("Epoch not found."); return; }
