@@ -1142,6 +1142,10 @@ let routeRenderToken = 0;
 const ROUTE_VIEW_CACHE_TTL_MS = 20 * 1000;
 const routeViewCache = {};
 
+function isActiveRouteApp(app, routeToken = routeRenderToken) {
+  return !!app?.isConnected && routeToken === routeRenderToken;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
@@ -3247,4 +3251,3 @@ function jsonTreeBlock(value, maxHeight) {
     <div class="jtree">${renderJson(value)}</div>
   </div>`;
 }
-

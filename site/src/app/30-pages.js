@@ -125,6 +125,8 @@ async function fetchDashboardActivitySnapshot(force = false) {
 }
 
 async function renderDashboard(app) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const dashHead = peekTimedCache(dashboardHeadCache, DASHBOARD_HEAD_TTL_MS) || { checkpoint: {}, epoch: {} };
   const cachedActivity = peekTimedCache(dashboardActivityCache, DASHBOARD_ACTIVITY_TTL_MS) || { txRows: [], cpRows: [] };
   const cachedEpochTrends = peekTimedCache(dashboardEpochsCache, DASH_EPOCHS_TTL_MS) || null;
@@ -195,6 +197,7 @@ async function renderDashboard(app) {
   }
 
   function applyDashboardActivity(txs, cpRows) {
+    if (!isActiveRoute()) return;
     latestCheckpointRows = cpRows || [];
     const cpBody = document.getElementById("dash-cp-tbody");
     if (cpBody) cpBody.innerHTML = renderCpRows(cpRows);
@@ -207,7 +210,7 @@ async function renderDashboard(app) {
         ? renderSparkline(deltas, { prefix: "Δ ", suffix: " tx/checkpoint", color: "var(--blue)" })
         : '<span class="u-fs11-dim">loading...</span>';
     }
-    if (app.isConnected) scheduleVisibleRouteShellPrefetch(app);
+    if (isActiveRoute()) scheduleVisibleRouteShellPrefetch(app);
   }
 
   async function loadDashboardActivity(force = false) {
@@ -220,6 +223,7 @@ async function renderDashboard(app) {
   }
 
   function applyDashboardHead(headData) {
+    if (!isActiveRoute()) return;
     const nextCp = headData?.checkpoint || {};
     const nextEp = headData?.epoch || {};
     const cpEl = document.querySelector('[data-stat="checkpoint"]');
@@ -473,27 +477,37 @@ async function renderDashboard(app) {
   const priceBox = document.querySelector('[data-stat="sui-price"]');
   if (priceBox && defiPrices.SUI) priceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
   setTimeout(() => {
-    if (!app.isConnected) return;
+    if (!isActiveRoute()) return;
     fetchDashboardHead(false).then((head) => {
-      if (!app.isConnected) return;
+      if (!isActiveRoute()) return;
       applyDashboardHead(head);
     }).catch(() => null);
     loadDashboardActivity(false).catch(() => null);
   }, 0);
 
   runWhenVisible("epoch-trends-card", () => {
-    return fetchDashboardEpochTrends().then((trendData) => applyDashboardEpochTrends(trendData));
+    return fetchDashboardEpochTrends().then((trendData) => {
+      if (!isActiveRoute()) return;
+      applyDashboardEpochTrends(trendData);
+    });
   }, { rootMargin: "200px 0px", timeoutMs: 1800 });
 
   runWhenVisible("stablecoin-card", () => {
-    return fetchStablecoinSupply().then((data) => applyDashboardStablecoinSupply(data));
+    return fetchStablecoinSupply().then((data) => {
+      if (!isActiveRoute()) return;
+      applyDashboardStablecoinSupply(data);
+    });
   }, { rootMargin: "240px 0px", timeoutMs: 2200 });
 
   runWhenVisible("protocol-rankings", () => {
-    return fetchEcosystemStats().then((stats) => applyDashboardEcosystemStats(stats));
+    return fetchEcosystemStats().then((stats) => {
+      if (!isActiveRoute()) return;
+      applyDashboardEcosystemStats(stats);
+    });
   }, { rootMargin: "260px 0px", timeoutMs: 2500 });
 
   fetchDefiPrices().then(() => {
+    if (!isActiveRoute()) return;
     const nextPriceBox = document.querySelector('[data-stat="sui-price"]');
     if (nextPriceBox && defiPrices.SUI) nextPriceBox.textContent = "$" + defiPrices.SUI.toFixed(2);
   });
@@ -507,6 +521,7 @@ async function renderDashboard(app) {
     }
     try {
       const freshHead = await fetchDashboardHead(true);
+      if (!isActiveRoute()) return;
       const fcp = freshHead?.checkpoint || {};
       const prevSeq = lastHeadSeq;
       applyDashboardHead(freshHead);
@@ -5851,6 +5866,8 @@ async function fetchAddressShell(addrNorm, force = false) {
 }
 
 async function renderAddress(app, addr) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const rawAddr = decodeURIComponent(String(addr || ""));
   const addrNorm = normalizeSuiAddress(rawAddr);
   if (!addrNorm) {
@@ -5948,7 +5965,7 @@ async function renderAddress(app, addr) {
         await loadAddressTransactions(null, false);
       } finally {
         txLoading = false;
-        if (app.isConnected) renderTabs(activeTab);
+        if (isActiveRoute()) renderTabs(activeTab);
       }
     })();
     return initialTxLoadPromise;
@@ -6142,7 +6159,9 @@ async function renderAddress(app, addr) {
       if (bluefinPro.status === "rejected") errors.push("Bluefin Pro");
       if (aftermathPerps.status === "rejected") errors.push("Aftermath Perps");
       defiHtml = renderEmpty("No DeFi positions found." + (errors.length ? " (Failed: " + errors.map(escapeHtml).join(", ") + ")" : ""));
-      defiLoaded = true; renderTabs("defi"); return;
+      defiLoaded = true;
+      if (isActiveRoute()) renderTabs("defi");
+      return;
     }
 
     let html = `<div style="padding:16px">`;
@@ -6446,6 +6465,7 @@ async function renderAddress(app, addr) {
     html += `</div>`;
     defiHtml = html;
     defiLoaded = true;
+    if (!isActiveRoute()) return;
     renderTabs("defi");
   }
 
@@ -6459,11 +6479,12 @@ async function renderAddress(app, addr) {
         data-action="addr-switch-tab" data-tab="${t}">${labels[t]}${counts[t] ? " (" + counts[t] + ")" : ""}</div>`
     ).join("");
     document.getElementById("addr-tab-content").innerHTML = tabContent[active]();
-    if (app.isConnected) scheduleVisibleObjectShellPrefetch(app);
+    if (isActiveRoute()) scheduleVisibleObjectShellPrefetch(app);
 
     // Lazy-load DeFi data when tab is clicked
     if (active === "defi" && !defiLoaded) {
       loadDefi().catch(e => {
+        if (!isActiveRoute()) return;
         defiHtml = renderEmpty("Failed to load DeFi data: " + escapeHtml(e.message));
         defiLoaded = true;
         renderTabs("defi");
@@ -6585,13 +6606,15 @@ async function renderAddress(app, addr) {
   app.addEventListener("click", app._addressClickHandler);
   renderTabs("txs");
   setTimeout(() => {
-    if (!app.isConnected) return;
+    if (!isActiveRoute()) return;
     ensureInitialAddressTransactions().catch(() => {});
   }, 0);
 }
 
 // ── Object Detail ───────────────────────────────────────────────────────
 async function renderDeletedObjectDetail(app, id) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const targetId = normalizeSuiAddress(id);
   const baseData = await gql(`query($id: SuiAddress!) {
     objectVersions(address: $id, last: 20) {
@@ -7010,7 +7033,7 @@ async function renderDeletedObjectDetail(app, id) {
           boundaryHydrated = true;
         })(),
       ]).finally(() => {
-        if (app.isConnected) refreshDeletedObjectView();
+        if (isActiveRoute()) refreshDeletedObjectView();
       });
     }, 0);
   }
@@ -7020,6 +7043,8 @@ async function renderDeletedObjectDetail(app, id) {
 }
 
 async function renderObjectDetail(app, id) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const rawId = decodeURIComponent(String(id || ""));
   const idNorm = normalizeSuiAddress(rawId);
   if (!idNorm) {
@@ -7644,8 +7669,10 @@ async function renderObjectDetail(app, id) {
         </div>`;
       // Render sidebar and panel after DOM is ready
       setTimeout(async () => {
+        if (!isActiveRoute()) return;
         if (!modulesLoaded && !modulesLoading) loadMorePackageModules().catch(() => {});
         if (selectedModule) await loadModuleData(selectedModule);
+        if (!isActiveRoute()) return;
         filterModules(document.getElementById("pkg-mod-filter")?.value || "");
         const panel = document.getElementById("pkg-module-panel");
         if (panel) panel.innerHTML = renderModulePanel();
@@ -7653,7 +7680,7 @@ async function renderObjectDetail(app, id) {
     } else {
       contentEl.innerHTML = tabContent[active]();
     }
-    if (app.isConnected) scheduleVisibleObjectShellPrefetch(app);
+    if (isActiveRoute()) scheduleVisibleObjectShellPrefetch(app);
   }
 
   app.innerHTML = `
@@ -9261,6 +9288,8 @@ const TRACKED_TOKENS = {
 };
 
 async function renderTransfers(app) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const data = await gql(`{
     transactions(last: 50, filter: { kind: PROGRAMMABLE_TX }) {
       nodes {
@@ -9406,7 +9435,7 @@ async function renderTransfers(app) {
     const missing = unresolvedTransferCoinTypes();
     if (!missing.length || pricesLoading) return;
     pricesLoading = true;
-    if (app.isConnected) app.innerHTML = renderContent();
+    if (isActiveRoute()) app.innerHTML = renderContent();
     try {
       await fetchDefiPrices(force);
       await ensurePrices(missing);
@@ -9414,7 +9443,7 @@ async function renderTransfers(app) {
       // Keep the shell rendered even if pricing enrichment fails.
     } finally {
       pricesLoading = false;
-      if (app.isConnected) app.innerHTML = renderContent();
+      if (isActiveRoute()) app.innerHTML = renderContent();
     }
   }
 
@@ -10621,6 +10650,8 @@ function packageSourceBadge(source) {
 
 // ── Packages ────────────────────────────────────────────────────────────
 async function renderPackages(app) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const routeParams = splitRouteAndParams(getRoute()).params;
   let windowKey = normalizeDefiWindowKey(routeParams.get("w"));
   let data = await fetchPackageActivitySnapshot(windowKey);
@@ -10677,7 +10708,7 @@ async function renderPackages(app) {
       detailData = null;
       detailErr = "";
       detailLoading = false;
-      if (rerender) app.innerHTML = renderContent();
+      if (rerender && isActiveRoute()) app.innerHTML = renderContent();
       return;
     }
     selectedPkg = nextPkg;
@@ -10685,7 +10716,7 @@ async function renderPackages(app) {
     const reqId = ++detailReqId;
     detailLoading = true;
     detailErr = "";
-    if (rerender) app.innerHTML = renderContent();
+    if (rerender && isActiveRoute()) app.innerHTML = renderContent();
     try {
       const d = await fetchPackageUpgradeSnapshot(nextPkg, force);
       if (reqId !== detailReqId) return;
@@ -10698,7 +10729,7 @@ async function renderPackages(app) {
     } finally {
       if (reqId === detailReqId) {
         detailLoading = false;
-        if (rerender) app.innerHTML = renderContent();
+        if (rerender && isActiveRoute()) app.innerHTML = renderContent();
       }
     }
   }
@@ -10710,7 +10741,7 @@ async function renderPackages(app) {
       try {
         await loadDetail(selectedPkg, force, false);
       } finally {
-        if (app.isConnected) app.innerHTML = renderContent();
+        if (isActiveRoute()) app.innerHTML = renderContent();
       }
     })();
     return initialDetailLoadPromise;
@@ -10996,6 +11027,7 @@ async function renderPackages(app) {
     persistPackagesState();
     app.innerHTML = renderLoading();
     data = await fetchPackageActivitySnapshot(windowKey, false);
+    if (!isActiveRoute()) return;
     if (!data.packages.some(r => r.package === selectedPkg)) selectedPkg = data.packages[0]?.package || "";
     detailData = null;
     detailErr = "";
@@ -11013,6 +11045,7 @@ async function renderPackages(app) {
   const refreshPackages = async () => {
     app.innerHTML = renderLoading();
     data = await fetchPackageActivitySnapshot(windowKey, true);
+    if (!isActiveRoute()) return;
     if (!data.packages.some(r => r.package === selectedPkg)) selectedPkg = data.packages[0]?.package || "";
     detailData = null;
     detailErr = "";
@@ -11080,13 +11113,15 @@ async function renderPackages(app) {
 
   app.innerHTML = renderContent();
   setTimeout(() => {
-    if (!app.isConnected || !selectedPkg) return;
+    if (!isActiveRoute() || !selectedPkg) return;
     ensureInitialPackageDetail(false).catch(() => {});
   }, 0);
 }
 
 // ── DeFi Overview ──────────────────────────────────────────────────────
 async function renderDefiOverview(app) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const routeParams = splitRouteAndParams(getRoute()).params;
   let windowKey = normalizeDefiWindowKey(routeParams.get("w"));
   let data = await fetchDefiOverviewSnapshot(windowKey);
@@ -11121,7 +11156,7 @@ async function renderDefiOverview(app) {
     const reqId = ++historyReqId;
     historyLoading = true;
     historyErr = "";
-    if (rerender) app.innerHTML = renderContent();
+    if (rerender && isActiveRoute()) app.innerHTML = renderContent();
     try {
       const next = await fetchDefiHistorySnapshot({
         metric: historyMetric,
@@ -11139,7 +11174,7 @@ async function renderDefiOverview(app) {
     } finally {
       if (reqId === historyReqId) {
         historyLoading = false;
-        if (rerender) app.innerHTML = renderContent();
+        if (rerender && isActiveRoute()) app.innerHTML = renderContent();
       }
     }
   }
@@ -11148,7 +11183,7 @@ async function renderDefiOverview(app) {
     const reqId = ++parityReqId;
     parityLoading = true;
     parityErr = "";
-    if (rerender) app.innerHTML = renderContent();
+    if (rerender && isActiveRoute()) app.innerHTML = renderContent();
     try {
       const next = await fetchDefiOverviewParity(windowKey, force);
       if (reqId !== parityReqId) return;
@@ -11161,7 +11196,7 @@ async function renderDefiOverview(app) {
     } finally {
       if (reqId === parityReqId) {
         parityLoading = false;
-        if (rerender) app.innerHTML = renderContent();
+        if (rerender && isActiveRoute()) app.innerHTML = renderContent();
       }
     }
   }
@@ -11407,6 +11442,7 @@ async function renderDefiOverview(app) {
     persistDefiOverviewState();
     app.innerHTML = renderLoading();
     data = await fetchDefiOverviewSnapshot(windowKey, false);
+    if (!isActiveRoute()) return;
     historyReqId += 1;
     parityReqId += 1;
     historyData = null;
@@ -11417,7 +11453,7 @@ async function renderDefiOverview(app) {
     parityLoading = true;
     app.innerHTML = renderContent();
     setTimeout(() => {
-      if (!app.isConnected) return;
+      if (!isActiveRoute()) return;
       loadHistory(false).catch(() => {});
       loadParity(false).catch(() => {});
     }, 0);
@@ -11446,6 +11482,7 @@ async function renderDefiOverview(app) {
   const refreshDefiOverview = async () => {
     app.innerHTML = renderLoading();
     data = await fetchDefiOverviewSnapshot(windowKey, true);
+    if (!isActiveRoute()) return;
     historyReqId += 1;
     parityReqId += 1;
     historyData = null;
@@ -11456,7 +11493,7 @@ async function renderDefiOverview(app) {
     parityLoading = true;
     app.innerHTML = renderContent();
     setTimeout(() => {
-      if (!app.isConnected) return;
+      if (!isActiveRoute()) return;
       loadHistory(true).catch(() => {});
       loadParity(true).catch(() => {});
     }, 0);
@@ -11514,7 +11551,7 @@ async function renderDefiOverview(app) {
   parityLoading = true;
   app.innerHTML = renderContent();
   setTimeout(() => {
-    if (!app.isConnected) return;
+    if (!isActiveRoute()) return;
     loadHistory(false).catch(() => {});
     loadParity(false).catch(() => {});
   }, 0);
@@ -11522,6 +11559,8 @@ async function renderDefiOverview(app) {
 
 // ── DeFi DEX ───────────────────────────────────────────────────────────
 async function renderDefiDex(app) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const routeParams = splitRouteAndParams(getRoute()).params;
   let windowKey = normalizeDefiWindowKey(routeParams.get("w"));
   let data = await fetchDefiDexSnapshot(windowKey);
@@ -11734,18 +11773,20 @@ async function renderDefiDex(app) {
     fallbackLoading = false;
     unresolvedFallback = [];
     data = await fetchDefiDexSnapshot(windowKey, false);
+    if (!isActiveRoute()) return;
     app.innerHTML = renderContent();
     if (!(data?.dexProtocols || []).length) {
       const pendingFallback = loadDexFallback(false);
       app.innerHTML = renderContent();
       pendingFallback.finally(() => {
-        if (app.isConnected) app.innerHTML = renderContent();
+        if (isActiveRoute()) app.innerHTML = renderContent();
       });
     }
   };
   const refreshDefiDex = async () => {
     app.innerHTML = renderLoading();
     data = await fetchDefiDexSnapshot(windowKey, true);
+    if (!isActiveRoute()) return;
     fallbackLoaded = false;
     fallbackLoading = false;
     unresolvedFallback = [];
@@ -11754,7 +11795,7 @@ async function renderDefiDex(app) {
       const pendingFallback = loadDexFallback(true);
       app.innerHTML = renderContent();
       pendingFallback.finally(() => {
-        if (app.isConnected) app.innerHTML = renderContent();
+        if (isActiveRoute()) app.innerHTML = renderContent();
       });
     }
   };
@@ -11800,7 +11841,7 @@ async function renderDefiDex(app) {
     const pendingFallback = loadDexFallback(false);
     app.innerHTML = renderContent();
     pendingFallback.finally(() => {
-      if (app.isConnected) app.innerHTML = renderContent();
+      if (isActiveRoute()) app.innerHTML = renderContent();
     });
   }
 }
@@ -12383,6 +12424,8 @@ async function renderDefiFlows(app) {
 // ── DeFi Risk Monitor ────────────────────────────────────────────────
 // ── DeFi Lending Markets ────────────────────────────────────────────────
 async function renderDefiRates(app) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const routeParams = splitRouteAndParams(getRoute()).params;
   let token = routeParams.get("asset") || "SUI";
   let sortKey = ["borrow", "supply", "util", "spread", "protocol", "tvl", "borrowed"].includes(routeParams.get("sort")) ? routeParams.get("sort") : "borrow";
@@ -12422,12 +12465,12 @@ async function renderDefiRates(app) {
     const reqId = ++loadReqId;
     dataLoading = !data;
     pricesLoading = true;
-    if (rerender) app.innerHTML = renderContent();
+    if (rerender && isActiveRoute()) app.innerHTML = renderContent();
     const [ratesRes, pricesRes] = await Promise.allSettled([
       fetchLendingRatesOverview(force),
       fetchDefiPrices(force),
     ]);
-    if (reqId !== loadReqId) return;
+    if (reqId !== loadReqId || !isActiveRoute()) return;
     if (ratesRes.status === "fulfilled") {
       data = ratesRes.value;
       loadErr = "";
@@ -12441,7 +12484,7 @@ async function renderDefiRates(app) {
       loadErr = pricesRes.reason?.message || "Failed to load lending rates.";
     }
     dataLoading = false;
-    if (rerender) app.innerHTML = renderContent();
+    if (rerender && isActiveRoute()) app.innerHTML = renderContent();
   }
 
   function sortedRows(allRows) {
@@ -12678,7 +12721,7 @@ async function renderDefiRates(app) {
   app.addEventListener("click", app._defiRatesClickHandler);
   app.innerHTML = renderContent();
   setTimeout(() => {
-    if (!app.isConnected) return;
+    if (!isActiveRoute()) return;
     load(false).catch(() => null);
   }, 0);
 }

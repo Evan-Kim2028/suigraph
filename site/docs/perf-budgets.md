@@ -1,6 +1,6 @@
 # Perf Budgets
 
-Generated: `2026-03-10T14:25:48.169Z`
+Generated: `2026-03-10T14:35:32.119Z`
 
 | Page | GQL call budget | Render budget (ms) | Budget source |
 |---|---:|---:|---|
