@@ -3,12 +3,12 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAppSource } from "./lib/app-source.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
 const TEMPLATE_PATH = resolve(SITE_ROOT, "src/index.template.html");
 const CSS_PATH = resolve(SITE_ROOT, "src/styles.css");
-const JS_PATH = resolve(SITE_ROOT, "src/app.js");
 const LEGACY_PATH = resolve(SITE_ROOT, "src/index.html");
 const OUT_PATH = resolve(SITE_ROOT, "docs/baseline.md");
 let html;
@@ -16,9 +16,10 @@ let sourceLabel;
 try {
   const template = readFileSync(TEMPLATE_PATH, "utf8");
   const css = readFileSync(CSS_PATH, "utf8");
-  const js = readFileSync(JS_PATH, "utf8");
+  const appSource = readAppSource(SITE_ROOT);
+  const js = appSource.source;
   html = template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => js);
-  sourceLabel = "src/index.template.html + src/styles.css + src/app.js";
+  sourceLabel = appSource.sourceDescriptor;
 } catch (_) {
   html = readFileSync(LEGACY_PATH, "utf8");
   sourceLabel = "src/index.html";

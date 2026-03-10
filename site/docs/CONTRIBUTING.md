@@ -9,7 +9,7 @@
 - Edit:
 - `src/index.template.html`
 - `src/styles.css`
-- `src/app.js`
+- `src/app/*.js`
 - Regenerate outputs with `npm run build`.
 
 ## Quality Gates

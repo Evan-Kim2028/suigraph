@@ -10,7 +10,7 @@ a graphql based block explorer, focused on GraphQL-powered chain introspection, 
 ## Repository Layout
 - `src/index.template.html`: HTML shell (authoring source)
 - `src/styles.css`: shared styles
-- `src/app.js`: all client logic
+- `src/app/*.js`: ordered client source parts concatenated into one inline script
 - `scripts/build-single-file.mjs`: inlines `src/*` into deploy outputs
 - `scripts/check-syntax.mjs`: validates embedded JS syntax in generated HTML
 - `scripts/report-baseline.mjs`: updates static maintainability metrics
@@ -33,7 +33,7 @@ a graphql based block explorer, focused on GraphQL-powered chain introspection, 
 - `npm run schema:coverage`: refresh `docs/schema-coverage.md`
 
 ## Development Workflow
-1. Edit only `src/index.template.html`, `src/styles.css`, and `src/app.js`.
+1. Edit only `src/index.template.html`, `src/styles.css`, and `src/app/*.js`.
 2. Run `npm run build`.
 3. Run `npm run validate`.
 4. Run `npm run baseline` when maintainability metrics should be updated.

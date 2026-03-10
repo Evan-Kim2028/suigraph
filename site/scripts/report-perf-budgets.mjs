@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAppSource } from "./lib/app-source.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
-const JS_PATH = resolve(SITE_ROOT, "src/app.js");
 const OUT_PATH = resolve(SITE_ROOT, "docs/perf-budgets.md");
 
-const src = readFileSync(JS_PATH, "utf8");
+const src = readAppSource(SITE_ROOT).source;
 
 const routePages = new Set([...src.matchAll(/return\s+\{\s*page:\s*"([^"]+)"/g)].map((m) => String(m[1])));
 const defaultGql = Number(src.match(/const DEFAULT_PAGE_GQL_BUDGET = (\d+);/)?.[1] || 0);

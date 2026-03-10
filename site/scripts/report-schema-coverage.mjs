@@ -3,10 +3,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAppSource } from "./lib/app-source.mjs";
+import { collectStaticGqlQueries } from "./lib/gql-static-analysis.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
-const JS_PATH = resolve(SITE_ROOT, "src/app.js");
 const SCHEMA_PATH = resolve(SITE_ROOT, "docs/schema-root-fields.json");
 const OUT_PATH = resolve(SITE_ROOT, "docs/schema-coverage.md");
 const CHECK_MODE = process.argv.includes("--check");
@@ -136,17 +137,17 @@ function extractRootFields(queryText) {
   return fields;
 }
 
-const src = readFileSync(JS_PATH, "utf8");
+const appSource = readAppSource(SITE_ROOT);
+const src = appSource.source;
 const snapshotRaw = readFileSync(SCHEMA_PATH, "utf8");
 const snapshot = JSON.parse(snapshotRaw);
 
 const allCalls = [...src.matchAll(/\bgql\s*\(/g)];
-const staticCalls = [...src.matchAll(/\bgql\s*\(\s*`([\s\S]*?)`\s*(?:,|\))/g)];
-const dynamicCalls = Math.max(0, allCalls.length - staticCalls.length);
+const staticQueries = collectStaticGqlQueries(src);
+const dynamicCalls = Math.max(0, allCalls.length - staticQueries.length);
 
 const counts = new Map();
-for (const m of staticCalls) {
-  const query = String(m[1] || "");
+for (const query of staticQueries) {
   const roots = extractRootFields(query);
   for (const r of roots) counts.set(r, (counts.get(r) || 0) + 1);
 }
@@ -180,7 +181,7 @@ const md = [
   "| Metric | Value |",
   "|---|---:|",
   `| Total gql call sites | ${allCalls.length} |`,
-  `| Static template query call sites | ${staticCalls.length} |`,
+  `| Static template query call sites | ${staticQueries.length} |`,
   `| Dynamic/non-literal call sites | ${dynamicCalls} |`,
   `| Query root fields in schema snapshot | ${queryFields.size} |`,
   `| Query root fields used (static scan) | ${usedQuery.length} |`,
@@ -203,7 +204,7 @@ const md = [
   "",
   "## Notes",
   "",
-  "- Coverage is based on static template-literal query scans in `src/app.js`.",
+  `- Coverage is based on static template-literal query scans in \`${appSource.jsSourceLabel}\`.`,
   "- Dynamic query construction can undercount true runtime root-field usage.",
   "- Refresh schema snapshot with `npm run schema:refresh` when upstream schema changes.",
   "",

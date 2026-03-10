@@ -1,24 +1,25 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAppSource } from "./lib/app-source.mjs";
+import { collectStaticGqlQueries } from "./lib/gql-static-analysis.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
-const JS_PATH = resolve(SITE_ROOT, "src/app.js");
 const OUT_PATH = resolve(SITE_ROOT, "docs/graphql-surface.md");
 
-const src = readFileSync(JS_PATH, "utf8");
+const appSource = readAppSource(SITE_ROOT);
+const src = appSource.source;
 const totalCalls = (src.match(/\bgql\s*\(/g) || []).length;
 const awaitedCalls = (src.match(/await\s+gql\s*\(/g) || []).length;
-const staticCalls = [...src.matchAll(/\bgql\s*\(\s*`([\s\S]*?)`\s*(?:,|\))/g)];
-const dynamicCalls = Math.max(0, totalCalls - staticCalls.length);
+const staticQueries = collectStaticGqlQueries(src);
+const dynamicCalls = Math.max(0, totalCalls - staticQueries.length);
 
 const opCounts = new Map();
-for (const m of staticCalls) {
-  const q = String(m[1] || "");
+for (const q of staticQueries) {
   const normalized = q.replace(/\s+/g, " ").trim();
   const preview = normalized.slice(0, 96) || "(empty)";
   const sigHash = createHash("sha1").update(normalized).digest("hex").slice(0, 10);
@@ -49,7 +50,7 @@ const md = [
   "|---|---:|",
   `| Total \`gql(...)\` call sites | ${totalCalls} |`,
   `| Awaited \`gql(...)\` call sites | ${awaitedCalls} |`,
-  `| Static template-literal query call sites | ${staticCalls.length} |`,
+  `| Static template-literal query call sites | ${staticQueries.length} |`,
   `| Dynamic/non-literal query call sites | ${dynamicCalls} |`,
   `| Unique static query signatures | ${ops.length} |`,
   "",
@@ -62,7 +63,7 @@ const md = [
     : ["| _None detected_ | 0 | _n/a_ |"]),
   "",
   "Notes:",
-  "- This is a static source scan of `src/app.js`.",
+  `- This is a static source scan of \`${appSource.jsSourceLabel}\`.`,
   "- Runtime call count/latency remains available in the in-app perf badge.",
   "",
 ].join("\n");

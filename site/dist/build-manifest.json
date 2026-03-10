@@ -1,13 +1,13 @@
 {
-  "source": "src/index.html",
+  "source": "src/index.template.html + src/styles.css + src/app/*.js",
   "buildMode": "templated-inline",
-  "sourceDescriptor": "src/index.template.html + src/styles.css + src/app.js",
+  "sourceDescriptor": "src/index.template.html + src/styles.css + src/app/*.js",
   "outputs": [
     "index.html",
     "dist/index.html"
   ],
-  "hashSha256": "7a78bbc4f707fe2450eb068599f79552e83cb6924ef1cd4ae25fbf76fe5341fa",
-  "lines": 17038,
-  "bytes": 797432,
-  "builtAt": "2026-03-10T10:52:14.651Z"
+  "hashSha256": "9533d7b9c8cfe989a54b3ef062ca96359692c19bf1dca37907c6e968c5403b92",
+  "lines": 18060,
+  "bytes": 841742,
+  "builtAt": "2026-03-10T14:35:17.739Z"
 }

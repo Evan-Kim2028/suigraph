@@ -4,13 +4,13 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAppSource } from "./lib/app-source.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
 const LEGACY_SRC_PATH = resolve(SITE_ROOT, "src/index.html");
 const TEMPLATE_PATH = resolve(SITE_ROOT, "src/index.template.html");
 const CSS_PATH = resolve(SITE_ROOT, "src/styles.css");
-const JS_PATH = resolve(SITE_ROOT, "src/app.js");
 const WS_RESOURCES_SRC = resolve(SITE_ROOT, "ws-resources.json");
 const WS_RESOURCES_OUT = resolve(SITE_ROOT, "dist/ws-resources.json");
 const PRIMARY_OUT = resolve(SITE_ROOT, "index.html");
@@ -42,7 +42,7 @@ function buildSource() {
 
   const template = readUtf8(TEMPLATE_PATH);
   const css = readUtf8(CSS_PATH);
-  const js = readUtf8(JS_PATH);
+  const appSource = readAppSource(SITE_ROOT);
 
   if (!template.includes("{{INLINE_CSS}}") || !template.includes("{{INLINE_JS}}")) {
     fail("src/index.template.html must include {{INLINE_CSS}} and {{INLINE_JS}} placeholders");
@@ -50,8 +50,8 @@ function buildSource() {
 
   return {
     mode: "templated-inline",
-    sourcePath: "src/index.template.html + src/styles.css + src/app.js",
-    source: template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => js),
+    sourcePath: appSource.sourceDescriptor,
+    source: template.replace("{{INLINE_CSS}}", () => css).replace("{{INLINE_JS}}", () => appSource.source),
   };
 }
 
@@ -88,7 +88,7 @@ writeFileSync(
   MANIFEST_OUT,
   JSON.stringify(
     {
-      source: "src/index.html",
+      source: built.sourcePath,
       buildMode: built.mode,
       sourceDescriptor: built.sourcePath,
       outputs: ["index.html", "dist/index.html"],
