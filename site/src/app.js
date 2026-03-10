@@ -213,6 +213,19 @@ function writePersistedTimedCacheRecord(storageKey, data, maxChars = 180000) {
   } catch (e) { /* ignore */ }
 }
 
+function hydratePersistedTimedCacheState(cacheState, storageKey, ttlMs) {
+  if (!cacheState || cacheState.data || cacheState.inFlight) return cacheState;
+  const row = readPersistedTimedCacheRecord(storageKey, ttlMs);
+  if (!row) return cacheState;
+  cacheState.data = row.data ?? null;
+  cacheState.ts = row.ts ?? 0;
+  return cacheState;
+}
+
+function persistedWindowCacheKey(prefix, windowKey, version = "v1") {
+  return `${prefix}_${normalizeDefiWindowKey(windowKey)}_${version}`;
+}
+
 // ── Lightweight Page Perf ──────────────────────────────────────────────
 const PERF_WARN_RENDER_MS = 1800;
 const DEFAULT_PAGE_GQL_BUDGET = 12;
@@ -496,6 +509,9 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   dashboardActivity: "suigraph_cache_dashboard_activity_v1",
   lendingRates: "suigraph_cache_lending_rates_v1",
   defiPrices: "suigraph_cache_defi_prices_v1",
+  defiOverviewPrefix: "suigraph_cache_defi_overview",
+  defiDexPrefix: "suigraph_cache_defi_dex",
+  packageActivityPrefix: "suigraph_cache_package_activity",
 });
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
@@ -7465,10 +7481,12 @@ async function fetchRecentDefiActivity(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KE
 async function fetchPackageActivitySnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const cacheState = getKeyedCacheState(packageActivityCacheByWindow, windowKey);
+  const storageKey = persistedWindowCacheKey(PERSISTED_CACHE_KEYS.packageActivityPrefix, windowKey);
+  hydratePersistedTimedCacheState(cacheState, storageKey, PACKAGE_ACTIVITY_TTL_MS);
   return withTimedCache(cacheState, PACKAGE_ACTIVITY_TTL_MS, force, async () => {
     const sample = await fetchDeterministicDefiWindowSample(windowKey, force, "package");
     const packages = buildPackageActivityFromTxs(sample?.txs || [], sample?.coverage || {});
-    return {
+    const result = {
       fetchedAt: new Date().toISOString(),
       sampleSize: sample?.coverage?.txInWindow || 0,
       packages: packages?.packages || [],
@@ -7479,6 +7497,8 @@ async function fetchPackageActivitySnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAU
       unresolvedPackages: packages?.unresolvedPackages || [],
       window: sample?.coverage || {},
     };
+    writePersistedTimedCacheRecord(storageKey, result, 160000);
+    return result;
   });
 }
 
@@ -7617,6 +7637,8 @@ async function fetchPackageUpgradeSnapshot(pkgAddr, force = false) {
 async function fetchDefiOverviewSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const cacheState = getKeyedCacheState(defiOverviewCacheByWindow, windowKey);
+  const storageKey = persistedWindowCacheKey(PERSISTED_CACHE_KEYS.defiOverviewPrefix, windowKey);
+  hydratePersistedTimedCacheState(cacheState, storageKey, DEFI_OVERVIEW_TTL_MS);
   return withTimedCache(cacheState, DEFI_OVERVIEW_TTL_MS, force, async () => {
     await fetchDefiPrices();
     const [activity, lending, stable, lst] = await Promise.all([
@@ -7649,7 +7671,7 @@ async function fetchDefiOverviewSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_
         ? `${((coverage.highConfidenceTx || 0) / coverage.trackedTxs * 100).toFixed(1)}% of tracked txs are high-confidence mapped; ${fmtNumber(coverage.lowConfidenceTx || 0)} are low-confidence.`
         : "Coverage metrics are not available for this sample.",
     ];
-    return {
+    const result = {
       fetchedAt: new Date().toISOString(),
       activity,
       topProtocols,
@@ -7662,12 +7684,16 @@ async function fetchDefiOverviewSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_
       signals,
       window: activity?.window || {},
     };
+    writePersistedTimedCacheRecord(storageKey, result, 80000);
+    return result;
   });
 }
 
 async function fetchDefiDexSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const cacheState = getKeyedCacheState(defiDexCacheByWindow, windowKey);
+  const storageKey = persistedWindowCacheKey(PERSISTED_CACHE_KEYS.defiDexPrefix, windowKey);
+  hydratePersistedTimedCacheState(cacheState, storageKey, DEFI_DEX_TTL_MS);
   return withTimedCache(cacheState, DEFI_DEX_TTL_MS, force, async () => {
     await fetchDefiPrices();
     const activity = await fetchRecentDefiActivity(windowKey, force);
@@ -7689,7 +7715,7 @@ async function fetchDefiDexSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, 
         ? `${((coverage.lowConfidenceTx || 0) / dexTxRows.length * 100).toFixed(1)}% of DEX tx rows are low-confidence protocol mappings.`
         : "No DEX protocol-confidence coverage available.",
     ];
-    return {
+    const result = {
       fetchedAt: new Date().toISOString(),
       suiPrice: defiPrices.SUI || 0,
       sampleSize: activity.sampleSize,
@@ -7701,6 +7727,8 @@ async function fetchDefiDexSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, 
       signals,
       window: activity?.window || {},
     };
+    writePersistedTimedCacheRecord(storageKey, result, 120000);
+    return result;
   });
 }
 
