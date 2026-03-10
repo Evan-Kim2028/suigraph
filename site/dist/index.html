@@ -1675,6 +1675,7 @@ let ecosystemCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.ecosystem
 let stablecoinCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.stablecoinSupply, ECOSYSTEM_TTL);
 const defiHistoryCache = {};
 const packageDetailCache = {};
+const txShellCache = {};
 const addressShellCache = {};
 const checkpointDetailCache = {};
 const epochDetailCache = {};
@@ -4467,6 +4468,7 @@ async function routeTo(route) {
   const r = parseRoute(route);
   if (routeRequestController) routeRequestController.abort();
   routeRequestController = new AbortController();
+  clearVisibleRouteShellPrefetch();
   const localRouteToken = ++routeRenderToken;
   startPagePerf(r.page);
   // Update active nav — handle flat links and dropdown items
@@ -4541,9 +4543,154 @@ async function routeTo(route) {
   }
   if (localRouteToken !== routeRenderToken) return;
   scheduleUiEnhancements();
+  scheduleVisibleRouteShellPrefetch(app);
 }
 
 window.addEventListener("hashchange", () => routeTo(getRoute()));
+
+const ROUTE_SHELL_PREFETCH_LIMIT = 6;
+const ROUTE_SHELL_PREFETCH_CRITICAL_DELAY_MS = 40;
+let routeShellPrefetchCriticalHandle = 0;
+let routeShellPrefetchIdleHandle = 0;
+let routeShellPrefetchIdleUsesIdle = false;
+
+function clearVisibleRouteShellPrefetch() {
+  if (routeShellPrefetchCriticalHandle) {
+    clearTimeout(routeShellPrefetchCriticalHandle);
+    routeShellPrefetchCriticalHandle = 0;
+  }
+  if (!routeShellPrefetchIdleHandle) return;
+  if (routeShellPrefetchIdleUsesIdle && typeof cancelIdleCallback === "function") {
+    cancelIdleCallback(routeShellPrefetchIdleHandle);
+  } else {
+    clearTimeout(routeShellPrefetchIdleHandle);
+  }
+  routeShellPrefetchIdleHandle = 0;
+  routeShellPrefetchIdleUsesIdle = false;
+}
+
+function isVisiblePrefetchAnchor(anchor) {
+  if (!(anchor instanceof Element)) return false;
+  const rect = anchor.getBoundingClientRect();
+  return rect.width > 0
+    && rect.height > 0
+    && rect.bottom >= 0;
+}
+
+function prefetchRouteShellFromRoute(route) {
+  const parsed = parseRoute(route);
+  if (parsed.page === "tx" && parsed.digest) {
+    return fetchTxShell(parsed.digest, false);
+  }
+  if (parsed.page === "checkpoint" && parsed.id) {
+    return fetchCheckpointDetailShell(parsed.id, false);
+  }
+  if (parsed.page === "epoch" && parsed.id) {
+    return fetchEpochDetailShell(parsed.id, false);
+  }
+  if (parsed.page === "address" && parsed.addr) {
+    const addrNorm = normalizeSuiAddress(decodeURIComponent(String(parsed.addr || "")));
+    if (addrNorm) return fetchAddressShell(addrNorm, false);
+  }
+  return Promise.resolve(null);
+}
+
+function routeShellPrefetchKey(parsed) {
+  if (!parsed?.page) return "";
+  if (parsed.page === "tx") return parsed.digest ? `tx:${parsed.digest}` : "";
+  if (parsed.page === "checkpoint") return parsed.id ? `checkpoint:${parsed.id}` : "";
+  if (parsed.page === "epoch") return parsed.id ? `epoch:${parsed.id}` : "";
+  if (parsed.page === "address") {
+    const addrNorm = normalizeSuiAddress(decodeURIComponent(String(parsed.addr || "")));
+    return addrNorm ? `address:${addrNorm}` : "";
+  }
+  return "";
+}
+
+function collectVisibleRouteShellPrefetchCandidates(target) {
+  const candidates = [];
+  const seen = new Set();
+  for (const anchor of target.querySelectorAll('a[href^="#/"]')) {
+    if (!isVisiblePrefetchAnchor(anchor)) continue;
+    const href = anchor.getAttribute("href") || "";
+    if (!href.startsWith("#/")) continue;
+    const route = href.slice(1);
+    const parsed = parseRoute(route);
+    if (!["tx", "checkpoint", "epoch", "address"].includes(parsed.page)) continue;
+    const key = routeShellPrefetchKey(parsed);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ route, parsed, key });
+  }
+  return candidates;
+}
+
+function selectCriticalRouteShellPrefetchCandidates(candidates, currentPage) {
+  const priority = currentPage === "home"
+    ? ["tx", "checkpoint", "epoch", "address"]
+    : (currentPage === "checkpoints"
+      ? ["checkpoint", "tx", "epoch", "address"]
+      : (["txs", "transfers", "defi-overview", "defi-dex", "defi-flows", "packages", "address"].includes(currentPage)
+        ? ["tx", "address", "checkpoint", "epoch"]
+        : ["tx", "checkpoint", "address", "epoch"]));
+  const selected = [];
+  const used = new Set();
+  for (const page of priority) {
+    const candidate = candidates.find((row) => row.parsed.page === page && !used.has(row.key));
+    if (!candidate) continue;
+    selected.push(candidate);
+    used.add(candidate.key);
+    if (selected.length >= 3) break;
+  }
+  return selected;
+}
+
+function scheduleVisibleRouteShellPrefetch(root = null) {
+  const target = root || document.getElementById("app");
+  if (!target) return;
+  if (document.visibilityState === "hidden") return;
+  if (navigator.connection?.saveData) return;
+  clearVisibleRouteShellPrefetch();
+  const candidates = collectVisibleRouteShellPrefetchCandidates(target);
+  if (!candidates.length) return;
+  const currentPage = parseRoute(getRoute()).page;
+  const critical = selectCriticalRouteShellPrefetchCandidates(candidates, currentPage);
+  const criticalKeys = new Set(critical.map((row) => row.key));
+  const secondary = candidates
+    .filter((row) => !criticalKeys.has(row.key))
+    .slice(0, Math.max(0, ROUTE_SHELL_PREFETCH_LIMIT - critical.length));
+  const runCritical = () => {
+    routeShellPrefetchCriticalHandle = 0;
+    if (!critical.length) return;
+    Promise.allSettled(critical.map((row) => prefetchRouteShellFromRoute(row.route).catch(() => null))).catch(() => null);
+  };
+  const runSecondary = () => {
+    routeShellPrefetchIdleHandle = 0;
+    routeShellPrefetchIdleUsesIdle = false;
+    if (!secondary.length) return;
+    Promise.allSettled(secondary.map((row) => prefetchRouteShellFromRoute(row.route).catch(() => null))).catch(() => null);
+  };
+  routeShellPrefetchCriticalHandle = window.setTimeout(runCritical, ROUTE_SHELL_PREFETCH_CRITICAL_DELAY_MS);
+  if (!secondary.length) return;
+  if (typeof requestIdleCallback === "function") {
+    routeShellPrefetchIdleUsesIdle = true;
+    routeShellPrefetchIdleHandle = requestIdleCallback(runSecondary, { timeout: 800 });
+  } else {
+    routeShellPrefetchIdleHandle = window.setTimeout(runSecondary, 180);
+  }
+}
+
+function handleRouteShellPrefetchHint(ev) {
+  const anchor = ev.target?.closest?.('a[href^="#/"]');
+  if (!anchor) return;
+  const href = anchor.getAttribute("href") || "";
+  if (!href.startsWith("#/")) return;
+  prefetchRouteShellFromRoute(href.slice(1)).catch(() => null);
+}
+
+document.addEventListener("mouseover", handleRouteShellPrefetchHint, { passive: true });
+document.addEventListener("focusin", handleRouteShellPrefetchHint);
+document.addEventListener("touchstart", handleRouteShellPrefetchHint, { passive: true });
 
 // ── Search ──────────────────────────────────────────────────────────────
 document.getElementById("searchForm").addEventListener("submit", async (evt) => {
@@ -4805,6 +4952,7 @@ async function renderDashboard(app) {
         ? renderSparkline(deltas, { prefix: "Δ ", suffix: " tx/checkpoint", color: "var(--blue)" })
         : '<span class="u-fs11-dim">loading...</span>';
     }
+    if (app.isConnected) scheduleVisibleRouteShellPrefetch(app);
   }
 
   async function loadDashboardActivity(force = false) {
@@ -5194,15 +5342,12 @@ async function renderCheckpoints(app, after = null) {
   app.addEventListener("click", app._checkpointsClickHandler);
 }
 
-// ── Checkpoint Detail ───────────────────────────────────────────────────
-async function renderCheckpointDetail(app, seqNum) {
-  const routeParams = splitRouteAndParams(getRoute()).params;
-  const useRootEffects = routeParams.get("effects") === "1";
+async function fetchCheckpointDetailShell(seqNum, force = false) {
   const seq = parseInt(seqNum);
   const checkpointStorageKey = persistedScalarCacheKey(PERSISTED_CACHE_KEYS.checkpointDetailPrefix, seq);
   const checkpointState = getKeyedCacheState(checkpointDetailCache, seq);
   hydratePersistedTimedCacheState(checkpointState, checkpointStorageKey, ENTITY_SHELL_TTL_MS);
-  const data = await withTimedCache(checkpointState, ENTITY_SHELL_TTL_MS, false, async () => {
+  return withTimedCache(checkpointState, ENTITY_SHELL_TTL_MS, force, async () => {
     const result = await gql(`query($seq: UInt53!) {
       checkpoint(sequenceNumber: $seq) {
         sequenceNumber digest timestamp
@@ -5226,6 +5371,13 @@ async function renderCheckpointDetail(app, seqNum) {
     writePersistedTimedCacheRecord(checkpointStorageKey, result, 70000);
     return result;
   });
+}
+
+// ── Checkpoint Detail ───────────────────────────────────────────────────
+async function renderCheckpointDetail(app, seqNum) {
+  const routeParams = splitRouteAndParams(getRoute()).params;
+  const useRootEffects = routeParams.get("effects") === "1";
+  const data = await fetchCheckpointDetailShell(seqNum, false);
 
   const cp = data.checkpoint;
   if (!cp) { app.innerHTML = renderEmpty("Checkpoint not found."); return; }
@@ -6024,9 +6176,9 @@ function fmtCoinAmount(amount, coinRepr) {
   return { val, abs: formatted, name, sign: amt >= 0 ? "+" : "-", raw: amt };
 }
 
-async function renderTxDetail(app, digest) {
-  const localRouteToken = routeRenderToken;
-  const shellData = await gql(`query($digest: String!) {
+async function fetchTxShell(digest, force = false) {
+  const txShellState = getKeyedCacheState(txShellCache, digest);
+  return withTimedCache(txShellState, ENTITY_SHELL_TTL_MS, force, async () => gql(`query($digest: String!) {
     transaction(digest: $digest) {
       digest
       sender { address }
@@ -6077,7 +6229,12 @@ async function renderTxDetail(app, digest) {
         }
       }
     }
-  }`, { digest });
+  }`, { digest }));
+}
+
+async function renderTxDetail(app, digest) {
+  const localRouteToken = routeRenderToken;
+  const shellData = await fetchTxShell(digest, false);
 
   let tx = shellData.transaction;
   if (!tx) { app.innerHTML = renderEmpty("Transaction not found."); return; }
@@ -6206,6 +6363,7 @@ async function renderTxDetail(app, digest) {
     renderTxView();
     setRouteViewCacheEntry(routeCacheKey(getRoute()), app.innerHTML);
     scheduleUiEnhancements();
+    scheduleVisibleRouteShellPrefetch(app);
   }
 
   function renderTxView() {
@@ -10390,23 +10548,11 @@ async function fetchAftermathPerpsPositions(addr) {
 }
 
 // ── Address View ────────────────────────────────────────────────────────
-async function renderAddress(app, addr) {
-  const rawAddr = decodeURIComponent(String(addr || ""));
-  const addrNorm = normalizeSuiAddress(rawAddr);
-  if (!addrNorm) {
-    const asCoinType = normalizeCoinTypeQueryInput(rawAddr);
-    if (asCoinType) {
-      navigate("/coin?type=" + encodeURIComponent(asCoinType));
-      return;
-    }
-    app.innerHTML = renderEmpty(`Invalid address: ${escapeHtml(rawAddr || String(addr || ""))}`);
-    return;
-  }
-
+async function fetchAddressShell(addrNorm, force = false) {
   const addressShellStorageKey = persistedEntityCacheKey(PERSISTED_CACHE_KEYS.addressShellPrefix, addrNorm);
   const addressShellState = getKeyedCacheState(addressShellCache, addrNorm);
   hydratePersistedTimedCacheState(addressShellState, addressShellStorageKey, ENTITY_SHELL_TTL_MS);
-  const data = await withTimedCache(addressShellState, ENTITY_SHELL_TTL_MS, false, async () => {
+  return withTimedCache(addressShellState, ENTITY_SHELL_TTL_MS, force, async () => {
     const result = await gql(`query($addr: SuiAddress!) {
       address(address: $addr) {
         address
@@ -10423,6 +10569,22 @@ async function renderAddress(app, addr) {
     writePersistedTimedCacheRecord(addressShellStorageKey, result, 45000);
     return result;
   });
+}
+
+async function renderAddress(app, addr) {
+  const rawAddr = decodeURIComponent(String(addr || ""));
+  const addrNorm = normalizeSuiAddress(rawAddr);
+  if (!addrNorm) {
+    const asCoinType = normalizeCoinTypeQueryInput(rawAddr);
+    if (asCoinType) {
+      navigate("/coin?type=" + encodeURIComponent(asCoinType));
+      return;
+    }
+    app.innerHTML = renderEmpty(`Invalid address: ${escapeHtml(rawAddr || String(addr || ""))}`);
+    return;
+  }
+
+  const data = await fetchAddressShell(addrNorm, false);
 
   // If address query returns null, try as object
   if (!data.address) {
@@ -12551,12 +12713,12 @@ async function renderObjectDetail(app, id) {
 }
 
 // ── Epoch Detail ───────────────────────────────────────────────────────
-async function renderEpochDetail(app, epochId) {
+async function fetchEpochDetailShell(epochId, force = false) {
   const id = parseInt(epochId);
   const epochStorageKey = persistedScalarCacheKey(PERSISTED_CACHE_KEYS.epochDetailPrefix, id);
   const epochState = getKeyedCacheState(epochDetailCache, id);
   hydratePersistedTimedCacheState(epochState, epochStorageKey, ENTITY_SHELL_TTL_MS);
-  const data = await withTimedCache(epochState, ENTITY_SHELL_TTL_MS, false, async () => {
+  return withTimedCache(epochState, ENTITY_SHELL_TTL_MS, force, async () => {
     const result = await gql(`query($id: UInt53!) {
       epoch(epochId: $id) {
         epochId startTimestamp endTimestamp
@@ -12568,6 +12730,10 @@ async function renderEpochDetail(app, epochId) {
     writePersistedTimedCacheRecord(epochStorageKey, result, 22000);
     return result;
   });
+}
+
+async function renderEpochDetail(app, epochId) {
+  const data = await fetchEpochDetailShell(epochId, false);
 
   const ep = data.epoch;
   if (!ep) { app.innerHTML = renderEmpty("Epoch not found."); return; }
