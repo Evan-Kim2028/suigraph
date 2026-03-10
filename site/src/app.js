@@ -512,13 +512,16 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   defiOverviewPrefix: "suigraph_cache_defi_overview",
   defiDexPrefix: "suigraph_cache_defi_dex",
   packageActivityPrefix: "suigraph_cache_package_activity",
+  defiStablecoinsPrefix: "suigraph_cache_defi_stablecoins",
+  defiFlowsPrefix: "suigraph_cache_defi_flows",
+  defiLst: "suigraph_cache_defi_lst_v1",
 });
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
 const LENDING_RATES_TTL_MS = 60 * 1000;
 let lendingRatesCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.lendingRates, LENDING_RATES_TTL_MS);
 let lendingRatesInFlight = null;
-let defiLstCache = { data: null, ts: 0, inFlight: null };
+let defiLstCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.defiLst, DEFI_LST_TTL_MS);
 let gqlServiceConfigCache = { data: null, ts: 0, inFlight: null };
 const defiHistoryCache = {};
 const packageDetailCache = {};
@@ -7798,6 +7801,8 @@ async function fetchRecentStablecoinFlowsSample(windowKeyOrForce = DEFI_WINDOW_D
 async function fetchDefiStablecoinSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const cacheState = getKeyedCacheState(defiStablecoinsCacheByWindow, windowKey);
+  const storageKey = persistedWindowCacheKey(PERSISTED_CACHE_KEYS.defiStablecoinsPrefix, windowKey);
+  hydratePersistedTimedCacheState(cacheState, storageKey, DEFI_STABLECOINS_TTL_MS);
   return withTimedCache(cacheState, DEFI_STABLECOINS_TTL_MS, force, async () => {
     const [supply, flowSample] = await Promise.all([
       fetchStablecoinSupply(),
@@ -7825,7 +7830,7 @@ async function fetchDefiStablecoinSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAUL
         ? `${((conf.low || 0) / flowSample.flows.length * 100).toFixed(1)}% of sampled stablecoin flow rows are low-confidence protocol mappings.`
         : "No sampled stablecoin flow rows for confidence coverage.",
     ];
-    return {
+    const result = {
       fetchedAt: new Date().toISOString(),
       totalSupply: supply?.totalSupply || 0,
       coins,
@@ -7844,6 +7849,8 @@ async function fetchDefiStablecoinSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAUL
       signals,
       window: flowSample.window || {},
     };
+    writePersistedTimedCacheRecord(storageKey, result, 140000);
+    return result;
   });
 }
 
@@ -7900,7 +7907,7 @@ async function fetchDefiLstSnapshot(force = false) {
         ? `${((confidenceCounts.high || 0) / entries.length * 100).toFixed(1)}% of LST rows are high-confidence (direct rate object + non-missing supply).`
         : "No LST confidence coverage is available.",
     ];
-    return {
+    const result = {
       fetchedAt: new Date().toISOString(),
       entries,
       totalMcap,
@@ -7914,12 +7921,16 @@ async function fetchDefiLstSnapshot(force = false) {
       },
       signals,
     };
+    writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.defiLst, result, 60000);
+    return result;
   });
 }
 
 async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const cacheState = getKeyedCacheState(defiFlowsCacheByWindow, windowKey);
+  const storageKey = persistedWindowCacheKey(PERSISTED_CACHE_KEYS.defiFlowsPrefix, windowKey);
+  hydratePersistedTimedCacheState(cacheState, storageKey, DEFI_FLOWS_TTL_MS);
   return withTimedCache(cacheState, DEFI_FLOWS_TTL_MS, force, async () => {
     await fetchDefiPrices();
     const sample = await fetchDeterministicDefiWindowSample(windowKey, force, "flow");
@@ -7943,7 +7954,7 @@ async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY,
         ? `${((coverage.lowConfidenceRows || 0) / rows.length * 100).toFixed(1)}% of priced rows are low-confidence protocol mappings; ${fmtNumber(failedRows)} failed rows.`
         : "No flow confidence/failure signal available.",
     ];
-    return {
+    const result = {
       fetchedAt: new Date().toISOString(),
       rows,
       totalUsd,
@@ -7952,6 +7963,8 @@ async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY,
       signals,
       window: sample?.coverage || {},
     };
+    writePersistedTimedCacheRecord(storageKey, result, 160000);
+    return result;
   });
 }
 
