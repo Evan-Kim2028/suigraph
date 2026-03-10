@@ -226,6 +226,11 @@ function persistedWindowCacheKey(prefix, windowKey, version = "v1") {
   return `${prefix}_${normalizeDefiWindowKey(windowKey)}_${version}`;
 }
 
+function persistedEntityCacheKey(prefix, id, version = "v1") {
+  const normalized = normalizeSuiAddress(id) || String(id || "").trim().toLowerCase();
+  return `${prefix}_${normalized}_${version}`;
+}
+
 // ── Lightweight Page Perf ──────────────────────────────────────────────
 const PERF_WARN_RENDER_MS = 1800;
 const DEFAULT_PAGE_GQL_BUDGET = 12;
@@ -506,6 +511,7 @@ const DASHBOARD_HEAD_TTL_MS = 10 * 1000;
 const DASHBOARD_ACTIVITY_TTL_MS = 10 * 1000;
 const DEFI_PRICE_PERSIST_TTL_MS = 15 * 1000;
 const LIST_PAGE_TTL_MS = 15 * 1000;
+const ENTITY_SHELL_TTL_MS = 20 * 1000;
 const PERSISTED_CACHE_KEYS = Object.freeze({
   dashboardHead: "suigraph_cache_dashboard_head_v1",
   dashboardActivity: "suigraph_cache_dashboard_activity_v1",
@@ -522,6 +528,7 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   stablecoinSupply: "suigraph_cache_stablecoin_supply_v1",
   checkpointsListFirstPage: "suigraph_cache_checkpoints_first_page_v1",
   transactionsListFirstPage: "suigraph_cache_transactions_first_page_v1",
+  addressShellPrefix: "suigraph_cache_address_shell",
 });
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
@@ -534,6 +541,7 @@ let ecosystemCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.ecosystem
 let stablecoinCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.stablecoinSupply, ECOSYSTEM_TTL);
 const defiHistoryCache = {};
 const packageDetailCache = {};
+const addressShellCache = {};
 const defiActivityCacheByWindow = {};
 const defiOverviewCacheByWindow = {};
 const defiDexCacheByWindow = {};
@@ -9214,19 +9222,26 @@ async function renderAddress(app, addr) {
     return;
   }
 
-  const data = await gql(`query($addr: SuiAddress!) {
-    address(address: $addr) {
-      address
-      defaultNameRecord { domain }
-      objects(first: 20) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          address version digest
-          ${GQL_F_CONTENTS_TYPE_JSON}
+  const addressShellStorageKey = persistedEntityCacheKey(PERSISTED_CACHE_KEYS.addressShellPrefix, addrNorm);
+  const addressShellState = getKeyedCacheState(addressShellCache, addrNorm);
+  hydratePersistedTimedCacheState(addressShellState, addressShellStorageKey, ENTITY_SHELL_TTL_MS);
+  const data = await withTimedCache(addressShellState, ENTITY_SHELL_TTL_MS, false, async () => {
+    const result = await gql(`query($addr: SuiAddress!) {
+      address(address: $addr) {
+        address
+        defaultNameRecord { domain }
+        objects(first: 20) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            address version digest
+            ${GQL_F_CONTENTS_TYPE_JSON}
+          }
         }
       }
-    }
-  }`, { addr: addrNorm });
+    }`, { addr: addrNorm });
+    writePersistedTimedCacheRecord(addressShellStorageKey, result, 45000);
+    return result;
+  });
 
   // If address query returns null, try as object
   if (!data.address) {
