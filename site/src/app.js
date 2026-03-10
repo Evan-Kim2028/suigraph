@@ -550,6 +550,7 @@ let stablecoinCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.stableco
 const defiHistoryCache = {};
 const packageDetailCache = {};
 const txShellCache = {};
+const objectShellCache = {};
 const searchClassificationCache = {};
 const addressShellCache = {};
 const checkpointDetailCache = {};
@@ -3344,6 +3345,7 @@ async function routeTo(route) {
   if (routeRequestController) routeRequestController.abort();
   routeRequestController = new AbortController();
   clearVisibleRouteShellPrefetch();
+  clearVisibleObjectShellPrefetch();
   const localRouteToken = ++routeRenderToken;
   startPagePerf(r.page);
   // Update active nav — handle flat links and dropdown items
@@ -3419,15 +3421,19 @@ async function routeTo(route) {
   if (localRouteToken !== routeRenderToken) return;
   scheduleUiEnhancements();
   scheduleVisibleRouteShellPrefetch(app);
+  scheduleVisibleObjectShellPrefetch(app);
 }
 
 window.addEventListener("hashchange", () => routeTo(getRoute()));
 
 const ROUTE_SHELL_PREFETCH_LIMIT = 6;
 const ROUTE_SHELL_PREFETCH_CRITICAL_DELAY_MS = 40;
+const OBJECT_SHELL_PREFETCH_LIMIT = 1;
+const OBJECT_SHELL_PREFETCH_DELAY_MS = 25;
 let routeShellPrefetchCriticalHandle = 0;
 let routeShellPrefetchIdleHandle = 0;
 let routeShellPrefetchIdleUsesIdle = false;
+let objectShellPrefetchHandle = 0;
 
 function clearVisibleRouteShellPrefetch() {
   if (routeShellPrefetchCriticalHandle) {
@@ -3442,6 +3448,12 @@ function clearVisibleRouteShellPrefetch() {
   }
   routeShellPrefetchIdleHandle = 0;
   routeShellPrefetchIdleUsesIdle = false;
+}
+
+function clearVisibleObjectShellPrefetch() {
+  if (!objectShellPrefetchHandle) return;
+  clearTimeout(objectShellPrefetchHandle);
+  objectShellPrefetchHandle = 0;
 }
 
 function isVisiblePrefetchAnchor(anchor) {
@@ -3468,6 +3480,14 @@ function prefetchRouteShellFromRoute(route) {
     if (addrNorm) return fetchAddressShell(addrNorm, false);
   }
   return Promise.resolve(null);
+}
+
+function prefetchObjectShellFromRoute(route) {
+  const parsed = parseRoute(route);
+  if (parsed.page !== "object" || !parsed.id) return Promise.resolve(null);
+  const idNorm = normalizeSuiAddress(decodeURIComponent(String(parsed.id || "")));
+  if (!idNorm) return Promise.resolve(null);
+  return fetchObjectShell(idNorm, false);
 }
 
 function routeShellPrefetchKey(parsed) {
@@ -3555,12 +3575,46 @@ function scheduleVisibleRouteShellPrefetch(root = null) {
   }
 }
 
+function collectVisibleObjectShellPrefetchCandidates(target) {
+  const candidates = [];
+  const seen = new Set();
+  for (const anchor of target.querySelectorAll('a[href^="#/object/"]')) {
+    if (!isVisiblePrefetchAnchor(anchor)) continue;
+    const href = anchor.getAttribute("href") || "";
+    if (!href.startsWith("#/object/")) continue;
+    const parsed = parseRoute(href.slice(1));
+    const idNorm = normalizeSuiAddress(decodeURIComponent(String(parsed?.id || "")));
+    if (!idNorm || seen.has(idNorm)) continue;
+    seen.add(idNorm);
+    candidates.push({ route: href.slice(1), idNorm });
+    if (candidates.length >= OBJECT_SHELL_PREFETCH_LIMIT) break;
+  }
+  return candidates;
+}
+
+function scheduleVisibleObjectShellPrefetch(root = null) {
+  const target = root || document.getElementById("app");
+  if (!target) return;
+  if (document.visibilityState === "hidden") return;
+  if (navigator.connection?.saveData) return;
+  const currentPage = parseRoute(getRoute()).page;
+  if (!["tx", "address", "object"].includes(currentPage)) return;
+  clearVisibleObjectShellPrefetch();
+  const candidates = collectVisibleObjectShellPrefetchCandidates(target);
+  if (!candidates.length) return;
+  objectShellPrefetchHandle = window.setTimeout(() => {
+    objectShellPrefetchHandle = 0;
+    Promise.allSettled(candidates.map((row) => prefetchObjectShellFromRoute(row.route).catch(() => null))).catch(() => null);
+  }, OBJECT_SHELL_PREFETCH_DELAY_MS);
+}
+
 function handleRouteShellPrefetchHint(ev) {
   const anchor = ev.target?.closest?.('a[href^="#/"]');
   if (!anchor) return;
   const href = anchor.getAttribute("href") || "";
   if (!href.startsWith("#/")) return;
   prefetchRouteShellFromRoute(href.slice(1)).catch(() => null);
+  if (href.startsWith("#/object/")) prefetchObjectShellFromRoute(href.slice(1)).catch(() => null);
 }
 
 document.addEventListener("mouseover", handleRouteShellPrefetchHint, { passive: true });
@@ -5125,6 +5179,29 @@ async function fetchTxShell(digest, force = false) {
   }`, { digest }));
 }
 
+async function fetchObjectShell(idNorm, force = false) {
+  const objectShellState = getKeyedCacheState(objectShellCache, idNorm);
+  return withTimedCache(objectShellState, ENTITY_SHELL_TTL_MS, force, async () => gql(`query($id: SuiAddress!) {
+    object(address: $id) {
+      address version digest storageRebate
+      owner {
+        ${GQL_F_OWNER}
+      }
+      previousTransaction { digest }
+      asMoveObject {
+        hasPublicTransfer
+        ${GQL_F_CONTENTS_TYPE_JSON}
+      }
+      asMovePackage {
+        modules(first: 1) {
+          pageInfo { hasNextPage endCursor }
+          nodes { name }
+        }
+      }
+    }
+  }`, { id: idNorm }));
+}
+
 async function renderTxDetail(app, digest) {
   const localRouteToken = routeRenderToken;
   const shellData = await fetchTxShell(digest, false);
@@ -5257,6 +5334,7 @@ async function renderTxDetail(app, digest) {
     setRouteViewCacheEntry(routeCacheKey(getRoute()), app.innerHTML);
     scheduleUiEnhancements();
     scheduleVisibleRouteShellPrefetch(app);
+    scheduleVisibleObjectShellPrefetch(app);
   }
 
   function renderTxView() {
@@ -10073,6 +10151,7 @@ async function renderAddress(app, addr) {
         data-action="addr-switch-tab" data-tab="${t}">${labels[t]}${counts[t] ? " (" + counts[t] + ")" : ""}</div>`
     ).join("");
     document.getElementById("addr-tab-content").innerHTML = tabContent[active]();
+    if (app.isConnected) scheduleVisibleObjectShellPrefetch(app);
 
     // Lazy-load DeFi data when tab is clicked
     if (active === "defi" && !defiLoaded) {
@@ -10645,25 +10724,7 @@ async function renderObjectDetail(app, id) {
     return;
   }
 
-  const data = await gql(`query($id: SuiAddress!) {
-    object(address: $id) {
-      address version digest storageRebate
-      owner {
-        ${GQL_F_OWNER}
-      }
-      previousTransaction { digest }
-      asMoveObject {
-        hasPublicTransfer
-        ${GQL_F_CONTENTS_TYPE_JSON}
-      }
-      asMovePackage {
-        modules(first: 1) {
-          pageInfo { hasNextPage endCursor }
-          nodes { name }
-        }
-      }
-    }
-  }`, { id: idNorm });
+  const data = await fetchObjectShell(idNorm, false);
 
   const obj = data.object;
   if (!obj) {
@@ -11284,6 +11345,7 @@ async function renderObjectDetail(app, id) {
     } else {
       contentEl.innerHTML = tabContent[active]();
     }
+    if (app.isConnected) scheduleVisibleObjectShellPrefetch(app);
   }
 
   app.innerHTML = `
