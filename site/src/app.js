@@ -422,8 +422,37 @@ const DEFI_WINDOW_PRESETS = {
   "6H": { label: "6H", hours: 6, maxCalls: 12, maxMs: 9000, pageSize: 50 },
   "24H": { label: "24H", hours: 24, maxCalls: 18, maxMs: 14000, pageSize: 50 },
 };
+const DEFI_WINDOW_SAMPLE_PROJECTIONS = Object.freeze({
+  base: {
+    includeCommands: true,
+    includeBalanceChanges: false,
+    includeObjectChanges: false,
+    includeEvents: false,
+    includeGasEffects: false,
+  },
+  flow: {
+    includeCommands: true,
+    includeBalanceChanges: true,
+    includeObjectChanges: false,
+    includeEvents: false,
+    includeGasEffects: false,
+  },
+  package: {
+    includeCommands: true,
+    includeBalanceChanges: false,
+    includeObjectChanges: true,
+    includeEvents: true,
+    includeGasEffects: true,
+  },
+  full: {
+    includeCommands: true,
+    includeBalanceChanges: true,
+    includeObjectChanges: true,
+    includeEvents: true,
+    includeGasEffects: true,
+  },
+});
 const DEFI_WINDOW_SAMPLE_TTL_MS = 20 * 1000;
-const DEFI_WINDOW_SHARED_TTL_MS = 20 * 1000;
 const DASH_EPOCHS_TTL_MS = 60 * 1000;
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
@@ -440,8 +469,13 @@ const defiDexCacheByWindow = {};
 const defiStablecoinsCacheByWindow = {};
 const defiFlowsCacheByWindow = {};
 const packageActivityCacheByWindow = {};
-const defiWindowSampleCache = {};
-const defiWindowSharedCache = {};
+const defiOverviewParityCacheByWindow = {};
+const defiWindowSampleCacheByProjection = {
+  base: {},
+  flow: {},
+  package: {},
+  full: {},
+};
 let dashboardEpochsCache = { data: null, ts: 0, inFlight: null };
 
 // Known coin type address prefixes → { symbol, decimals }
@@ -694,6 +728,10 @@ function parseDefiWindowAndForce(windowOrForce, forceMaybe = false) {
     windowKey: normalizeDefiWindowKey(windowOrForce),
     force: !!forceMaybe,
   };
+}
+
+function normalizeDefiWindowProjection(projection = "full") {
+  return DEFI_WINDOW_SAMPLE_PROJECTIONS[projection] ? projection : "full";
 }
 
 function renderDefiWindowSelect(windowKey, changeAction) {
@@ -6453,10 +6491,12 @@ function parseTsMs(ts) {
   return Number.isFinite(n) ? n : NaN;
 }
 
-async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
+async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false, projectionMaybe = "full") {
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
+  const projectionKey = normalizeDefiWindowProjection(projectionMaybe);
+  const projection = DEFI_WINDOW_SAMPLE_PROJECTIONS[projectionKey];
   const preset = DEFI_WINDOW_PRESETS[windowKey] || DEFI_WINDOW_PRESETS[DEFI_WINDOW_DEFAULT_KEY];
-  const cacheState = getKeyedCacheState(defiWindowSampleCache, windowKey);
+  const cacheState = getKeyedCacheState(defiWindowSampleCacheByProjection[projectionKey], windowKey);
 
   return withTimedCache(cacheState, DEFI_WINDOW_SAMPLE_TTL_MS, force, async () => {
     const t0 = performance.now();
@@ -6475,6 +6515,37 @@ async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW
     let reachedWindowStart = false;
 
     while (hasOlder && callsUsed < preset.maxCalls && (performance.now() - t0) < preset.maxMs) {
+      const effectFields = [
+        "status",
+        "timestamp",
+        "checkpoint { sequenceNumber }",
+      ];
+      if (projection.includeGasEffects) {
+        effectFields.push("gasEffects { gasSummary { computationCost storageCost storageRebate } }");
+      }
+      if (projection.includeBalanceChanges) {
+        effectFields.push(`balanceChanges(first: 40) { nodes { ${GQL_F_BAL_NODE} } }`);
+      }
+      if (projection.includeObjectChanges) {
+        effectFields.push(`objectChanges(first: 10) {
+          nodes {
+            address
+            idCreated
+            idDeleted
+            inputState { ${GQL_F_MOVE_TYPE} }
+            outputState { ${GQL_F_MOVE_TYPE} }
+          }
+        }`);
+      }
+      if (projection.includeEvents) {
+        effectFields.push(`events(first: 10) {
+          nodes {
+            contents { type { repr } }
+            sender { address }
+            timestamp
+          }
+        }`);
+      }
       const q = `query($before: String) {
         transactions(last: ${preset.pageSize}, before: $before, filter: { kind: PROGRAMMABLE_TX }) {
           pageInfo { hasPreviousPage startCursor }
@@ -6482,26 +6553,7 @@ async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW
             digest
             sender { address }
             effects {
-              status
-              timestamp
-              checkpoint { sequenceNumber }
-              balanceChanges(first: 40) { nodes { ${GQL_F_BAL_NODE} } }
-              objectChanges(first: 10) {
-                nodes {
-                  address
-                  idCreated
-                  idDeleted
-                  inputState { ${GQL_F_MOVE_TYPE} }
-                  outputState { ${GQL_F_MOVE_TYPE} }
-                }
-              }
-              events(first: 10) {
-                nodes {
-                  contents { type { repr } }
-                  sender { address }
-                  timestamp
-                }
-              }
+              ${effectFields.join("\n")}
             }
             kind {
               __typename
@@ -6582,6 +6634,7 @@ async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW
       fetchedAt: new Date().toISOString(),
       txs: inWindow,
       coverage: {
+        projection: projectionKey,
         windowKey,
         windowLabel: preset.label,
         windowHours: preset.hours,
@@ -6964,26 +7017,6 @@ function buildDefiFlowFromTxs(txs = [], sharedCoverage = {}) {
   };
 }
 
-async function fetchDefiWindowSharedDataset(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
-  const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
-  const cacheState = getKeyedCacheState(defiWindowSharedCache, windowKey);
-  return withTimedCache(cacheState, DEFI_WINDOW_SHARED_TTL_MS, force, async () => {
-    await fetchDefiPrices();
-    const sample = await fetchDeterministicDefiWindowSample(windowKey, force);
-    const txs = sample?.txs || [];
-    const activity = buildDefiActivityFromTxs(txs, sample.coverage || {});
-    return {
-      fetchedAt: new Date().toISOString(),
-      txs,
-      window: sample.coverage || {},
-      activity,
-      packages: buildPackageActivityFromTxs(txs, sample.coverage || {}),
-      dex: buildDefiDexFromActivity(activity, sample.coverage || {}),
-      flows: buildDefiFlowFromTxs(txs, sample.coverage || {}),
-    };
-  });
-}
-
 async function fetchGraphqlServiceConfig(force = false) {
   return withTimedCache(gqlServiceConfigCache, GQL_SERVICE_CONFIG_TTL_MS, force, async () => {
     const data = await gql(`{ serviceConfig { maxMultiGetSize queryTimeoutMs maxQueryDepth maxQueryNodes maxQueryPayloadSize } }`);
@@ -7277,20 +7310,22 @@ async function fetchRecentDefiActivity(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KE
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const cacheState = getKeyedCacheState(defiActivityCacheByWindow, windowKey);
   return withTimedCache(cacheState, DEFI_ACTIVITY_TTL_MS, force, async () => {
-    const shared = await fetchDefiWindowSharedDataset(windowKey, force);
+    const sample = await fetchDeterministicDefiWindowSample(windowKey, force, "base");
+    const txs = sample?.txs || [];
+    const activity = buildDefiActivityFromTxs(txs, sample.coverage || {});
     return {
       fetchedAt: new Date().toISOString(),
-      sampleSize: shared?.window?.txInWindow || 0,
-      txRows: shared?.activity?.txRows || [],
-      protocols: shared?.activity?.protocols || [],
-      categories: shared?.activity?.categories || {},
-      uniquePackages: shared?.window?.uniquePackages || 0,
-      successRate: shared?.activity?.successRate || 0,
+      sampleSize: sample?.coverage?.txInWindow || 0,
+      txRows: activity?.txRows || [],
+      protocols: activity?.protocols || [],
+      categories: activity?.categories || {},
+      uniquePackages: sample?.coverage?.uniquePackages || 0,
+      successRate: activity?.successRate || 0,
       coverage: {
-        ...(shared?.activity?.coverage || {}),
-        sampleCoverage: shared?.window || {},
+        ...(activity?.coverage || {}),
+        sampleCoverage: sample?.coverage || {},
       },
-      window: shared?.window || {},
+      window: sample?.coverage || {},
     };
   });
 }
@@ -7299,18 +7334,57 @@ async function fetchPackageActivitySnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAU
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const cacheState = getKeyedCacheState(packageActivityCacheByWindow, windowKey);
   return withTimedCache(cacheState, PACKAGE_ACTIVITY_TTL_MS, force, async () => {
-    const shared = await fetchDefiWindowSharedDataset(windowKey, force);
+    const sample = await fetchDeterministicDefiWindowSample(windowKey, force, "package");
+    const packages = buildPackageActivityFromTxs(sample?.txs || [], sample?.coverage || {});
     return {
       fetchedAt: new Date().toISOString(),
-      sampleSize: shared?.window?.txInWindow || 0,
-      packages: shared?.packages?.packages || [],
+      sampleSize: sample?.coverage?.txInWindow || 0,
+      packages: packages?.packages || [],
       coverage: {
-        ...(shared?.packages?.coverage || {}),
-        sampleCoverage: shared?.window || {},
+        ...(packages?.coverage || {}),
+        sampleCoverage: sample?.coverage || {},
       },
-      unresolvedPackages: shared?.packages?.unresolvedPackages || [],
-      window: shared?.window || {},
+      unresolvedPackages: packages?.unresolvedPackages || [],
+      window: sample?.coverage || {},
     };
+  });
+}
+
+async function fetchDefiOverviewParity(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false) {
+  const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
+  const cacheState = getKeyedCacheState(defiOverviewParityCacheByWindow, windowKey);
+  return withTimedCache(cacheState, DEFI_OVERVIEW_TTL_MS, force, async () => {
+    const [baseSample, packagesSnapshot, dexSnapshot] = await Promise.all([
+      fetchDeterministicDefiWindowSample(windowKey, force, "base"),
+      fetchPackageActivitySnapshot(windowKey, force),
+      fetchDefiDexSnapshot(windowKey, force),
+    ]);
+    const overviewPackages = buildPackageActivityFromTxs(baseSample?.txs || [], baseSample?.coverage || {});
+    const overviewDex = buildDefiDexFromActivity(
+      buildDefiActivityFromTxs(baseSample?.txs || [], baseSample?.coverage || {}),
+      baseSample?.coverage || {}
+    );
+    const parity = {
+      windowKey,
+      windowLabel: baseSample?.coverage?.windowLabel || packagesSnapshot?.window?.windowLabel || dexSnapshot?.window?.windowLabel || "",
+      packagesRowsOverview: overviewPackages?.coverage?.uniquePackages || 0,
+      packagesRowsPackages: packagesSnapshot?.coverage?.uniquePackages || 0,
+      dexProtocolsOverview: overviewDex?.dexProtocols?.length || 0,
+      dexProtocolsDex: dexSnapshot?.dexProtocols?.length || 0,
+      dexTrackedTxOverview: overviewDex?.coverage?.trackedTxs || 0,
+      dexTrackedTxDex: dexSnapshot?.coverage?.trackedTxs || 0,
+      mismatches: [],
+    };
+    if (parity.packagesRowsOverview !== parity.packagesRowsPackages) {
+      parity.mismatches.push(`packages rows mismatch (${fmtNumber(parity.packagesRowsOverview)} vs ${fmtNumber(parity.packagesRowsPackages)})`);
+    }
+    if (parity.dexProtocolsOverview !== parity.dexProtocolsDex) {
+      parity.mismatches.push(`dex protocol count mismatch (${fmtNumber(parity.dexProtocolsOverview)} vs ${fmtNumber(parity.dexProtocolsDex)})`);
+    }
+    if (parity.dexTrackedTxOverview !== parity.dexTrackedTxDex) {
+      parity.mismatches.push(`dex tracked tx mismatch (${fmtNumber(parity.dexTrackedTxOverview)} vs ${fmtNumber(parity.dexTrackedTxDex)})`);
+    }
+    return parity;
   });
 }
 
@@ -7413,14 +7487,11 @@ async function fetchDefiOverviewSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_
   const cacheState = getKeyedCacheState(defiOverviewCacheByWindow, windowKey);
   return withTimedCache(cacheState, DEFI_OVERVIEW_TTL_MS, force, async () => {
     await fetchDefiPrices();
-    const [activity, lending, stable, lst, shared, packagesSnapshot, dexSnapshot] = await Promise.all([
+    const [activity, lending, stable, lst] = await Promise.all([
       fetchRecentDefiActivity(windowKey, force),
       fetchLendingRatesOverview(force),
       fetchStablecoinSupply(),
       fetchDefiLstSnapshot(force),
-      fetchDefiWindowSharedDataset(windowKey, force),
-      fetchPackageActivitySnapshot(windowKey, force),
-      fetchDefiDexSnapshot(windowKey, force),
     ]);
     const lendingLive = ["SUI", "USDC"].reduce((acc, token) => {
       const rows = lending?.byToken?.[token] || [];
@@ -7446,26 +7517,6 @@ async function fetchDefiOverviewSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_
         ? `${((coverage.highConfidenceTx || 0) / coverage.trackedTxs * 100).toFixed(1)}% of tracked txs are high-confidence mapped; ${fmtNumber(coverage.lowConfidenceTx || 0)} are low-confidence.`
         : "Coverage metrics are not available for this sample.",
     ];
-    const parity = {
-      windowKey,
-      windowLabel: shared?.window?.windowLabel || "",
-      packagesRowsOverview: shared?.packages?.coverage?.uniquePackages || 0,
-      packagesRowsPackages: packagesSnapshot?.coverage?.uniquePackages || 0,
-      dexProtocolsOverview: shared?.dex?.dexProtocols?.length || 0,
-      dexProtocolsDex: dexSnapshot?.dexProtocols?.length || 0,
-      dexTrackedTxOverview: shared?.dex?.coverage?.trackedTxs || 0,
-      dexTrackedTxDex: dexSnapshot?.coverage?.trackedTxs || 0,
-      mismatches: [],
-    };
-    if (parity.packagesRowsOverview !== parity.packagesRowsPackages) {
-      parity.mismatches.push(`packages rows mismatch (${fmtNumber(parity.packagesRowsOverview)} vs ${fmtNumber(parity.packagesRowsPackages)})`);
-    }
-    if (parity.dexProtocolsOverview !== parity.dexProtocolsDex) {
-      parity.mismatches.push(`dex protocol count mismatch (${fmtNumber(parity.dexProtocolsOverview)} vs ${fmtNumber(parity.dexProtocolsDex)})`);
-    }
-    if (parity.dexTrackedTxOverview !== parity.dexTrackedTxDex) {
-      parity.mismatches.push(`dex tracked tx mismatch (${fmtNumber(parity.dexTrackedTxOverview)} vs ${fmtNumber(parity.dexTrackedTxDex)})`);
-    }
     return {
       fetchedAt: new Date().toISOString(),
       activity,
@@ -7477,8 +7528,7 @@ async function fetchDefiOverviewSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_
       suiPrice: defiPrices.SUI || 0,
       coverage,
       signals,
-      window: shared?.window || {},
-      parity,
+      window: activity?.window || {},
     };
   });
 }
@@ -7488,11 +7538,8 @@ async function fetchDefiDexSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, 
   const cacheState = getKeyedCacheState(defiDexCacheByWindow, windowKey);
   return withTimedCache(cacheState, DEFI_DEX_TTL_MS, force, async () => {
     await fetchDefiPrices();
-    const [activity, shared] = await Promise.all([
-      fetchRecentDefiActivity(windowKey, force),
-      fetchDefiWindowSharedDataset(windowKey, force),
-    ]);
-    const dexData = shared?.dex || {};
+    const activity = await fetchRecentDefiActivity(windowKey, force);
+    const dexData = buildDefiDexFromActivity(activity, activity?.window || {});
     const dexProtocols = dexData.dexProtocols || [];
     const dexTxRows = dexData.dexTxRows || [];
     const successRate = dexData.successRate || 0;
@@ -7520,7 +7567,7 @@ async function fetchDefiDexSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, 
       successRate,
       coverage,
       signals,
-      window: shared?.window || {},
+      window: activity?.window || {},
     };
   });
 }
@@ -7529,9 +7576,9 @@ async function fetchRecentStablecoinFlowsSample(windowKeyOrForce = DEFI_WINDOW_D
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   await fetchDefiPrices();
   const stableKeys = getStableSymbolKeys();
-  const shared = await fetchDefiWindowSharedDataset(windowKey, force);
-  const txs = shared?.txs || [];
-  const sampleCoverage = shared?.window || {};
+  const sample = await fetchDeterministicDefiWindowSample(windowKey, force, "flow");
+  const txs = sample?.txs || [];
+  const sampleCoverage = sample?.coverage || {};
 
   const bySymbol = {};
   const flows = [];
@@ -7715,8 +7762,8 @@ async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY,
   const cacheState = getKeyedCacheState(defiFlowsCacheByWindow, windowKey);
   return withTimedCache(cacheState, DEFI_FLOWS_TTL_MS, force, async () => {
     await fetchDefiPrices();
-    const shared = await fetchDefiWindowSharedDataset(windowKey, force);
-    const flowData = shared?.flows || {};
+    const sample = await fetchDeterministicDefiWindowSample(windowKey, force, "flow");
+    const flowData = buildDefiFlowFromTxs(sample?.txs || [], sample?.coverage || {});
     const rows = flowData.rows || [];
     const totalUsd = flowData.totalUsd || 0;
     const coverage = flowData.coverage || {};
@@ -7743,7 +7790,7 @@ async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY,
       protocols: flowData.protocols || [],
       coverage,
       signals,
-      window: shared?.window || {},
+      window: sample?.coverage || {},
     };
   });
 }
@@ -13488,6 +13535,34 @@ function renderDefiMethodCard(lines = [], title = "How Computed") {
 function renderDefiParityGuardCard(parity = {}, title = "Cross-Page Parity Guard") {
   if (uiViewMode !== "advanced") return "";
   const p = parity || {};
+  if (p.loading) {
+    return `
+      <div class="card u-mb16">
+        <div class="card-header">${title}</div>
+        <div class="card-body u-p12-16">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="badge" style="background:var(--blue)22;color:var(--blue)">Loading</span>
+            <span class="u-fs12-dim">Window: ${escapeHtml(p.windowLabel || "—")} (${escapeHtml(p.windowKey || "—")})</span>
+          </div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:8px">Package and DEX parity is loading asynchronously after first paint.</div>
+        </div>
+      </div>
+    `;
+  }
+  if (p.error) {
+    return `
+      <div class="card u-mb16">
+        <div class="card-header">${title}</div>
+        <div class="card-body u-p12-16">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="badge" style="background:var(--yellow)22;color:var(--yellow)">Unavailable</span>
+            <span class="u-fs12-dim">Window: ${escapeHtml(p.windowLabel || "—")} (${escapeHtml(p.windowKey || "—")})</span>
+          </div>
+          <div style="font-size:12px;color:var(--yellow);margin-top:8px">${escapeHtml(p.error)}</div>
+        </div>
+      </div>
+    `;
+  }
   const mismatches = Array.isArray(p.mismatches) ? p.mismatches : [];
   const ok = !mismatches.length;
   const statusColor = ok ? "var(--green)" : "var(--yellow)";
@@ -13612,8 +13687,9 @@ async function renderPackages(app) {
   let selectedPkg = normalizeSuiAddress(routeParams.get("pkg")) || data?.packages?.[0]?.package || "";
   let detailData = null;
   let detailErr = "";
-  let detailLoading = false;
+  let detailLoading = !!selectedPkg;
   let detailReqId = 0;
+  let initialDetailLoadPromise = null;
 
   function persistPackagesState() {
     setRouteParams({
@@ -13681,6 +13757,19 @@ async function renderPackages(app) {
         if (rerender) app.innerHTML = renderContent();
       }
     }
+  }
+
+  async function ensureInitialPackageDetail(force = false) {
+    if (!selectedPkg) return null;
+    if (initialDetailLoadPromise && !force) return initialDetailLoadPromise;
+    initialDetailLoadPromise = (async () => {
+      try {
+        await loadDetail(selectedPkg, force, false);
+      } finally {
+        if (app.isConnected) app.innerHTML = renderContent();
+      }
+    })();
+    return initialDetailLoadPromise;
   }
 
   function renderTopList(title, rows, kind = "text") {
@@ -13964,8 +14053,12 @@ async function renderPackages(app) {
     app.innerHTML = renderLoading();
     data = await fetchPackageActivitySnapshot(windowKey, false);
     if (!data.packages.some(r => r.package === selectedPkg)) selectedPkg = data.packages[0]?.package || "";
-    await loadDetail(selectedPkg, false, false);
+    detailData = null;
+    detailErr = "";
+    detailLoading = !!selectedPkg;
+    initialDetailLoadPromise = null;
     app.innerHTML = renderContent();
+    if (selectedPkg) ensureInitialPackageDetail(false).catch(() => {});
   };
   const selectPackage = async (pkg) => {
     await loadDetail(pkg, false);
@@ -13977,8 +14070,12 @@ async function renderPackages(app) {
     app.innerHTML = renderLoading();
     data = await fetchPackageActivitySnapshot(windowKey, true);
     if (!data.packages.some(r => r.package === selectedPkg)) selectedPkg = data.packages[0]?.package || "";
-    await loadDetail(selectedPkg, true, false);
+    detailData = null;
+    detailErr = "";
+    detailLoading = !!selectedPkg;
+    initialDetailLoadPromise = null;
     app.innerHTML = renderContent();
+    if (selectedPkg) ensureInitialPackageDetail(true).catch(() => {});
   };
   if (app._packagesInputHandler) app.removeEventListener("input", app._packagesInputHandler);
   const _debouncedPkgQuery = debounce((val) => setPackagesQuery(val), 300);
@@ -14037,8 +14134,11 @@ async function renderPackages(app) {
   };
   app.addEventListener("click", app._packagesClickHandler);
 
-  if (selectedPkg) await loadDetail(selectedPkg, false, false);
   app.innerHTML = renderContent();
+  setTimeout(() => {
+    if (!app.isConnected || !selectedPkg) return;
+    ensureInitialPackageDetail(false).catch(() => {});
+  }, 0);
 }
 
 // ── DeFi Overview ──────────────────────────────────────────────────────
@@ -14056,6 +14156,10 @@ async function renderDefiOverview(app) {
   let historyErr = "";
   let historyLoading = false;
   let historyReqId = 0;
+  let parityData = null;
+  let parityErr = "";
+  let parityLoading = false;
+  let parityReqId = 0;
 
   function persistDefiOverviewState() {
     setRouteParams({
@@ -14091,6 +14195,28 @@ async function renderDefiOverview(app) {
     } finally {
       if (reqId === historyReqId) {
         historyLoading = false;
+        if (rerender) app.innerHTML = renderContent();
+      }
+    }
+  }
+
+  async function loadParity(force = false, rerender = true) {
+    const reqId = ++parityReqId;
+    parityLoading = true;
+    parityErr = "";
+    if (rerender) app.innerHTML = renderContent();
+    try {
+      const next = await fetchDefiOverviewParity(windowKey, force);
+      if (reqId !== parityReqId) return;
+      parityData = next;
+      parityErr = "";
+    } catch (e) {
+      if (reqId !== parityReqId) return;
+      parityData = null;
+      parityErr = e?.message || "Failed to load cross-page parity.";
+    } finally {
+      if (reqId === parityReqId) {
+        parityLoading = false;
         if (rerender) app.innerHTML = renderContent();
       }
     }
@@ -14143,7 +14269,25 @@ async function renderDefiOverview(app) {
       "SUI spot price is sourced from DeepBook SUI/USDC pool events and used for derived USD metrics.",
     ]);
     const signals = renderDefiSignalsCard(data.signals || []);
-    const parityCard = renderDefiParityGuardCard(data.parity || {});
+    const parityCard = renderDefiParityGuardCard(
+      parityLoading
+        ? {
+            loading: true,
+            windowKey,
+            windowLabel: sampleCoverage.windowLabel || "",
+          }
+        : (parityErr
+          ? {
+              error: parityErr,
+              windowKey,
+              windowLabel: sampleCoverage.windowLabel || "",
+            }
+          : (parityData || {
+              loading: true,
+              windowKey,
+              windowLabel: sampleCoverage.windowLabel || "",
+            }))
+    );
     const hs = historyData?.stats || {};
     const hc = historyData?.coverage || {};
     const hp = historyData?.performance || {};
@@ -14319,8 +14463,20 @@ async function renderDefiOverview(app) {
     persistDefiOverviewState();
     app.innerHTML = renderLoading();
     data = await fetchDefiOverviewSnapshot(windowKey, false);
-    await loadHistory(false, false);
+    historyReqId += 1;
+    parityReqId += 1;
+    historyData = null;
+    historyErr = "";
+    historyLoading = true;
+    parityData = null;
+    parityErr = "";
+    parityLoading = true;
     app.innerHTML = renderContent();
+    setTimeout(() => {
+      if (!app.isConnected) return;
+      loadHistory(false).catch(() => {});
+      loadParity(false).catch(() => {});
+    }, 0);
   };
   const setDefiHistoryMetric = async (v) => {
     historyMetric = v === "object" ? "object" : "network";
@@ -14346,8 +14502,20 @@ async function renderDefiOverview(app) {
   const refreshDefiOverview = async () => {
     app.innerHTML = renderLoading();
     data = await fetchDefiOverviewSnapshot(windowKey, true);
-    await loadHistory(true, false);
+    historyReqId += 1;
+    parityReqId += 1;
+    historyData = null;
+    historyErr = "";
+    historyLoading = true;
+    parityData = null;
+    parityErr = "";
+    parityLoading = true;
     app.innerHTML = renderContent();
+    setTimeout(() => {
+      if (!app.isConnected) return;
+      loadHistory(true).catch(() => {});
+      loadParity(true).catch(() => {});
+    }, 0);
   };
   if (app._defiOverviewChangeHandler) app.removeEventListener("change", app._defiOverviewChangeHandler);
   app._defiOverviewChangeHandler = async (ev) => {
@@ -14399,10 +14567,12 @@ async function renderDefiOverview(app) {
   };
   app.addEventListener("click", app._defiOverviewClickHandler);
   historyLoading = true;
+  parityLoading = true;
   app.innerHTML = renderContent();
   setTimeout(() => {
     if (!app.isConnected) return;
     loadHistory(false).catch(() => {});
+    loadParity(false).catch(() => {});
   }, 0);
 }
 
