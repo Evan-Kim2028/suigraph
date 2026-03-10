@@ -8986,6 +8986,8 @@ async function renderAddress(app, addr) {
   let allObjects = a.objects?.nodes || [];
   let objPageInfo = a.objects?.pageInfo || {};
   const name = a.defaultNameRecord?.domain;
+  let activeTab = "txs";
+  let initialTxLoadPromise = null;
 
   // DeFi data is loaded only when the user opens the DeFi tab.
   let defiLoaded = false;
@@ -9045,9 +9047,20 @@ async function renderAddress(app, addr) {
     }
   }
 
+  async function ensureInitialAddressTransactions() {
+    if (initialTxLoadPromise) return initialTxLoadPromise;
+    initialTxLoadPromise = (async () => {
+      try {
+        await loadAddressTransactions(null, false);
+      } finally {
+        txLoading = false;
+        if (app.isConnected) renderTabs(activeTab);
+      }
+    })();
+    return initialTxLoadPromise;
+  }
+
   txLoading = true;
-  await loadAddressTransactions(null, false);
-  txLoading = false;
 
   const tabContent = {
     txs: () => {
@@ -9543,6 +9556,7 @@ async function renderAddress(app, addr) {
   }
 
   function renderTabs(active) {
+    activeTab = active;
     const tabs = ["defi", "txs", "objects"];
     const labels = { defi: "DeFi Portfolio", txs: "Transactions", objects: "Owned Objects" };
     const counts = { defi: "", txs: allTxs.length + (txPageInfo.hasPreviousPage ? "+" : ""), objects: allObjects.length + (objPageInfo.hasNextPage ? "+" : "") };
@@ -9675,6 +9689,10 @@ async function renderAddress(app, addr) {
   };
   app.addEventListener("click", app._addressClickHandler);
   renderTabs("txs");
+  setTimeout(() => {
+    if (!app.isConnected) return;
+    ensureInitialAddressTransactions().catch(() => {});
+  }, 0);
 }
 
 // ── Object Detail ───────────────────────────────────────────────────────
@@ -14380,8 +14398,12 @@ async function renderDefiOverview(app) {
     }
   };
   app.addEventListener("click", app._defiOverviewClickHandler);
-  await loadHistory(false, false);
+  historyLoading = true;
   app.innerHTML = renderContent();
+  setTimeout(() => {
+    if (!app.isConnected) return;
+    loadHistory(false).catch(() => {});
+  }, 0);
 }
 
 // ── DeFi DEX ───────────────────────────────────────────────────────────
