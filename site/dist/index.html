@@ -5124,7 +5124,8 @@ const TX_LIST_CHECKPOINT_PADDING = 2;
 const txListCheckpointTsCache = {};
 const txListCheckpointTsInFlight = {};
 const txListCheckpointHints = [];
-let txListLatestCheckpointCache = { seq: 0, tsMs: NaN, at: 0 };
+let latestCheckpointHeadCache = { seq: 0, tsMs: NaN, at: 0 };
+let latestCheckpointHeadInFlight = null;
 
 function txListNormalizeDateState(state = {}) {
   const rawPreset = String(state.preset || "all");
@@ -5358,24 +5359,33 @@ function txListDownloadCsv(filename, csvContent) {
   URL.revokeObjectURL(url);
 }
 
-async function txListFetchLatestCheckpointHead(force = false) {
+async function fetchLatestCheckpointHead(force = false) {
   const now = Date.now();
   if (!force
-    && Number.isFinite(txListLatestCheckpointCache.seq)
-    && Number.isFinite(txListLatestCheckpointCache.tsMs)
-    && (now - txListLatestCheckpointCache.at) < TX_LIST_LATEST_CHECKPOINT_TTL_MS) {
-    return txListLatestCheckpointCache;
+    && Number.isFinite(latestCheckpointHeadCache.seq)
+    && Number.isFinite(latestCheckpointHeadCache.tsMs)
+    && (now - latestCheckpointHeadCache.at) < TX_LIST_LATEST_CHECKPOINT_TTL_MS) {
+    return { ...latestCheckpointHeadCache, fromCache: true };
   }
-  const data = await gql(GQL_Q_LATEST_CHECKPOINT);
-  const seq = Number(data?.checkpoint?.sequenceNumber || 0);
-  const tsMs = parseTsMs(data?.checkpoint?.timestamp);
-  txListLatestCheckpointCache = {
-    seq: Number.isFinite(seq) ? seq : 0,
-    tsMs: Number.isFinite(tsMs) ? tsMs : NaN,
-    at: now,
-  };
-  txListRememberCheckpointHint(txListLatestCheckpointCache.tsMs, txListLatestCheckpointCache.seq);
-  return txListLatestCheckpointCache;
+  if (latestCheckpointHeadInFlight) return latestCheckpointHeadInFlight;
+  latestCheckpointHeadInFlight = (async () => {
+    const data = await gql(GQL_Q_LATEST_CHECKPOINT);
+    const seq = Number(data?.checkpoint?.sequenceNumber || 0);
+    const tsMs = parseTsMs(data?.checkpoint?.timestamp);
+    latestCheckpointHeadCache = {
+      seq: Number.isFinite(seq) ? seq : 0,
+      tsMs: Number.isFinite(tsMs) ? tsMs : NaN,
+      at: Date.now(),
+    };
+    return { ...latestCheckpointHeadCache, fromCache: false };
+  })().finally(() => { latestCheckpointHeadInFlight = null; });
+  return latestCheckpointHeadInFlight;
+}
+
+async function txListFetchLatestCheckpointHead(force = false) {
+  const head = await fetchLatestCheckpointHead(force);
+  txListRememberCheckpointHint(head.tsMs, head.seq);
+  return head;
 }
 
 async function txListFetchCheckpointTimestampMs(sequenceNumber) {
@@ -7140,42 +7150,78 @@ async function fetchStablecoinSupply() {
   notePerfCache(false);
   try {
     const coins = [];
+    const pushCoin = (symbol, supply, color) => {
+      if (!(Number.isFinite(supply) && supply > 0)) return;
+      coins.push({ symbol, supply, color });
+    };
 
-    // Strategy 1: coinMetadata.supply (batched, max 3 per request to stay under query limit)
-    for (let i = 0; i < STABLECOINS_METADATA.length; i += 3) {
-      const batch = STABLECOINS_METADATA.slice(i, i + 3);
-      const aliases = batch.map((s, j) => `s${j}: coinMetadata(coinType: "${s.type}") { supply }`);
-      const data = await gql(`{ ${aliases.join("\n")} }`);
-      batch.forEach((s, j) => {
-        const raw = data?.[`s${j}`]?.supply;
-        if (raw) coins.push({ symbol: s.symbol, supply: Number(raw) / Math.pow(10, s.decimals), color: s.color });
-      });
-    }
-
-    // Strategy 2: Wormhole token_registry dynamic field (wrapped TreasuryCaps)
-    for (const wh of STABLECOINS_WORMHOLE) {
-      try {
-        const keyType = `${WORMHOLE_KEY_PKG}::token_registry::Key<${wh.type}>`;
-        const data = await gql(`{ address(address: "${WORMHOLE_REGISTRY}") { dynamicField(name: { type: "${keyType}", bcs: "AA==" }) { value { ... on MoveValue { json } } } } }`);
-        const j = data?.address?.dynamicField?.value?.json;
-        if (j?.treasury_cap?.total_supply?.value) {
-          const supply = Number(j.treasury_cap.total_supply.value) / Math.pow(10, j.decimals || wh.decimals);
-          coins.push({ symbol: wh.symbol, supply, color: wh.color });
+    const [metadataRows, wormholeRows, protocolRows] = await Promise.all([
+      Promise.all(chunkArray(STABLECOINS_METADATA, 3).map(async (batch) => {
+        try {
+          const aliases = batch.map((s, j) => `s${j}: coinMetadata(coinType: "${s.type}") { supply }`);
+          const data = await gql(`{ ${aliases.join("\n")} }`);
+          return batch.map((s, j) => {
+            const raw = data?.[`s${j}`]?.supply;
+            if (!raw) return null;
+            return {
+              symbol: s.symbol,
+              supply: Number(raw) / Math.pow(10, s.decimals),
+              color: s.color,
+            };
+          }).filter(Boolean);
+        } catch (_) {
+          return [];
         }
-      } catch (_) { /* skip failed wormhole lookups */ }
-    }
-
-    // Strategy 3: Protocol-specific objects (BUCK etc.)
-    for (const p of STABLECOINS_PROTOCOL) {
-      try {
-        const data = await gql(`{ object(address: "${p.objAddr}") { ${GQL_F_MOVE_JSON} } }`);
-        const json = data?.object?.asMoveObject?.contents?.json;
-        if (json) {
-          const val = p.supplyPath.split(".").reduce((o, k) => o?.[k], json);
-          if (val) coins.push({ symbol: p.symbol, supply: Number(val) / Math.pow(10, p.decimals), color: p.color });
+      })),
+      (async () => {
+        if (!STABLECOINS_WORMHOLE.length) return [];
+        try {
+          const fields = STABLECOINS_WORMHOLE.map((wh, i) => {
+            const keyType = `${WORMHOLE_KEY_PKG}::token_registry::Key<${wh.type}>`;
+            return `w${i}: dynamicField(name: { type: "${keyType}", bcs: "AA==" }) { value { ... on MoveValue { json } } }`;
+          });
+          const data = await gql(`{ address(address: "${WORMHOLE_REGISTRY}") { ${fields.join("\n")} } }`);
+          const registry = data?.address || {};
+          return STABLECOINS_WORMHOLE.map((wh, i) => {
+            const j = registry?.[`w${i}`]?.value?.json;
+            if (!j?.treasury_cap?.total_supply?.value) return null;
+            return {
+              symbol: wh.symbol,
+              supply: Number(j.treasury_cap.total_supply.value) / Math.pow(10, j.decimals || wh.decimals),
+              color: wh.color,
+            };
+          }).filter(Boolean);
+        } catch (_) {
+          return [];
         }
-      } catch (_) { /* skip failed protocol lookups */ }
+      })(),
+      (async () => {
+        if (!STABLECOINS_PROTOCOL.length) return [];
+        try {
+          const fields = STABLECOINS_PROTOCOL.map((p, i) => `p${i}: object(address: "${p.objAddr}") { ${GQL_F_MOVE_JSON} }`);
+          const data = await gql(`{ ${fields.join("\n")} }`);
+          return STABLECOINS_PROTOCOL.map((p, i) => {
+            const json = data?.[`p${i}`]?.asMoveObject?.contents?.json;
+            if (!json) return null;
+            const val = p.supplyPath.split(".").reduce((o, k) => o?.[k], json);
+            if (!val) return null;
+            return {
+              symbol: p.symbol,
+              supply: Number(val) / Math.pow(10, p.decimals),
+              color: p.color,
+            };
+          }).filter(Boolean);
+        } catch (_) {
+          return [];
+        }
+      })(),
+    ]);
+
+    for (const rows of metadataRows) {
+      for (const row of rows) pushCoin(row.symbol, row.supply, row.color);
     }
+    for (const row of wormholeRows) pushCoin(row.symbol, row.supply, row.color);
+    for (const row of protocolRows) pushCoin(row.symbol, row.supply, row.color);
 
     coins.sort((a, b) => b.supply - a.supply);
     const totalSupply = coins.reduce((sum, c) => sum + c.supply, 0);
@@ -7542,15 +7588,15 @@ async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW
 
   return withTimedCache(cacheState, DEFI_WINDOW_SAMPLE_TTL_MS, force, async () => {
     const t0 = performance.now();
-    const latestData = await gql(GQL_Q_LATEST_CHECKPOINT);
-    const latestCheckpoint = Number(latestData?.checkpoint?.sequenceNumber || 0);
-    const latestTsMs = parseTsMs(latestData?.checkpoint?.timestamp);
+    const latestHead = await fetchLatestCheckpointHead(force);
+    const latestCheckpoint = Number(latestHead?.seq || 0);
+    const latestTsMs = Number(latestHead?.tsMs);
     if (!latestCheckpoint || !Number.isFinite(latestTsMs)) throw new Error("Could not read latest checkpoint for DeFi window sampling.");
 
     const windowStartMs = latestTsMs - (preset.hours * 60 * 60 * 1000);
     const windowStartIso = new Date(windowStartMs).toISOString();
     let before = null;
-    let callsUsed = 1; // latest checkpoint query
+    let callsUsed = latestHead?.fromCache ? 0 : 1;
     const seenDigests = new Set();
     const fetchedTxs = [];
     let hasOlder = true;
@@ -8082,12 +8128,12 @@ async function fetchGraphqlServiceConfig(force = false) {
 
 async function buildHistoricalCheckpointPlan(days, segmentDays = 5) {
   const t0 = performance.now();
-  const latestData = await gql(GQL_Q_LATEST_CHECKPOINT);
-  const latestCp = Number(latestData?.checkpoint?.sequenceNumber || 0);
-  const latestTs = new Date(latestData?.checkpoint?.timestamp || "").getTime();
+  const latestHead = await fetchLatestCheckpointHead(false);
+  const latestCp = Number(latestHead?.seq || 0);
+  const latestTs = Number(latestHead?.tsMs);
   if (!latestCp || !Number.isFinite(latestTs)) throw new Error("Could not load latest checkpoint for history.");
 
-  let queryCount = 1;
+  let queryCount = latestHead?.fromCache ? 0 : 1;
   const bootstrapCp = Math.max(1, latestCp - DEFI_HISTORY_BOOTSTRAP_CP_DELTA);
   let cpPerDay = 330000;
   if (bootstrapCp < latestCp) {
@@ -8396,6 +8442,48 @@ async function fetchPackageActivitySnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAU
   });
 }
 
+async function fetchPackageModuleNamesByAddress(addresses) {
+  const unique = [...new Set((addresses || []).map(normalizeSuiAddress).filter(Boolean))];
+  const modulesByAddress = {};
+  if (!unique.length) return modulesByAddress;
+
+  for (const chunk of chunkArray(unique, 6)) {
+    const vars = {};
+    const varDefs = [];
+    const fields = [];
+    chunk.forEach((addr, i) => {
+      const varName = `addr${i}`;
+      vars[varName] = addr;
+      varDefs.push(`$${varName}: SuiAddress!`);
+      fields.push(`p${i}: object(address: $${varName}) { asMovePackage { modules(first: 250) { nodes { name } } } }`);
+    });
+
+    try {
+      const data = await gql(`query(${varDefs.join(", ")}) { ${fields.join("\n")} }`, vars);
+      chunk.forEach((addr, i) => {
+        modulesByAddress[addr] = (data?.[`p${i}`]?.asMovePackage?.modules?.nodes || [])
+          .map(m => m?.name)
+          .filter(Boolean);
+      });
+    } catch (_) {
+      await Promise.all(chunk.map(async (addr) => {
+        try {
+          const data = await gql(`query($addr: SuiAddress!) {
+            object(address: $addr) { asMovePackage { modules(first: 250) { nodes { name } } } }
+          }`, { addr });
+          modulesByAddress[addr] = (data?.object?.asMovePackage?.modules?.nodes || [])
+            .map(m => m?.name)
+            .filter(Boolean);
+        } catch (_) {
+          modulesByAddress[addr] = [];
+        }
+      }));
+    }
+  }
+
+  return modulesByAddress;
+}
+
 async function fetchPackageUpgradeSnapshot(pkgAddr, force = false) {
   const pkg = normalizeSuiAddress(pkgAddr);
   if (!pkg) return { package: "", versions: [], moduleDiff: null, modulesByAddress: {} };
@@ -8415,20 +8503,8 @@ async function fetchPackageUpgradeSnapshot(pkgAddr, force = false) {
       .filter(v => v.address)
       .sort((a, b) => a.version - b.version);
 
-    const modulesByAddress = {};
     const versionAddresses = [...new Set(versions.map(v => v.address))].slice(-8);
-    await Promise.all(versionAddresses.map(async (addr) => {
-      try {
-        const mData = await gql(`query($addr: SuiAddress!) {
-          object(address: $addr) { asMovePackage { modules(first: 250) { nodes { name } } } }
-        }`, { addr });
-        modulesByAddress[addr] = (mData?.object?.asMovePackage?.modules?.nodes || [])
-          .map(m => m?.name)
-          .filter(Boolean);
-      } catch (e) {
-        modulesByAddress[addr] = [];
-      }
-    }));
+    const modulesByAddress = await fetchPackageModuleNamesByAddress(versionAddresses);
 
     let moduleDiff = null;
     if (versions.length >= 2) {

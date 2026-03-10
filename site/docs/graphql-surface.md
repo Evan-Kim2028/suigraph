@@ -1,21 +1,20 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T11:05:53.732Z`
+Generated: `2026-03-10T11:15:00.327Z`
 
 | Metric | Value |
 |---|---:|
-| Total `gql(...)` call sites | 98 |
-| Awaited `gql(...)` call sites | 96 |
-| Static template-literal query call sites | 93 |
+| Total `gql(...)` call sites | 97 |
+| Awaited `gql(...)` call sites | 95 |
+| Static template-literal query call sites | 92 |
 | Dynamic/non-literal query call sites | 5 |
-| Unique static query signatures | 86 |
+| Unique static query signatures | 87 |
 
 ## Operations
 
 | Signature | Static call sites | Preview |
 |---|---:|---|
 | `anonymous:b365a39e1d` | 4 | `{ ${aliases.join("\n")} }` |
-| `anonymous:bda79ad960` | 3 | `{ checkpoint { sequenceNumber timestamp } }` |
 | `anonymous:b1bb773cd5` | 2 | `{ epoch { epochId startTimestamp referenceGasPrice validatorSet { activeValidators(first: 50) { ` |
 | `anonymous:e186e83057` | 2 | `query($cp: UInt53!){ checkpoint(sequenceNumber: $cp) { sequenceNumber timestamp } }` |
 | `anonymous:01c04ae2ce` | 1 | `query($table: SuiAddress!, $bcs: Base64!) { address(address: $table) { dynamicField(name: { type` |
@@ -33,15 +32,17 @@ Generated: `2026-03-10T11:05:53.732Z`
 | `anonymous:14313088e2` | 1 | `{ ${fields} }` |
 | `anonymous:15082280fe` | 1 | `query($id: SuiAddress!, $after: String) { object(address: $id) { dynamicFields(first: 20, after:` |
 | `anonymous:15b781180e` | 1 | `query($id: UInt53!) { epoch(epochId: $id) { epochId startTimestamp endTimestamp referenceGasPric` |
-| `anonymous:1ffa0e71ce` | 1 | `{ address(address: "${WORMHOLE_REGISTRY}") { dynamicField(name: { type: "${keyType}", bcs: "AA==` |
 | `anonymous:22d7fb24ba` | 1 | `query($addr: SuiAddress!, $after: String) { address(address: $addr) { objects(first: 20, after: ` |
 | `anonymous:2321391609` | 1 | `query($type: String!, $after: String, $first: Int!) { objects(filter: { type: $type }, first: $f` |
+| `anonymous:25a19011e5` | 1 | `{ ${fields.join("\n")} }` |
 | `anonymous:2ca7d1d9f4` | 1 | `query($addr: SuiAddress!) { address(address: $addr) { address defaultNameRecord { domain } objec` |
 | `anonymous:2ed11ae35c` | 1 | `query($id: SuiAddress!) { firstTx: transactions(first: 1, filter: { affectedObject: $id }) { nod` |
 | `anonymous:313c009287` | 1 | `query($addr: SuiAddress!, $type: String!, $after: String, $first: Int!) { address(address: $addr` |
 | `anonymous:34832c19b8` | 1 | `query($keys: [ObjectKey!]!) { multiGetObjects(keys: $keys) { address asMoveObject { contents { t` |
+| `anonymous:350135aa69` | 1 | `{ address(address: "${WORMHOLE_REGISTRY}") { ${fields.join("\n")} } }` |
 | `anonymous:35b818c0ca` | 1 | `{ epoch(epochId: ${epochId - 1}) { totalStakeRewards totalStakeSubsidies totalGasFees fundSize f` |
 | `anonymous:37d9d78533` | 1 | `query($digest: String!) { transactionEffects(digest: $digest) { status timestamp executionError ` |
+| `anonymous:3a664c4672` | 1 | `query(${varDefs.join(", ")}) { ${fields.join("\n")} }` |
 | `anonymous:3baad530d8` | 1 | `{ address(address: "${ALPHA_POSITIONS_TABLE}") { ${posParts.join("\n")} } }` |
 | `anonymous:4383cddd82` | 1 | `query($keys: [String!]!, $first: Int!) { multiGetTransactionEffects(keys: $keys) { digest status` |
 | `anonymous:462e16f9c8` | 1 | `{ events(last: 50 ${filterArg}) { nodes { contents { type { repr } } sender { address } timestam` |
@@ -82,6 +83,7 @@ Generated: `2026-03-10T11:05:53.732Z`
 | `anonymous:b514b3f838` | 1 | `query($id: SuiAddress!, $after: String, $first: Int!) { object(address: $id) { dynamicFields(fir` |
 | `anonymous:bac8d84117` | 1 | `query($digest: String!) { transaction(digest: $digest) { digest sender { address } gasInput { ga` |
 | `anonymous:bd357d462a` | 1 | `{ transactions(last: 40, filter: { kind: PROGRAMMABLE_TX }) { nodes { digest transactionBcs effe` |
+| `anonymous:bda79ad960` | 1 | `{ checkpoint { sequenceNumber timestamp } }` |
 | `anonymous:c3fbfb3740` | 1 | `{ ${bagParts.join("\n")} }` |
 | `anonymous:c8a66679a9` | 1 | `query($pkg: SuiAddress!) { packageVersions(address: $pkg, last: 20) { nodes { address version pr` |
 | `anonymous:c9259a7fdf` | 1 | `query($tx: JSON!) { simulateTransaction(transaction: $tx, checksEnabled: ${!simSkipChecks}) { ef` |
@@ -92,7 +94,6 @@ Generated: `2026-03-10T11:05:53.732Z`
 | `anonymous:db2fcce76b` | 1 | `{ chainIdentifier serviceConfig { maxMultiGetSize queryTimeoutMs maxQueryDepth maxQueryNodes max` |
 | `anonymous:df83f0a4d6` | 1 | `{ ${obAliases.join("\n")} }` |
 | `anonymous:e60dab97bc` | 1 | `query($id: SuiAddress!, $before: String) { objectVersions(address: $id, last: 20, before: $befor` |
-| `anonymous:e97b834867` | 1 | `{ object(address: "${p.objAddr}") { asMoveObject { contents { json } } } }` |
 | `anonymous:edc6600b90` | 1 | `query($id: SuiAddress!) { object(address: $id) { address version digest storageRebate owner { ..` |
 | `anonymous:f1dbd91c19` | 1 | `{ ${balParts.join("\n")} }` |
 | `anonymous:f2b1818c3d` | 1 | `query($id: SuiAddress!, $before: String) { objectVersions(address: $id, last: 20, before: $befor` |
