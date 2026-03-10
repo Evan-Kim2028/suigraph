@@ -1,6 +1,6 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T11:44:46.320Z`
+Generated: `2026-03-10T11:54:30.704Z`
 
 | Metric | Value |
 |---|---:|
@@ -94,12 +94,12 @@ Generated: `2026-03-10T11:44:46.320Z`
 | `anonymous:db2fcce76b` | 1 | `{ chainIdentifier serviceConfig { maxMultiGetSize queryTimeoutMs maxQueryDepth maxQueryNodes max` |
 | `anonymous:df83f0a4d6` | 1 | `{ ${obAliases.join("\n")} }` |
 | `anonymous:e60dab97bc` | 1 | `query($id: SuiAddress!, $before: String) { objectVersions(address: $id, last: 20, before: $befor` |
-| `anonymous:edc6600b90` | 1 | `query($id: SuiAddress!) { object(address: $id) { address version digest storageRebate owner { ..` |
 | `anonymous:f1dbd91c19` | 1 | `{ ${balParts.join("\n")} }` |
 | `anonymous:f2b1818c3d` | 1 | `query($id: SuiAddress!, $before: String) { objectVersions(address: $id, last: 20, before: $befor` |
 | `anonymous:f8a5904526` | 1 | `{ address(address: "${BLUEFIN_PRO_ACCOUNTS_TABLE}") { dynamicField(name: { type: "address", bcs:` |
 | `anonymous:fbf414902c` | 1 | `{ address(address: "${addr}") { objects(filter: { type: "${SUILEND_PKG}::lending_market::Obligat` |
 | `anonymous:fc8916eda7` | 1 | `{ ssui: object(address: "0x15eda7330c8f99c30e430b4d82fd7ab2af3ead4ae17046fcb224aa9bad394f6b") { ` |
+| `anonymous:fd504c7a92` | 1 | `query($id: SuiAddress!) { object(address: $id) { address version digest storageRebate owner { ..` |
 | `anonymous:ff941e9100` | 1 | `query($keys:[UInt53!]!){ multiGetCheckpoints(keys:$keys){ sequenceNumber timestamp networkTotalT` |
 
 Notes:

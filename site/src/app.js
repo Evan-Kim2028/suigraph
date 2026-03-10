@@ -10155,19 +10155,9 @@ async function renderObjectDetail(app, id) {
         ${GQL_F_CONTENTS_TYPE_JSON}
       }
       asMovePackage {
-        modules(first: 50) {
+        modules(first: 1) {
           pageInfo { hasNextPage endCursor }
           nodes { name }
-        }
-      }
-      dynamicFields(first: 10) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          name { type { repr } json }
-          value {
-            ... on MoveValue { type { repr } json }
-            ... on MoveObject { address ${GQL_F_CONTENTS_TYPE_JSON} }
-          }
         }
       }
     }
@@ -10199,11 +10189,13 @@ async function renderObjectDetail(app, id) {
   else if (isShared) ownerDisplay = `Shared (v${obj.owner.initialSharedVersion})`;
   else if (isImmutable) ownerDisplay = "Immutable";
 
-  let dynFields = obj.dynamicFields?.nodes || [];
-  let dynFieldsHasNext = !!obj.dynamicFields?.pageInfo?.hasNextPage;
-  let dynFieldsCursor = obj.dynamicFields?.pageInfo?.endCursor || null;
+  let dynFields = [];
+  let dynFieldsLoaded = false;
+  let dynFieldsHasNext = false;
+  let dynFieldsCursor = null;
   let dynFieldsLoading = false;
   let modules = isPackage ? (obj.asMovePackage.modules?.nodes || []) : [];
+  let modulesLoaded = !isPackage ? true : !obj.asMovePackage?.modules?.pageInfo?.hasNextPage;
   let modulesHasNext = !!obj.asMovePackage?.modules?.pageInfo?.hasNextPage;
   let modulesCursor = obj.asMovePackage?.modules?.pageInfo?.endCursor || null;
   let modulesLoading = false;
@@ -10212,8 +10204,7 @@ async function renderObjectDetail(app, id) {
   let activeModuleTab = "functions";
   let expandedFunctions = new Set();
 
-  async function loadMoreDynamicFields() {
-    if (dynFieldsLoading || !dynFieldsHasNext) return;
+  async function loadDynamicFieldsPage(after = null) {
     dynFieldsLoading = true;
     try {
       const more = await gql(`query($id: SuiAddress!, $after: String) {
@@ -10229,7 +10220,7 @@ async function renderObjectDetail(app, id) {
             }
           }
         }
-      }`, { id: idNorm, after: dynFieldsCursor });
+      }`, { id: idNorm, after });
       const conn = more?.object?.dynamicFields;
       const nextNodes = conn?.nodes || [];
       const seen = new Set(dynFields.map(df => JSON.stringify(df?.name?.json || "")));
@@ -10239,9 +10230,11 @@ async function renderObjectDetail(app, id) {
         seen.add(key);
         dynFields.push(n);
       }
+      dynFieldsLoaded = true;
       dynFieldsHasNext = !!conn?.pageInfo?.hasNextPage;
       dynFieldsCursor = conn?.pageInfo?.endCursor || null;
     } catch (e) {
+      dynFieldsLoaded = true;
       dynFieldsHasNext = false;
     } finally {
       dynFieldsLoading = false;
@@ -10251,6 +10244,20 @@ async function renderObjectDetail(app, id) {
         if (c) c.innerHTML = tabContent.dynamic();
       }
     }
+  }
+
+  async function ensureInitialDynamicFields() {
+    if (dynFieldsLoaded || dynFieldsLoading) return;
+    await loadDynamicFieldsPage(null);
+  }
+
+  async function loadMoreDynamicFields() {
+    if (!dynFieldsLoaded) {
+      await ensureInitialDynamicFields();
+      return;
+    }
+    if (dynFieldsLoading || !dynFieldsHasNext) return;
+    await loadDynamicFieldsPage(dynFieldsCursor);
   }
 
   async function loadMorePackageModules() {
@@ -10274,10 +10281,10 @@ async function renderObjectDetail(app, id) {
         existing.add(m.name);
         modules.push(m);
       }
+      modulesLoaded = !conn?.pageInfo?.hasNextPage;
       modulesHasNext = !!conn?.pageInfo?.hasNextPage;
       modulesCursor = conn?.pageInfo?.endCursor || null;
       if (!selectedModule && modules.length) selectedModule = modules[0].name;
-      if (selectedModule && !moduleData[selectedModule]) await loadModuleData(selectedModule);
     } catch (e) {
       modulesHasNext = false;
     } finally {
@@ -10306,6 +10313,10 @@ async function renderObjectDetail(app, id) {
     },
     raw: () => contents?.json ? jsonTreeBlock(contents.json, 400) : renderEmpty("No data."),
     dynamic: () => {
+      if (!dynFieldsLoaded && !dynFieldsLoading) {
+        ensureInitialDynamicFields().catch(() => {});
+      }
+      if (dynFieldsLoading && !dynFieldsLoaded) return `<div style="padding:12px 0">${renderLoading()}</div>`;
       if (!dynFields.length) return renderEmpty("No dynamic fields.");
       return `<table>
         <thead><tr><th>Name</th><th>Type</th><th>Value</th></tr></thead>
@@ -10535,9 +10546,6 @@ async function renderObjectDetail(app, id) {
     const panel = document.getElementById("pkg-module-panel");
     if (panel) panel.innerHTML = renderModulePanel();
   };
-  // Pre-load the first module
-  if (isPackage && modules[0]) loadModuleData(modules[0].name);
-
   if (isPackage) {
     let depsLoaded = false;
     let depsHtml = "";
@@ -10765,6 +10773,7 @@ async function renderObjectDetail(app, id) {
         </div>`;
       // Render sidebar and panel after DOM is ready
       setTimeout(async () => {
+        if (!modulesLoaded && !modulesLoading) loadMorePackageModules().catch(() => {});
         if (selectedModule) await loadModuleData(selectedModule);
         filterModules(document.getElementById("pkg-mod-filter")?.value || "");
         const panel = document.getElementById("pkg-module-panel");
