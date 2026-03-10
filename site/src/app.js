@@ -179,6 +179,40 @@ function toggleTheme() {
   setTheme(next.id, false);
 }
 
+// ── Persisted Timed Cache ───────────────────────────────────────────────
+function readPersistedTimedCacheRecord(storageKey, ttlMs) {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const row = JSON.parse(raw);
+    const ts = Number(row?.ts || 0);
+    if (!ts || (Date.now() - ts) > ttlMs) {
+      localStorage.removeItem(storageKey);
+      return null;
+    }
+    return { data: row?.data ?? null, ts };
+  } catch (e) {
+    return null;
+  }
+}
+
+function initPersistedTimedCacheState(storageKey, ttlMs) {
+  const row = readPersistedTimedCacheRecord(storageKey, ttlMs);
+  return {
+    data: row?.data ?? null,
+    ts: row?.ts ?? 0,
+    inFlight: null,
+  };
+}
+
+function writePersistedTimedCacheRecord(storageKey, data, maxChars = 180000) {
+  try {
+    const payload = JSON.stringify({ ts: Date.now(), data });
+    if (payload.length > maxChars) return;
+    localStorage.setItem(storageKey, payload);
+  } catch (e) { /* ignore */ }
+}
+
 // ── Lightweight Page Perf ──────────────────────────────────────────────
 const PERF_WARN_RENDER_MS = 1800;
 const DEFAULT_PAGE_GQL_BUDGET = 12;
@@ -456,10 +490,17 @@ const DEFI_WINDOW_SAMPLE_TTL_MS = 20 * 1000;
 const DASH_EPOCHS_TTL_MS = 60 * 1000;
 const DASHBOARD_HEAD_TTL_MS = 10 * 1000;
 const DASHBOARD_ACTIVITY_TTL_MS = 10 * 1000;
+const DEFI_PRICE_PERSIST_TTL_MS = 15 * 1000;
+const PERSISTED_CACHE_KEYS = Object.freeze({
+  dashboardHead: "suigraph_cache_dashboard_head_v1",
+  dashboardActivity: "suigraph_cache_dashboard_activity_v1",
+  lendingRates: "suigraph_cache_lending_rates_v1",
+  defiPrices: "suigraph_cache_defi_prices_v1",
+});
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
 const LENDING_RATES_TTL_MS = 60 * 1000;
-let lendingRatesCache = { data: null, ts: 0 };
+let lendingRatesCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.lendingRates, LENDING_RATES_TTL_MS);
 let lendingRatesInFlight = null;
 let defiLstCache = { data: null, ts: 0, inFlight: null };
 let gqlServiceConfigCache = { data: null, ts: 0, inFlight: null };
@@ -478,8 +519,8 @@ const defiWindowSampleCacheByProjection = {
   package: {},
   full: {},
 };
-let dashboardHeadCache = { data: null, ts: 0, inFlight: null };
-let dashboardActivityCache = { data: null, ts: 0, inFlight: null };
+let dashboardHeadCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardHead, DASHBOARD_HEAD_TTL_MS);
+let dashboardActivityCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.dashboardActivity, DASHBOARD_ACTIVITY_TTL_MS);
 let dashboardEpochsCache = { data: null, ts: 0, inFlight: null };
 
 // Known coin type address prefixes → { symbol, decimals }
@@ -3463,10 +3504,12 @@ async function fetchDashboardHead(force = false) {
         totalCheckpoints totalTransactions
       }
     }`);
-    return {
+    const result = {
       checkpoint: data?.checkpoint || {},
       epoch: data?.epoch || {},
     };
+    writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.dashboardHead, result, 12000);
+    return result;
   });
 }
 
@@ -3494,10 +3537,12 @@ async function fetchDashboardActivitySnapshot(force = false) {
         nodes { sequenceNumber digest timestamp networkTotalTransactions rollingGasSummary { computationCost storageCost storageRebate } }
       }
     }`);
-    return {
+    const result = {
       txRows: (data?.transactions?.nodes || []).reverse(),
       cpRows: (data?.checkpoints?.nodes || []).reverse(),
     };
+    writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.dashboardActivity, result, 40000);
+    return result;
   });
 }
 
@@ -5986,6 +6031,7 @@ async function fetchPoolOraclePrices(specificCoinTypes) {
     if (usd > 0) defiPrices[sym] = usd;
   }
   oraclePricesTs = Date.now();
+  persistDefiPriceState();
 }
 
 async function ensurePrices(coinTypes) {
@@ -6016,6 +6062,7 @@ async function ensurePrices(coinTypes) {
   }
   if (!needed.length) return;
   await fetchPoolOraclePrices(needed);
+  persistDefiPriceState();
 }
 
 function syncPeggedPrices() {
@@ -6025,6 +6072,28 @@ function syncPeggedPrices() {
   defiPrices.USDY = 1; defiPrices.SUI_USDE = 1; defiPrices.suiUSDe = 1;
   if (defiPrices[BTC_PRICE_SOURCE]) { for (const sym of BTC_PEGGED_SYMBOLS) defiPrices[sym] = defiPrices[BTC_PRICE_SOURCE]; }
 }
+
+function persistDefiPriceState() {
+  writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.defiPrices, {
+    prices: defiPrices,
+    deepbookSuiPriceTs,
+    oraclePricesTs,
+  }, 50000);
+}
+
+function hydratePersistedDefiPriceState() {
+  const row = readPersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.defiPrices, DEFI_PRICE_PERSIST_TTL_MS);
+  const persisted = row?.data;
+  if (!persisted || typeof persisted !== "object") return;
+  if (persisted.prices && typeof persisted.prices === "object") {
+    defiPrices = { ...defiPrices, ...persisted.prices };
+  }
+  deepbookSuiPriceTs = Number(persisted.deepbookSuiPriceTs || deepbookSuiPriceTs || 0);
+  oraclePricesTs = Number(persisted.oraclePricesTs || oraclePricesTs || 0);
+  syncPeggedPrices();
+}
+
+hydratePersistedDefiPriceState();
 
 async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
   const now = Date.now();
@@ -6054,6 +6123,7 @@ async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
     }
 
     syncPeggedPrices();
+    persistDefiPriceState();
   })().finally(() => { defiPricesInFlight = null; });
 
   return defiPricesInFlight;
@@ -6459,6 +6529,7 @@ async function fetchLendingRatesOverview(force = false) {
 
     const result = { fetchedAt: new Date().toISOString(), byToken };
     lendingRatesCache = { data: result, ts: Date.now() };
+    writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.lendingRates, result, 160000);
     return result;
   })().finally(() => { lendingRatesInFlight = null; });
 
