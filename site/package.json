@@ -13,6 +13,7 @@
     "baseline": "node scripts/report-baseline.mjs",
     "check:bundle-boundaries": "node scripts/check-bundle-boundaries.mjs",
     "check:fixture-coverage": "node scripts/check-protocol-fixture-coverage.mjs",
+    "check:route-perf": "node scripts/check-route-perf.mjs",
     "deploy:walrus": "node scripts/deploy-walrus-site.mjs",
     "fixtures:scan": "node scripts/scan-address-fixtures.mjs",
     "smoke:coin": "node scripts/smoke-coin-search.mjs",

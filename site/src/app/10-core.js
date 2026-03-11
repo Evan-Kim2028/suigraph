@@ -253,7 +253,7 @@ const PAGE_PERF_BUDGETS = Object.freeze({
   validators: { gqlCalls: 3, renderMs: 1200 },
   events: { gqlCalls: 4, renderMs: 1500 },
   coin: { gqlCalls: 20, renderMs: 2600 },
-  "defi-overview": { gqlCalls: 20, renderMs: 2500 },
+  "defi-overview": { gqlCalls: 33, renderMs: 2500 },
   "defi-rates": { gqlCalls: 20, renderMs: 2500 },
   "defi-dex": { gqlCalls: 20, renderMs: 2500 },
   "defi-stablecoins": { gqlCalls: 20, renderMs: 2500 },

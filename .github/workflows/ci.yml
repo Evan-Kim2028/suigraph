@@ -43,5 +43,10 @@ jobs:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: npm run smoke:tx
 
+      - name: Check route perf budgets
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: npm run check:route-perf
+
       - name: Update baseline metrics
         run: npm run baseline

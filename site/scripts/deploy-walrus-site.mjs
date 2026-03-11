@@ -127,6 +127,7 @@ if (dirtyDeployInputs.length) {
 
 run("npm", ["run", "build"]);
 run("npm", ["run", "validate"]);
+run("npm", ["run", "check:route-perf"]);
 
 const dirtyAfterValidate = getDirtyDeployInputs(repoRoot);
 if (dirtyAfterValidate.length) {

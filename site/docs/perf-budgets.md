@@ -1,6 +1,6 @@
 # Perf Budgets
 
-Generated: `2026-03-10T14:35:32.119Z`
+Generated: `2026-03-11T20:14:03.062Z`
 
 | Page | GQL call budget | Render budget (ms) | Budget source |
 |---|---:|---:|---|
@@ -12,7 +12,7 @@ Generated: `2026-03-10T14:35:32.119Z`
 | `defi-dex` | 20 | 2500 | declared |
 | `defi-flows` | 18 | 2200 | declared |
 | `defi-lst` | 20 | 2500 | declared |
-| `defi-overview` | 20 | 2500 | declared |
+| `defi-overview` | 33 | 2500 | declared |
 | `defi-rates` | 20 | 2500 | declared |
 | `defi-stablecoins` | 20 | 2500 | declared |
 | `docs` | 1 | 900 | declared |

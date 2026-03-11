@@ -117,6 +117,12 @@ async function buildSource() {
   const styleHref = `./assets/styles.css?v=${cssVersion}`;
   const scriptSrc = `./assets/app.js?v=${jsVersion}`;
   const extraScriptSrc = `./assets/app-extra.js?v=${extraJsVersion}`;
+  const extraTags = extraJs
+    ? [
+        `<link rel="preload" href="${extraScriptSrc}" as="script">`,
+        `<meta name="suigraph-extra-src" content="${extraScriptSrc}">`,
+      ].join("\n  ")
+    : "";
 
   return {
     mode: "templated-external-assets",
@@ -124,7 +130,7 @@ async function buildSource() {
     html: renderTemplate(
       template,
       `<link rel="stylesheet" href="${styleHref}">`,
-      `<meta name="suigraph-extra-src" content="${extraScriptSrc}">`,
+      extraTags,
       `<script src="${scriptSrc}" defer></script>`
     ),
     assets: [
