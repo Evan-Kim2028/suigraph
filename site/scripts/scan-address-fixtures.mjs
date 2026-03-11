@@ -25,6 +25,7 @@ function parseArgs(argv) {
     sitePortBase: DEFAULT_SITE_PORT_BASE,
     cdpPortBase: DEFAULT_CDP_PORT_BASE,
     timeoutMs: DEFAULT_TIMEOUT_MS,
+    tiers: [],
     json: false,
     help: false,
   };
@@ -47,6 +48,10 @@ function parseArgs(argv) {
     } else if (arg === "--timeout-ms") {
       opts.timeoutMs = Math.max(1000, Number(argv[i + 1] || opts.timeoutMs));
       i += 1;
+    } else if (arg === "--tier") {
+      const tier = String(argv[i + 1] || "").trim().toLowerCase();
+      if (tier) opts.tiers.push(tier);
+      i += 1;
     } else if (arg === "--json") {
       opts.json = true;
     }
@@ -67,6 +72,7 @@ function printHelp() {
     `  --site-port-base <port>    Base local static server port (default: ${DEFAULT_SITE_PORT_BASE})`,
     `  --cdp-port-base <port>     Base Chrome DevTools port (default: ${DEFAULT_CDP_PORT_BASE})`,
     `  --timeout-ms <ms>          Per-fixture timeout budget (default: ${DEFAULT_TIMEOUT_MS})`,
+    "  --tier <name>              Restrict scan to matching fixture tier; may be repeated",
     "  --json                     Emit JSON instead of human-readable output",
     "  -h, --help                 Show help",
   ].join("\n"));
@@ -164,7 +170,14 @@ if (opts.help) {
   process.exit(0);
 }
 
-const fixtures = loadManifest(opts.manifestPath);
+const fixtures = loadManifest(opts.manifestPath).filter((fixture) => {
+  if (!opts.tiers.length) return true;
+  const tier = String(fixture?.tier || "candidate").trim().toLowerCase();
+  return opts.tiers.includes(tier);
+});
+if (!fixtures.length) {
+  throw new Error(`No fixtures matched tier filter: ${opts.tiers.join(", ")}`);
+}
 const results = [];
 for (let i = 0; i < fixtures.length; i += 1) {
   results.push(await scanFixture(fixtures[i], i, opts));

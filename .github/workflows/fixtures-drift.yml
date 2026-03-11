@@ -53,7 +53,14 @@ jobs:
       - name: Build static bundle
         run: npm run build
 
-      - name: Scan live address fixtures
+      - name: Scan required live fixtures
+        if: github.event_name == 'push'
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: npm run fixtures:scan -- --tier required
+
+      - name: Scan full fixture corpus
+        if: github.event_name != 'push'
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: npm run fixtures:scan
@@ -62,7 +69,12 @@ jobs:
         if: always()
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
-        run: node scripts/scan-address-fixtures.mjs --json > fixtures-scan.json || true
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            node scripts/scan-address-fixtures.mjs --tier required --json > fixtures-scan.json || true
+          else
+            node scripts/scan-address-fixtures.mjs --json > fixtures-scan.json || true
+          fi
 
       - name: Upload fixture scan report
         if: always()
