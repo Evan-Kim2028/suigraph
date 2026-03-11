@@ -120,6 +120,13 @@ function buildRoutePresets(fixtures) {
   };
 }
 
+export function buildTargetUrl(baseUrl, hashPath) {
+  const url = new URL(baseUrl);
+  if (!url.pathname) url.pathname = "/";
+  url.hash = hashPath.startsWith("#") ? hashPath : `#${hashPath}`;
+  return url.toString();
+}
+
 async function waitForNoErrorShell(client, timeoutMs) {
   await waitForCondition(
     client,
@@ -129,8 +136,8 @@ async function waitForNoErrorShell(client, timeoutMs) {
   );
 }
 
-async function captureRouteMetrics(client) {
-  const perf = await waitForPerfSettled(client, DEFAULT_TIMEOUT_MS, 1250);
+async function captureRouteMetrics(client, timeoutMs) {
+  const perf = await waitForPerfSettled(client, timeoutMs, 1250);
   const metrics = await evaluate(client, `(() => {
     const nav = performance.getEntriesByType('navigation')[0];
     const resources = performance.getEntriesByType('resource')
@@ -197,10 +204,10 @@ async function withLivePage({ chromeBin, cdpPort, timeoutMs, targetUrl, fallback
   }
 }
 
-async function measureRoute(opts, preset) {
+export async function measureRoute(opts, preset) {
   const targetUrl = opts.live
-    ? `${opts.walrusOrigin.replace(/\/+$/u, "")}/${preset.hashPath}`
-    : `http://127.0.0.1:${opts.sitePort}/${preset.hashPath}`;
+    ? buildTargetUrl(opts.walrusOrigin, preset.hashPath)
+    : buildTargetUrl(`http://127.0.0.1:${opts.sitePort}/`, preset.hashPath);
   const fallbackContains = preset.hashPath.split("?")[0];
   if (opts.live) {
     return withLivePage({
@@ -211,7 +218,7 @@ async function measureRoute(opts, preset) {
       fallbackContains,
     }, async ({ client }) => {
       await preset.load(client, opts.timeoutMs);
-      return captureRouteMetrics(client);
+      return captureRouteMetrics(client, opts.timeoutMs);
     });
   }
   return withStaticSitePage({
@@ -225,8 +232,13 @@ async function measureRoute(opts, preset) {
     profilePrefix: `suigraph-route-${opts.routeId}-`,
   }, async ({ client }) => {
     await preset.load(client, opts.timeoutMs);
-    return captureRouteMetrics(client);
+    return captureRouteMetrics(client, opts.timeoutMs);
   });
+}
+
+export function getRoutePresets() {
+  const fixtures = loadFixtures();
+  return buildRoutePresets(fixtures);
 }
 
 async function main() {
@@ -236,8 +248,7 @@ async function main() {
     return;
   }
 
-  const fixtures = loadFixtures();
-  const presets = buildRoutePresets(fixtures);
+  const presets = getRoutePresets();
   const preset = presets[opts.routeId];
   if (!preset) {
     console.error(`Unknown route preset: ${opts.routeId}`);
@@ -255,4 +266,7 @@ async function main() {
   }, null, 2));
 }
 
-await main();
+const modulePath = fileURLToPath(import.meta.url);
+if (process.argv[1] && resolve(process.argv[1]) === modulePath) {
+  await main();
+}
