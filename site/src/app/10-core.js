@@ -709,6 +709,20 @@ function normalizeCoinType(coinType) {
 const MOVE_TYPE_TOKEN_RE = /0x[0-9a-fA-F]+::[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*/g;
 const COIN_TYPE_PREFIX_RE = /^(0x[0-9a-fA-F]+)::([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)(.*)$/;
 
+function normalizeSuiAddress(addr) {
+  const raw = String(addr || "").trim().toLowerCase();
+  if (!raw) return "";
+  let hex = raw.startsWith("0x") ? raw.slice(2) : raw;
+  if (!hex || !/^[0-9a-f]+$/.test(hex)) return "";
+  if (hex.length > 64) {
+    const trimmed = hex.replace(/^0+/, "");
+    if (!trimmed || trimmed.length > 64) return "";
+    hex = trimmed;
+  }
+  hex = hex.replace(/^0+/, "") || "0";
+  return `0x${hex}`;
+}
+
 function normalizeCoinTypeQueryInput(raw) {
   const input = String(raw || "").trim();
   if (!input) return "";

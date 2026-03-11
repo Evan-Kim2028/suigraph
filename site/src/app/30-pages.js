@@ -3424,20 +3424,6 @@ function txMovePackages(tx) {
   )];
 }
 
-function normalizeSuiAddress(addr) {
-  const raw = String(addr || "").trim().toLowerCase();
-  if (!raw) return "";
-  let hex = raw.startsWith("0x") ? raw.slice(2) : raw;
-  if (!hex || !/^[0-9a-f]+$/.test(hex)) return "";
-  if (hex.length > 64) {
-    const trimmed = hex.replace(/^0+/, "");
-    if (!trimmed || trimmed.length > 64) return "";
-    hex = trimmed;
-  }
-  hex = hex.replace(/^0+/, "") || "0";
-  return "0x" + hex;
-}
-
 function packageFromTypeRepr(repr) {
   const r = String(repr || "");
   if (!r) return "";
