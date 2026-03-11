@@ -57,11 +57,9 @@ export function readAppSource(siteRoot) {
 
 export function readAppBundleSources(siteRoot) {
   const appPartsDir = resolve(siteRoot, "src/app");
-  const corePath = resolve(appPartsDir, "10-core.js");
-  const navPath = resolve(appPartsDir, "20-navigation.js");
   const pagesPath = resolve(appPartsDir, "30-pages.js");
 
-  if (!existsSync(corePath) || !existsSync(navPath) || !existsSync(pagesPath)) {
+  if (!existsSync(pagesPath)) {
     const app = readAppSource(siteRoot);
     return {
       sourceDescriptor: app.sourceDescriptor,
@@ -72,6 +70,11 @@ export function readAppBundleSources(siteRoot) {
     };
   }
 
+  const partPaths = collectJsParts(appPartsDir);
+  const pageIndex = partPaths.indexOf(pagesPath);
+  if (pageIndex === -1) {
+    throw new Error("src/app/30-pages.js is missing from the ordered app source list");
+  }
   const pagesSource = readUtf8(pagesPath);
   const splitIdx = pagesSource.indexOf(PAGE_EXTRA_SPLIT_MARKER);
   const initIdx = pagesSource.indexOf(PAGE_INIT_MARKER);
@@ -82,15 +85,35 @@ export function readAppBundleSources(siteRoot) {
   const corePagesSource = pagesSource.slice(0, splitIdx).replace(/\s+$/u, "");
   const extraPagesSource = pagesSource.slice(splitIdx, initIdx).replace(/\s+$/u, "");
   const initSource = pagesSource.slice(initIdx).replace(/^\s*/u, "").replace(/\s+$/u, "");
-  const relCore = relative(siteRoot, corePath).replace(/\\/g, "/");
-  const relNav = relative(siteRoot, navPath).replace(/\\/g, "/");
   const relPages = relative(siteRoot, pagesPath).replace(/\\/g, "/");
+  const bootChunks = [];
+  const bootFiles = [];
+  const extraChunks = [];
+  const extraFiles = [];
+  for (const path of partPaths) {
+    if (path === pagesPath) {
+      bootChunks.push(corePagesSource, initSource);
+      bootFiles.push(`${relPages}#boot`, `${relPages}#init`);
+      extraChunks.push(extraPagesSource);
+      extraFiles.push(`${relPages}#extra`);
+      continue;
+    }
+    const source = readUtf8(path).replace(/\s+$/u, "");
+    const relPath = relative(siteRoot, path).replace(/\\/g, "/");
+    if (partPaths.indexOf(path) > pageIndex) {
+      extraChunks.push(source);
+      extraFiles.push(relPath);
+    } else {
+      bootChunks.push(source);
+      bootFiles.push(relPath);
+    }
+  }
 
   return {
     sourceDescriptor: "src/index.template.html + src/styles.css + src/app/*.js",
-    bootSource: `${readUtf8(corePath).replace(/\s+$/u, "")}\n\n${readUtf8(navPath).replace(/\s+$/u, "")}\n\n${corePagesSource}\n\n${initSource}\n`,
-    bootFiles: [relCore, relNav, `${relPages}#boot`],
-    extraSource: `${extraPagesSource}\n`,
-    extraFiles: [`${relPages}#extra`],
+    bootSource: `${bootChunks.filter(Boolean).join("\n\n")}\n`,
+    bootFiles,
+    extraSource: `${extraChunks.filter(Boolean).join("\n\n")}\n`,
+    extraFiles,
   };
 }

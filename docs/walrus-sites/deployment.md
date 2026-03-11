@@ -126,8 +126,7 @@ python3 -m http.server 8080
 ```bash
 # Full deploy workflow
 cd site
-npm run build                    # Build HTML + asset bundle
-site-builder --context=mainnet deploy ./dist --epochs 10 --ws-resources ./ws-resources.json
+npm run deploy:walrus            # Guard dirty inputs, rebuild, validate, then deploy
 
 # Verify
 git add -A && git status         # Check what changed

@@ -12,7 +12,7 @@
     "assets/app-extra.js",
     "dist/assets/app-extra.js"
   ],
-  "htmlHashSha256": "6d210578e4c51c8b933edac62bf5c380e1a3f7158c6ee9ff55ce1e8cd9438275",
+  "htmlHashSha256": "02ad7b0c14c688d957b50c04a962bbec081bc0edfbf8132103cf4b360ed4e0c4",
   "htmlLines": 68,
   "htmlBytes": 4819,
   "totalBytes": 622780,
@@ -32,9 +32,9 @@
     {
       "path": "assets/app-extra.js",
       "bytes": 390271,
-      "hashSha256": "3ca2e814b91a9903392ac6aeec9b0bf446536f6075540252a9d83c65871fd07e",
-      "version": "3ca2e814b91a"
+      "hashSha256": "d7bca20a3002928b1670d2f40625f5354332ad91660553f47a82277ef33a0461",
+      "version": "d7bca20a3002"
     }
   ],
-  "builtAt": "2026-03-11T15:42:37.753Z"
+  "builtAt": "2026-03-11T15:53:19.818Z"
 }

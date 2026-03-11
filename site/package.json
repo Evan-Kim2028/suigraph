@@ -12,6 +12,7 @@
     "build:check": "node scripts/build-single-file.mjs --check",
     "baseline": "node scripts/report-baseline.mjs",
     "check:bundle-boundaries": "node scripts/check-bundle-boundaries.mjs",
+    "deploy:walrus": "node scripts/deploy-walrus-site.mjs",
     "smoke:coin": "node scripts/smoke-coin-search.mjs",
     "smoke:tx": "node scripts/smoke-tx-route.mjs",
     "gql:surface": "node scripts/report-gql-surface.mjs",

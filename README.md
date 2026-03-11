@@ -135,16 +135,16 @@ npm ci
 npm run build
 ```
 
-3. Deploy from `site/` using `dist/` as content and the repo-level Walrus config file:
+3. Deploy from `site/` using the guarded wrapper. It refuses dirty deploy inputs under `site/src`, rebuilds, runs `npm run validate`, and only then calls `site-builder`:
 
 ```bash
-site-builder --context=mainnet deploy ./dist --epochs 10 --ws-resources ./ws-resources.json
+npm run deploy:walrus
 ```
 
-4. Re-run the same deploy command for updates:
+4. Re-run the same command for updates. Override context or epochs by passing args through npm:
 
 ```bash
-site-builder --context=mainnet deploy ./dist --epochs 10 --ws-resources ./ws-resources.json
+npm run deploy:walrus -- --context mainnet --epochs 10
 ```
 
 Notes:
