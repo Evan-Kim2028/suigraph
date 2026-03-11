@@ -17,7 +17,9 @@
     "schema:refresh": "node scripts/refresh-schema-root-fields.mjs",
     "schema:coverage": "node scripts/report-schema-coverage.mjs",
     "schema:check": "node scripts/report-schema-coverage.mjs --check",
-    "validate": "npm run build:check && node scripts/check-syntax.mjs && node scripts/check-quality.mjs && npm run schema:check"
+    "validate": "npm run build:check && node scripts/check-syntax.mjs && node scripts/check-quality.mjs && node scripts/check-accounting-guards.mjs && npm run schema:check",
+    "check:accounting": "node scripts/check-accounting-guards.mjs",
+    "smoke:address": "node scripts/smoke-address-defi.mjs --expect-filter-hides"
   },
   "devDependencies": {
     "esbuild": "^0.27.3",
