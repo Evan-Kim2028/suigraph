@@ -22,7 +22,7 @@ function joinSources(paths) {
   return `${paths.map((path) => readUtf8(path).replace(/\s+$/u, "")).join("\n\n")}\n`;
 }
 
-const PAGE_EXTRA_SPLIT_MARKER = "// ── Coin Search";
+const PAGE_EXTRA_SPLIT_MARKER = "// ── Top Token Transfers";
 const PAGE_INIT_MARKER = "// ── Init";
 const CRITICAL_BOOT_FILES = new Set(["35-defi-adapters.js"]);
 

@@ -17,6 +17,7 @@
     "check:route-perf:full": "node scripts/check-route-perf.mjs --route address --route defi-overview",
     "deploy:walrus": "node scripts/deploy-walrus-site.mjs",
     "fixtures:scan": "node scripts/scan-address-fixtures.mjs",
+    "measure:route": "node scripts/measure-route-delivery.mjs",
     "smoke:coin": "node scripts/smoke-coin-search.mjs",
     "smoke:tx": "node scripts/smoke-tx-route.mjs",
     "gql:surface": "node scripts/report-gql-surface.mjs",

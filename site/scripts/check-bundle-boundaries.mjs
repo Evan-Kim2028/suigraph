@@ -8,7 +8,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
 
 const ALLOWED_BOOT_TO_EXTRA_CALLS = new Set([
-  "renderCoin",
   "renderCongestion",
   "renderDefiDex",
   "renderDefiFlows",

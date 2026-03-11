@@ -12,10 +12,10 @@
     "assets/app-extra.js",
     "dist/assets/app-extra.js"
   ],
-  "htmlHashSha256": "0ff55534c74423720082b60b48715400b9b04f4145ccc1edaf45bfdee183e727",
+  "htmlHashSha256": "c027ff7e49750022dc414829d70fab08153f29e60b465e8284c603d2b61b2b45",
   "htmlLines": 68,
   "htmlBytes": 4819,
-  "totalBytes": 620884,
+  "totalBytes": 620891,
   "assets": [
     {
       "path": "assets/styles.css",
@@ -25,16 +25,16 @@
     },
     {
       "path": "assets/app.js",
-      "bytes": 402702,
-      "hashSha256": "203cbf16a84c2107910b4b34c5c3c5f181cc7311269126b795539d7624bb1e51",
-      "version": "203cbf16a84c"
+      "bytes": 433877,
+      "hashSha256": "f9a1e6fe942095591dc995d2924b964262d9b04ad4c53aa3e68a015c6bfe474d",
+      "version": "f9a1e6fe9420"
     },
     {
       "path": "assets/app-extra.js",
-      "bytes": 184148,
-      "hashSha256": "c4e9bd05da89f02a1d54ce1439ca1a25dd12158acbc47e3e9c0cc99f434cebc3",
-      "version": "c4e9bd05da89"
+      "bytes": 152980,
+      "hashSha256": "a6a3d0abd47754733066f5e5c820ef4ba28cfd16c5caa93a3201b4388b1bfbc0",
+      "version": "a6a3d0abd477"
     }
   ],
-  "builtAt": "2026-03-11T20:45:31.912Z"
+  "builtAt": "2026-03-11T20:58:10.235Z"
 }
