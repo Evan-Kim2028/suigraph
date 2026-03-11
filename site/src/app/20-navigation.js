@@ -92,6 +92,8 @@ function parseRoute(route) {
 
 const CORE_ROUTE_PAGES = new Set(["home", "checkpoints", "checkpoint", "txs", "tx"]);
 let extraRoutesLoadPromise = null;
+const EXTRA_ROUTES_MAX_SCRIPT_ATTEMPTS = 3;
+const EXTRA_ROUTES_RETRY_DELAY_MS = 250;
 
 function areExtraRoutesLoaded() {
   return globalThis.__SUIGRAPH_EXTRA_LOADED__ === true;
@@ -101,24 +103,86 @@ function getExtraRoutesSrc() {
   return document.querySelector('meta[name="suigraph-extra-src"]')?.getAttribute("content") || "./assets/app-extra.js";
 }
 
-function ensureExtraRoutesLoaded() {
-  if (areExtraRoutesLoaded()) return Promise.resolve();
-  if (extraRoutesLoadPromise) return extraRoutesLoadPromise;
-  extraRoutesLoadPromise = new Promise((resolve, reject) => {
+function resolveExtraRoutesSrc(src = getExtraRoutesSrc()) {
+  try {
+    return new URL(String(src || "./assets/app-extra.js"), window.location.href).toString();
+  } catch (_) {
+    return String(src || "./assets/app-extra.js");
+  }
+}
+
+function withExtraRoutesRetryQuery(src, attempt) {
+  if (!attempt) return src;
+  try {
+    const url = new URL(src, window.location.href);
+    url.searchParams.set("load_retry", String(attempt));
+    return url.toString();
+  } catch (_) {
+    const joiner = String(src).includes("?") ? "&" : "?";
+    return `${src}${joiner}load_retry=${encodeURIComponent(String(attempt))}`;
+  }
+}
+
+function delayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function appendInlineScript(text) {
+  const script = document.createElement("script");
+  script.text = `${String(text || "")}\n//# sourceURL=suigraph-extra-fallback.js`;
+  document.head.appendChild(script);
+}
+
+function loadExtraRoutesScriptTag(src) {
+  return new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = getExtraRoutesSrc();
+    script.src = src;
     script.async = true;
     script.onload = () => {
-      globalThis.__SUIGRAPH_EXTRA_LOADED__ = true;
+      script.remove();
       resolve();
     };
     script.onerror = () => {
-      extraRoutesLoadPromise = null;
       script.remove();
       reject(new Error("Failed to load explorer extra bundle."));
     };
     document.head.appendChild(script);
   });
+}
+
+async function loadExtraRoutesFallback(src) {
+  const res = await fetch(src, { cache: "reload" });
+  if (!res.ok) throw new Error(`Failed to fetch explorer extra bundle (${res.status})`);
+  const text = await res.text();
+  appendInlineScript(text);
+}
+
+function ensureExtraRoutesLoaded() {
+  if (areExtraRoutesLoaded()) return Promise.resolve();
+  if (extraRoutesLoadPromise) return extraRoutesLoadPromise;
+  extraRoutesLoadPromise = (async () => {
+    const src = resolveExtraRoutesSrc();
+    let lastErr = null;
+    for (let attempt = 0; attempt < EXTRA_ROUTES_MAX_SCRIPT_ATTEMPTS; attempt += 1) {
+      try {
+        await loadExtraRoutesScriptTag(withExtraRoutesRetryQuery(src, attempt));
+        globalThis.__SUIGRAPH_EXTRA_LOADED__ = true;
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < (EXTRA_ROUTES_MAX_SCRIPT_ATTEMPTS - 1)) await delayMs(EXTRA_ROUTES_RETRY_DELAY_MS);
+      }
+    }
+    try {
+      await loadExtraRoutesFallback(src);
+      globalThis.__SUIGRAPH_EXTRA_LOADED__ = true;
+      return;
+    } catch (fallbackErr) {
+      lastErr = fallbackErr;
+    }
+    extraRoutesLoadPromise = null;
+    throw lastErr || new Error("Failed to load explorer extra bundle.");
+  })();
   return extraRoutesLoadPromise;
 }
 
