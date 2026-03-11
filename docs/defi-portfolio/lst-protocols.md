@@ -3,6 +3,12 @@
 Liquid Staking Tokens (LSTs) on Sui represent staked SUI with accruing rewards.
 Each LST has an exchange rate that converts between the LST and its underlying SUI value.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `n/a` (page-level pricing and snapshot helpers)
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchDefiLstSnapshot`, `fetchDefiPrices`, and the LST rate helpers used by wallet and DeFi views
+
 ## Supported LSTs
 
 | Symbol | Protocol | Coin Type | Rate Object |

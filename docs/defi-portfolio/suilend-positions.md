@@ -3,6 +3,12 @@
 Suilend is a lending protocol on Sui. Positions are stored as `Obligation` objects
 owned by `ObligationOwnerCap` NFTs in the user's wallet.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `suilend`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchSuilendPositions` and `fetchSuilendLendingRates`; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Key Objects
 
 | Object | Address | Description |

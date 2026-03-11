@@ -206,5 +206,6 @@ Future `site-builder deploy` commands with the same `--ws-resources ./ws-resourc
 - `site/docs/CONTRIBUTING.md`: contribution expectations
 - `site/docs/graphql-surface.md`: generated inventory of static `gql(...)` call sites
 - `docs/graphql-data-flow.md`: where the GraphQL endpoint, transport, query surfaces, and protocol guides live
+- `docs/defi-portfolio/README.md`: protocol-to-doc, adapter, and fixture-coverage index
 - `docs/defi-portfolio/on-chain-pricing.md`: pool oracle pricing methodology
 - `docs/defi-portfolio/`: per-protocol position querying guides

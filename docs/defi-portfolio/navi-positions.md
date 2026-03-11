@@ -4,6 +4,12 @@ NAVI is an Aave-style lending protocol on Sui. All on-chain state is stored in s
 objects accessible via Sui's GraphQL `dynamicField` queries. No SDK or RPC required —
 just GraphQL against `https://graphql.mainnet.sui.io/graphql`.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `navi`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchNaviPositions` and `fetchNaviLendingRates`; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Key Objects
 
 | Object | Address | Description |

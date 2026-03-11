@@ -3,6 +3,12 @@
 The explorer tracks total supply for stablecoins across three categories:
 native, Wormhole-wrapped, and protocol-issued.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `n/a` (page-level stablecoin aggregation)
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchStablecoinSupply` and `fetchDefiStablecoinSnapshot`
+
 ## Native Stablecoins (via coinMetadata)
 
 | Symbol | Coin Type | Decimals |

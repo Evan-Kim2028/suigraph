@@ -3,6 +3,12 @@
 Scallop is a lending protocol on Sui. State is spread across multiple shared tables
 for borrow dynamics, interest models, and balance sheets.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `scallop`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchScallopPositions`, `fetchScallopBorrowIndices`, and `fetchScallopUnderlyingCoinTypes`; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Key Objects
 
 | Object | Address | Description |

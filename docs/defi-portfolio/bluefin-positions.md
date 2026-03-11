@@ -2,6 +2,12 @@
 
 Bluefin has two products: **Bluefin Spot** (CLMM DEX) and **Bluefin Pro** (perpetuals).
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key(s): `bluefinSpot`, `bluefinPro`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchBluefinSpotPositions` and `fetchBluefinProPositions`; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Bluefin Spot (CLMM DEX)
 
 ### Key Objects
@@ -38,10 +44,49 @@ Position JSON fields:
 - `upper_tick` — upper tick (u32 → i32)
 - `liquidity` — position liquidity (u128)
 
-**Step 2: Fetch Pools + Compute LP Amounts**
+**Step 2: Fetch Pool Objects**
 
-Same as Cetus/Turbos — fetch pool's `current_tick_index`, then use
-`getCoinAmountsFromLiquidity`. See [cetus-positions.md](./cetus-positions.md).
+Batch-fetch each unique `pool_id` so you can read the current tick and pool type:
+
+```graphql
+{
+  p0: object(address: "<pool_id>") {
+    asMoveObject {
+      contents {
+        type { repr }
+        json
+      }
+    }
+  }
+}
+```
+
+Pool fields used by the current implementation:
+
+- `current_tick_index` (or `tick_current_index` on some pools)
+- pool Move type generics as a fallback source for coin types
+
+**Step 3: Compute LP Amounts**
+
+Bluefin Spot uses the same CLMM liquidity math as Cetus/Turbos, but the explorer computes it directly from Bluefin position JSON and pool state:
+
+```text
+cur_tick  = i32(pool.current_tick_index or pool.tick_current_index)
+low_tick  = i32(position.lower_tick)
+up_tick   = i32(position.upper_tick)
+
+cur_sqrt  = tickToSqrtPriceX64(cur_tick)
+low_sqrt  = tickToSqrtPriceX64(low_tick)
+up_sqrt   = tickToSqrtPriceX64(up_tick)
+
+{ coinA, coinB } = getCoinAmountsFromLiquidity(liquidity, cur_sqrt, low_sqrt, up_sqrt)
+
+amount_a = coinA / 10^decimals_a
+amount_b = coinB / 10^decimals_b
+in_range = cur_tick >= low_tick && cur_tick < up_tick
+```
+
+`coin_type_a` / `coin_type_b` from the position JSON are preferred once the missing `0x` prefix is restored. If those fields are absent, fall back to the pool type generics.
 
 ### Bluefin-Specific Notes
 

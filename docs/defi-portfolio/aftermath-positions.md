@@ -3,6 +3,12 @@
 Aftermath is a perpetuals protocol on Sui. Positions are stored in clearing house
 objects, keyed by account ID.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `aftermathPerps`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchAftermathPerpsPositions`, `fetchAftermathAccountCaps`, `fetchAftermathClearingHouses`, `fetchAftermathPositionStates`, and orderbook helpers; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Key Objects
 
 | Object | Address | Description |

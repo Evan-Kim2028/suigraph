@@ -4,6 +4,12 @@ suigraph prices all tokens using on-chain DEX pool state — no external APIs or
 Prices are derived from CLMM (concentrated liquidity) pools on Cetus and Bluefin,
 using live `current_sqrt_price` and `liquidity` values read via Sui GraphQL.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `n/a` (shared pricing layer)
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchSuiPriceFromDeepBook`, `fetchPoolOraclePrices`, and `fetchDefiPrices`
+
 ## Architecture
 
 ```

@@ -4,6 +4,12 @@ Turbos is a concentrated liquidity DEX on Sui using the same Uniswap v3 tick mat
 as Cetus. The key difference is that position data is stored in a shared container
 object rather than directly in the NFT.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `turbos`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchTurbosPositions`; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Key Objects
 
 | Object | Address | Description |

@@ -3,6 +3,12 @@
 AlphaFi is a lending protocol on Sui with a kink-based interest rate model similar
 to Suilend.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `alpha`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchAlphaPositions` and `fetchAlphaLendingRates`; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Key Objects
 
 | Object | Address | Description |

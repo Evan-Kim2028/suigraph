@@ -3,6 +3,12 @@
 DeepBook v3 is the native orderbook on Sui. It supports both spot trading and margin
 positions through balance managers.
 
+## Doc Metadata
+
+- Last verified: `2026-03-11`
+- Adapter key: `deepbook`
+- Code entrypoint: `site/src/app/30-pages.js` via `fetchDeepBookPositions` and `fetchSuiPriceFromDeepBook`; normalized through `site/src/app/35-defi-adapters.js`
+
 ## Key Objects
 
 | Object | Address | Description |
