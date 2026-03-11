@@ -12,14 +12,12 @@ on:
       - site/fixtures/**
       - site/package-lock.json
       - site/package.json
+      - site/scripts/**
       - site/src/**
-      - site/scripts/build-single-file.mjs
-      - site/scripts/scan-address-fixtures.mjs
-      - site/scripts/lib/address-defi-smoke.mjs
-      - site/scripts/lib/browser-smoke.mjs
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: fixture-drift-${{ github.ref }}
@@ -76,6 +74,14 @@ jobs:
             node scripts/scan-address-fixtures.mjs --json > fixtures-scan.json || true
           fi
 
+      - name: Render fixture scan summary
+        if: always()
+        run: node scripts/render-fixture-scan-summary.mjs fixtures-scan.json > fixtures-scan-summary.md
+
+      - name: Publish fixture scan summary
+        if: always()
+        run: cat fixtures-scan-summary.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload fixture scan report
         if: always()
         uses: actions/upload-artifact@v4
@@ -83,3 +89,17 @@ jobs:
           name: fixtures-scan-report
           path: site/fixtures-scan.json
           if-no-files-found: warn
+
+      - name: Open or update scheduled fixture drift issue
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FIXTURE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/sync-fixture-drift-issue.mjs --mode open --repo "$GITHUB_REPOSITORY" --report fixtures-scan.json --summary fixtures-scan-summary.md --run-url "$FIXTURE_RUN_URL"
+
+      - name: Close scheduled fixture drift issue on recovery
+        if: success() && github.event_name == 'schedule'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FIXTURE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/sync-fixture-drift-issue.mjs --mode close --repo "$GITHUB_REPOSITORY" --report fixtures-scan.json --summary fixtures-scan-summary.md --run-url "$FIXTURE_RUN_URL"

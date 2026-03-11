@@ -3,6 +3,14 @@
     {
       "id": "broad_integration_smoke",
       "tier": "required",
+      "lifecycle": "active",
+      "ownership": "public_external",
+      "protocols": [
+        "wallet",
+        "ember",
+        "bluefinPro",
+        "aftermathPerps"
+      ],
       "address": "0x1eb7c57e3f2bd0fc6cb9dcffd143ea957e4d98f805c358733f76dee0667fe0b1",
       "source": "site/scripts/smoke-address-defi.mjs",
       "notes": "Current broad integration wallet with live wallet, LST, Ember, margin, Bluefin, and Aftermath coverage.",
@@ -32,9 +40,16 @@
     {
       "id": "owner_aftermath_deepbook",
       "tier": "required",
+      "lifecycle": "active",
+      "ownership": "legacy_personal",
+      "protocols": [
+        "wallet",
+        "deepbook",
+        "aftermathPerps"
+      ],
       "address": "0xf9ac06a11df84c884fc34f3b13af10e46fedb4af12530e5f64a789cd3f2b7a28",
       "source": "owner-managed fixture captured 2026-03-11",
-      "notes": "Active wallet covering Aftermath perps plus DeepBook margin.",
+      "notes": "Active wallet covering Aftermath perps plus DeepBook margin. Keep until a team-owned margin/perps fixture replaces it.",
       "check": {
         "requiredTexts": [
           "Wallet Holdings",
@@ -56,6 +71,11 @@
     {
       "id": "historical_aftermath_docs",
       "tier": "candidate",
+      "lifecycle": "historical",
+      "ownership": "historical_docs",
+      "protocols": [
+        "aftermathPerps"
+      ],
       "address": "0x21d001e8b07da2e3facb3e2d636bbaef43ba3c978bd84810368840b7d57c5068",
       "source": "docs/defi-portfolio/aftermath-positions.md",
       "notes": "Historical Aftermath sample from protocol notes.",
@@ -68,6 +88,11 @@
     {
       "id": "historical_bluefin_docs",
       "tier": "candidate",
+      "lifecycle": "historical",
+      "ownership": "historical_docs",
+      "protocols": [
+        "bluefinPro"
+      ],
       "address": "0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267",
       "source": "docs/defi-portfolio/bluefin-positions.md",
       "notes": "Historical Bluefin sample from protocol notes.",
@@ -80,6 +105,11 @@
     {
       "id": "historical_alpha_docs",
       "tier": "candidate",
+      "lifecycle": "historical",
+      "ownership": "historical_docs",
+      "protocols": [
+        "alpha"
+      ],
       "address": "0xd631cd66138909636fc3f73ed75820d0c5b76332d1644608ed1c85ea2b8219b4",
       "source": "docs/defi-portfolio/alphafi-positions.md",
       "notes": "Historical Alpha sample from protocol notes.",
@@ -92,6 +122,11 @@
     {
       "id": "historical_navi_docs",
       "tier": "candidate",
+      "lifecycle": "historical",
+      "ownership": "historical_docs",
+      "protocols": [
+        "navi"
+      ],
       "address": "0xabc6c3fbc89b96e3351fdbeb5730bcc5398648367260c6a4e201779e34694e04",
       "source": "docs/defi-portfolio/navi-positions.md",
       "notes": "Historical NAVI sample from protocol notes.",
@@ -104,6 +139,11 @@
     {
       "id": "historical_turbos_docs",
       "tier": "candidate",
+      "lifecycle": "historical",
+      "ownership": "historical_docs",
+      "protocols": [
+        "turbos"
+      ],
       "address": "0x91bfbc386a41afcfd9b2533058d7e915a1d3829089cc268ff4333d54d6339ca1",
       "source": "docs/defi-portfolio/turbos-positions.md",
       "notes": "Historical Turbos sample from protocol notes.",

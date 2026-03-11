@@ -1,0 +1,180 @@
+{
+  "teamSlots": [
+    {
+      "id": "team_wallet_micro",
+      "status": "planned",
+      "notes": "Low-balance team-owned wallet used for wallet holdings, protocol-filter, and liquid-staking regressions.",
+      "protocols": [
+        "wallet"
+      ]
+    },
+    {
+      "id": "team_vault_micro",
+      "status": "planned",
+      "notes": "Low-balance team-owned vault wallet used for Ember coverage without unrelated protocol noise.",
+      "protocols": [
+        "ember"
+      ]
+    },
+    {
+      "id": "team_lending_micro",
+      "status": "planned",
+      "notes": "Low-balance team-owned lending wallet covering Suilend, NAVI, Alpha, and Scallop.",
+      "protocols": [
+        "suilend",
+        "navi",
+        "alpha",
+        "scallop"
+      ]
+    },
+    {
+      "id": "team_lp_micro",
+      "status": "planned",
+      "notes": "Low-balance team-owned LP wallet covering Cetus, Turbos, and Bluefin Spot.",
+      "protocols": [
+        "cetus",
+        "turbos",
+        "bluefinSpot"
+      ]
+    },
+    {
+      "id": "team_margin_micro",
+      "status": "planned",
+      "notes": "Low-balance team-owned margin wallet for DeepBook margin coverage.",
+      "protocols": [
+        "deepbook"
+      ]
+    },
+    {
+      "id": "team_perps_micro",
+      "status": "planned",
+      "notes": "Low-balance team-owned perps wallet covering Bluefin Pro and Aftermath perps.",
+      "protocols": [
+        "bluefinPro",
+        "aftermathPerps"
+      ]
+    }
+  ],
+  "protocols": [
+    {
+      "key": "suilend",
+      "label": "Suilend",
+      "kind": "lending",
+      "liveFixtureIds": [],
+      "teamSlotIds": [
+        "team_lending_micro"
+      ]
+    },
+    {
+      "key": "navi",
+      "label": "NAVI",
+      "kind": "lending",
+      "liveFixtureIds": [],
+      "teamSlotIds": [
+        "team_lending_micro"
+      ]
+    },
+    {
+      "key": "alpha",
+      "label": "Alpha",
+      "kind": "lending",
+      "liveFixtureIds": [],
+      "teamSlotIds": [
+        "team_lending_micro"
+      ]
+    },
+    {
+      "key": "scallop",
+      "label": "Scallop",
+      "kind": "lending",
+      "liveFixtureIds": [],
+      "teamSlotIds": [
+        "team_lending_micro"
+      ]
+    },
+    {
+      "key": "cetus",
+      "label": "Cetus",
+      "kind": "dex_lp",
+      "liveFixtureIds": [],
+      "teamSlotIds": [
+        "team_lp_micro"
+      ]
+    },
+    {
+      "key": "turbos",
+      "label": "Turbos",
+      "kind": "dex_lp",
+      "liveFixtureIds": [],
+      "teamSlotIds": [
+        "team_lp_micro"
+      ]
+    },
+    {
+      "key": "wallet",
+      "label": "Wallet",
+      "kind": "wallet",
+      "liveFixtureIds": [
+        "broad_integration_smoke",
+        "owner_aftermath_deepbook"
+      ],
+      "teamSlotIds": [
+        "team_wallet_micro"
+      ]
+    },
+    {
+      "key": "ember",
+      "label": "Ember",
+      "kind": "vault",
+      "liveFixtureIds": [
+        "broad_integration_smoke"
+      ],
+      "teamSlotIds": [
+        "team_vault_micro"
+      ]
+    },
+    {
+      "key": "deepbook",
+      "label": "DeepBook",
+      "kind": "margin",
+      "liveFixtureIds": [
+        "owner_aftermath_deepbook"
+      ],
+      "teamSlotIds": [
+        "team_margin_micro"
+      ]
+    },
+    {
+      "key": "bluefinSpot",
+      "label": "Bluefin Spot",
+      "kind": "dex_lp",
+      "liveFixtureIds": [],
+      "teamSlotIds": [
+        "team_lp_micro"
+      ]
+    },
+    {
+      "key": "bluefinPro",
+      "label": "Bluefin Pro",
+      "kind": "perps",
+      "liveFixtureIds": [
+        "broad_integration_smoke"
+      ],
+      "teamSlotIds": [
+        "team_perps_micro"
+      ]
+    },
+    {
+      "key": "aftermathPerps",
+      "label": "Aftermath Perps",
+      "kind": "perps",
+      "liveFixtureIds": [
+        "broad_integration_smoke",
+        "owner_aftermath_deepbook"
+      ],
+      "teamSlotIds": [
+        "team_perps_micro"
+      ]
+    }
+  ]
+}
