@@ -5700,13 +5700,18 @@ function afRoleLabel(role) {
   return "Unknown";
 }
 function afIsEconomicRole(role) {
-  return role !== "admin" && role !== "assistant";
+  return role !== "assistant";
 }
 function afMarketAccountKey(chId, accountId) {
   return `${chId}::${accountId}`;
 }
 function afMarketLabel(chId) {
   return AF_CLEARING_HOUSES[chId] || `Market ${truncHash(chId, 6)}`;
+}
+function afAccountCollateralCoinType(typeRepr) {
+  const raw = String(typeRepr || "").trim();
+  const match = raw.match(/::account::Account<(.+)>$/);
+  return normalizeCoinType(match?.[1] || "");
 }
 async function fetchAftermathAccountCaps(addr) {
   const capByObject = {};
@@ -5803,6 +5808,51 @@ async function fetchAftermathAccountCaps(addr) {
     });
 
   return { caps, accounts, partial };
+}
+async function fetchAftermathAccountObjects(accounts) {
+  const warnings = [];
+  const byAccountId = {};
+  const accountObjectIds = uniqueNormalizedAddresses((accounts || []).map((row) => row.accountObjectId));
+  if (!accountObjectIds.length) return { byAccountId, totalCollateral: 0, partial: false, warnings };
+
+  const objectById = await multiGetObjectsTypeJsonByAddress(accountObjectIds);
+  const missingIds = accountObjectIds.filter((id) => {
+    const contents = objectById[id]?.asMoveObject?.contents;
+    return !contents?.json;
+  });
+
+  let totalCollateral = 0;
+  for (const row of (accounts || [])) {
+    const obj = objectById[row.accountObjectId];
+    const contents = obj?.asMoveObject?.contents;
+    const json = contents?.json;
+    if (!json) continue;
+    const collateralCoinType = afAccountCollateralCoinType(contents?.type?.repr || "") || AF_USDC_COIN_TYPE;
+    const coinMeta = resolveCoinType(collateralCoinType);
+    const decimals = Number.isFinite(Number(coinMeta?.decimals)) ? Number(coinMeta.decimals) : 6;
+    const rawCollateral = parseBigIntSafe(json.collateral || 0);
+    const accountCollateral = scaledBigIntToApprox(rawCollateral, decimals, 8);
+    if (accountCollateral > AF_PERPS_COLLATERAL_DUST) totalCollateral += accountCollateral;
+    byAccountId[row.accountId] = {
+      accountId: row.accountId,
+      accountObjectId: row.accountObjectId,
+      accountCollateral,
+      rawCollateral,
+      collateralCoinType,
+      collateralSymbol: coinMeta?.symbol || shortType(collateralCoinType),
+    };
+  }
+
+  if (missingIds.length) {
+    warnings.push(`${missingIds.length} Aftermath account object(s) were unavailable; idle collateral may be understated.`);
+  }
+
+  return {
+    byAccountId,
+    totalCollateral,
+    partial: missingIds.length > 0,
+    warnings,
+  };
 }
 async function fetchAftermathClearingHouses(force = false) {
   const now = Date.now();
@@ -6106,17 +6156,41 @@ async function fetchAftermathPerpsPositions(addr) {
 
     const capsMeta = await fetchAftermathAccountCaps(addr);
     const caps = capsMeta.caps || [];
-    const accounts = capsMeta.accounts || [];
+    const accountRows = capsMeta.accounts || [];
+    const accountObjectMeta = await fetchAftermathAccountObjects(accountRows);
+    const accounts = accountRows.map((row) => {
+      const objectMeta = accountObjectMeta.byAccountId?.[row.accountId] || {};
+      return {
+        ...row,
+        accountCollateral: Number.isFinite(objectMeta.accountCollateral) ? objectMeta.accountCollateral : 0,
+        collateralCoinType: objectMeta.collateralCoinType || AF_USDC_COIN_TYPE,
+        collateralSymbol: objectMeta.collateralSymbol || "USDC",
+      };
+    });
     const economicAccounts = accounts.filter((row) => afIsEconomicRole(row.role));
     if (accounts.length > economicAccounts.length) {
-      warnings.push(`${accounts.length - economicAccounts.length} admin/assistant account(s) excluded from exposure totals.`);
+      warnings.push(`${accounts.length - economicAccounts.length} delegated assistant account(s) excluded from exposure totals.`);
     }
     if (capsMeta.partial) {
       partial = true;
       warnings.push("AccountCap scan reached pagination cap; account coverage may be partial.");
     }
+    if (accountObjectMeta.partial) partial = true;
+    for (const w of (accountObjectMeta.warnings || [])) warnings.push(w);
     if (!accounts.length) {
-      return { accounts: [], economicAccounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial, warnings };
+      return {
+        accounts: [],
+        economicAccounts: [],
+        caps: [],
+        markets: [],
+        positions: [],
+        orders: [],
+        collateral: 0,
+        idleCollateral: 0,
+        allocatedCollateral: 0,
+        partial,
+        warnings,
+      };
     }
 
     let marketRows = [];
@@ -6141,7 +6215,12 @@ async function fetchAftermathPerpsPositions(addr) {
     const states = posMeta.states || [];
     const stateByKey = {};
     for (const s of states) stateByKey[s.key] = s;
-    const totalCollateral = Number.isFinite(posMeta.totalCollateral) ? posMeta.totalCollateral : 0;
+    const allocatedCollateral = Number.isFinite(posMeta.totalCollateral) ? posMeta.totalCollateral : 0;
+    const idleCollateral = economicAccounts.reduce((sum, row) => {
+      const collateral = Number.isFinite(row.accountCollateral) ? row.accountCollateral : 0;
+      return sum + collateral;
+    }, 0);
+    const totalCollateral = idleCollateral + allocatedCollateral;
 
     const positions = states
       .filter((s) => s.hasOpenPosition)
@@ -6290,6 +6369,8 @@ async function fetchAftermathPerpsPositions(addr) {
       positions,
       orders,
       collateral: totalCollateral,
+      idleCollateral,
+      allocatedCollateral,
       partial,
       warnings: [...new Set(warnings)].slice(0, 12),
     };
@@ -6302,6 +6383,8 @@ async function fetchAftermathPerpsPositions(addr) {
       positions: [],
       orders: [],
       collateral: 0,
+      idleCollateral: 0,
+      allocatedCollateral: 0,
       partial: true,
       warnings: [e?.message || "Aftermath fetch failed."],
     };
@@ -6533,7 +6616,19 @@ async function renderAddress(app, addr) {
     const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
     const afPerpsData = aftermathPerps.status === "fulfilled"
       ? aftermathPerps.value
-      : { accounts: [], economicAccounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
+      : {
+        accounts: [],
+        economicAccounts: [],
+        caps: [],
+        markets: [],
+        positions: [],
+        orders: [],
+        collateral: 0,
+        idleCollateral: 0,
+        allocatedCollateral: 0,
+        partial: true,
+        warnings: ["Aftermath fetch failed."],
+      };
     const scallopWalletSupply = await buildSyntheticScallopWalletPositions(walletBals);
     if (scallopWalletSupply.consumedKeys.size) {
       walletBals = walletBals.filter((balance) => !scallopWalletSupply.consumedKeys.has(coinTypeKey(balance.coinType)));
@@ -6674,6 +6769,12 @@ async function renderAddress(app, addr) {
     const afEconomicExposureCount = (afPerpsData.positions?.length || 0) + (afPerpsData.orders?.length || 0);
     const bluefinCollateralOnly = bluefinCollateralUsd > 0 && !(bluefinProData.positions?.length > 0);
     const aftermathCollateralOnly = afPerpsData.collateral > 0 && afEconomicExposureCount === 0;
+    const aftermathIdleOnly = afPerpsData.idleCollateral > AF_PERPS_COLLATERAL_DUST
+      && !(afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST)
+      && afEconomicExposureCount === 0;
+    const aftermathAllocatedOnly = afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST
+      && !(afPerpsData.idleCollateral > AF_PERPS_COLLATERAL_DUST)
+      && afEconomicExposureCount === 0;
     const aftermathAccountsOnly = (afPerpsData.accounts?.length || 0) > 0 && afEconomicExposureCount === 0 && !(afPerpsData.collateral > 0);
     const netWorth = totalWallet + totalLst + totalEmber + totalSupplied - totalBorrowed + totalDexLp + totalMarginCollateral;
     const renderWalletHoldingsSection = () => {
@@ -6782,12 +6883,20 @@ async function renderAddress(app, addr) {
       const exposureAccounts = afPerpsData.economicAccounts?.length ?? afPerpsData.accounts.length;
       const partialSuffix = afPerpsData.partial ? " · partial" : "";
       const afState = [];
-      if (aftermathCollateralOnly) afState.push("collateral only");
+      if (aftermathIdleOnly) afState.push("idle collateral only");
+      else if (aftermathAllocatedOnly) afState.push("allocated collateral only");
+      else if (aftermathCollateralOnly) afState.push("collateral only");
       else if (aftermathAccountsOnly) afState.push("accounts only");
       afState.push(`${afPerpsData.accounts.length} acct (${exposureAccounts} economic)`);
       afState.push(`${afPerpsData.positions.length} pos`);
       afState.push(`${afPerpsData.orders.length} orders`);
       afState.push(`${fmtUsdFromFloat(afPerpsData.collateral)} collateral${partialSuffix}`);
+      if (afPerpsData.idleCollateral > AF_PERPS_COLLATERAL_DUST || afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST) {
+        const collateralBreakdown = [];
+        if (afPerpsData.idleCollateral > AF_PERPS_COLLATERAL_DUST) collateralBreakdown.push(`${fmtUsdFromFloat(afPerpsData.idleCollateral)} idle`);
+        if (afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST) collateralBreakdown.push(`${fmtUsdFromFloat(afPerpsData.allocatedCollateral)} allocated`);
+        if (collateralBreakdown.length) afState.push(collateralBreakdown.join(" · "));
+      }
       html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afEconomicExposureCount}</div><div class="stat-sub">${afState.join(" · ")}</div></div>`;
     }
     html += `</div>`;
@@ -7014,19 +7123,29 @@ async function renderAddress(app, addr) {
       html += `<h3 class="u-section-h3">Aftermath Perpetuals</h3>`;
       html += `<div class="u-bg-panel-12">`;
       if (afPerpsData.collateral > 0) {
-        html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
+        html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
+        if (afPerpsData.idleCollateral > AF_PERPS_COLLATERAL_DUST) {
+          html += `<div style="display:flex;justify-content:space-between;padding:2px 0 2px 12px;font-size:12px"><span class="u-c-dim">Idle / Account</span><span class="u-c-text">${fmtUsdFromFloat(afPerpsData.idleCollateral)}</span></div>`;
+        }
+        if (afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST) {
+          html += `<div style="display:flex;justify-content:space-between;padding:2px 0 2px 12px;font-size:12px;margin-bottom:8px"><span class="u-c-dim">Allocated / Markets</span><span class="u-c-text">${fmtUsdFromFloat(afPerpsData.allocatedCollateral)}</span></div>`;
+        } else {
+          html += `<div style="margin-bottom:8px"></div>`;
+        }
       }
       if ((afPerpsData.accounts.length || 0) > (afPerpsData.economicAccounts?.length || 0)) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Admin/Assistant accounts are shown for inspection but excluded from collateral, position, and order totals.</div>`;
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Delegated assistant accounts are shown for inspection but excluded from collateral, position, and order totals.</div>`;
       }
-      if (aftermathCollateralOnly) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Idle collateral only. No economic positions or open orders are currently active.</div>`;
+      if (aftermathIdleOnly) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Idle collateral only. No allocated market collateral, open positions, or open orders are currently active.</div>`;
+      } else if (aftermathCollateralOnly) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No open positions or orders are currently active, but some collateral is still parked in Aftermath${afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST ? " and remains allocated to one or more markets." : "."}</div>`;
       } else if (aftermathAccountsOnly) {
         html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Accounts found for inspection, but no economic collateral, positions, or open orders were detected.</div>`;
       }
       if (afPerpsData.accounts.length) {
         html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Perps Accounts</div>`;
-        html += `<table><thead><tr><th>Account ID</th><th>Role</th><th>Caps (owned)</th><th class="u-ta-right">Account Object</th></tr></thead><tbody>`;
+        html += `<table><thead><tr><th>Account ID</th><th>Role</th><th class="u-ta-right">Idle Collateral</th><th>Caps (owned)</th><th class="u-ta-right">Account Object</th></tr></thead><tbody>`;
         for (const aRow of afPerpsData.accounts) {
           const roleBadgeColor = aRow.role === "admin"
             ? "var(--accent)"
@@ -7038,9 +7157,13 @@ async function renderAddress(app, addr) {
           const accountObject = aRow.accountObjectId
             ? hashLink(aRow.accountObjectId, "/object/" + aRow.accountObjectId)
             : '<span class="u-c-dim">—</span>';
+          const idleCollateralText = Number.isFinite(aRow.accountCollateral) && aRow.accountCollateral > AF_PERPS_COLLATERAL_DUST
+            ? fmtUsdFromFloat(aRow.accountCollateral)
+            : "—";
           html += `<tr>
             <td class="u-mono">${escapeHtml(String(aRow.accountId || "—"))}</td>
             <td><span class="badge" style="background:${roleBadgeColor}22;color:${roleBadgeColor}">${escapeHtml(roleText)}</span></td>
+            <td class="u-ta-right-mono">${idleCollateralText}</td>
             <td>${capLinks}</td>
             <td class="u-ta-right">${accountObject}</td>
           </tr>`;
