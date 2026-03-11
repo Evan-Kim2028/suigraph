@@ -2649,14 +2649,24 @@ async function discoverPoolAddresses(coinTypes) {
   for (const ct of needed) poolAddressCache[ct].ts = now;
 }
 
-async function readPoolPrices(coinTypesBySymbol) {
+async function readPoolPrices(entries) {
   // Collect all pool addresses we need to read
-  const addrToMeta = {}; // address → { coinType, symbol, dex, quoteSymbol, isTokenA }
-  for (const [sym, ct] of Object.entries(coinTypesBySymbol)) {
-    const cached = poolAddressCache[ct];
+  const addrToMeta = {}; // address → { coinType, coinKey, symbol, dex, quoteSymbol, isTokenA }
+  for (const entry of (entries || [])) {
+    const ct = entry.coinType;
+    const sym = entry.symbol;
+    const cached = poolAddressCache[ct] || poolAddressCache[normalizeCoinType(ct)];
     if (!cached) continue;
     for (const pool of cached.pools) {
-      addrToMeta[pool.address] = { coinType: ct, symbol: sym, dex: pool.dex, quoteSymbol: pool.quoteSymbol, isTokenA: pool.isTokenA, typeRepr: pool.typeRepr };
+      addrToMeta[pool.address] = {
+        coinType: ct,
+        coinKey: coinTypeKey(ct),
+        symbol: sym,
+        dex: pool.dex,
+        quoteSymbol: pool.quoteSymbol,
+        isTokenA: pool.isTokenA,
+        typeRepr: pool.typeRepr,
+      };
     }
   }
   const addresses = Object.keys(addrToMeta);
@@ -2664,8 +2674,10 @@ async function readPoolPrices(coinTypesBySymbol) {
 
   const poolById = await multiGetObjectsTypeJsonByAddress(addresses);
 
-  // Compute prices per symbol, weighted by liquidity
-  const accum = {}; // symbol → { weightedSum, liqSum }
+  // Choose the pool with the deepest trusted quote reserve. Raw CLMM
+  // liquidity is not comparable across pools/dexes, but quote-side
+  // reserves in USDC/SUI are.
+  const bestByCoin = {}; // coinKey → { coinType, symbol, usd, quoteReserveUsd }
   for (const addr of addresses) {
     const obj = poolById[addr];
     if (!obj) continue;
@@ -2710,14 +2722,32 @@ async function readPoolPrices(coinTypesBySymbol) {
 
     if (!tokenPriceUsd || !Number.isFinite(tokenPriceUsd) || tokenPriceUsd <= 0) continue;
 
-    if (!accum[meta.symbol]) accum[meta.symbol] = { weightedSum: 0, liqSum: 0 };
-    accum[meta.symbol].weightedSum += tokenPriceUsd * liquidity;
-    accum[meta.symbol].liqSum += liquidity;
+    const reserveA = Number(json.coin_a || 0) / Math.pow(10, resolvedA.decimals || 9);
+    const reserveB = Number(json.coin_b || 0) / Math.pow(10, resolvedB.decimals || 9);
+    let quoteReserveUsd = 0;
+    if (meta.quoteSymbol === "USDC") {
+      quoteReserveUsd = meta.isTokenA ? reserveB : reserveA;
+    } else if (meta.quoteSymbol === "SUI") {
+      const quoteReserveSui = meta.isTokenA ? reserveB : reserveA;
+      quoteReserveUsd = quoteReserveSui * (defiPrices.SUI || 0);
+    }
+    if (!(quoteReserveUsd > 0)) continue;
+
+    if (!meta.coinKey) continue;
+    const existing = bestByCoin[meta.coinKey];
+    if (!existing || quoteReserveUsd > existing.quoteReserveUsd) {
+      bestByCoin[meta.coinKey] = {
+        coinType: meta.coinType,
+        symbol: meta.symbol,
+        usd: tokenPriceUsd,
+        quoteReserveUsd,
+      };
+    }
   }
 
   const result = {};
-  for (const [sym, { weightedSum, liqSum }] of Object.entries(accum)) {
-    if (liqSum > 0) result[sym] = weightedSum / liqSum;
+  for (const [coinKey, meta] of Object.entries(bestByCoin)) {
+    if (meta?.quoteReserveUsd > 0 && meta?.usd > 0) result[coinKey] = meta;
   }
   return result;
 }
@@ -2746,16 +2776,19 @@ async function fetchPoolOraclePrices(specificCoinTypes) {
   await discoverPoolAddresses(coinTypesToDiscover);
 
   // Read fresh prices from pools
-  const coinTypesBySymbol = {};
-  for (const e of entries) coinTypesBySymbol[e.symbol] = e.coinType;
-  const prices = await readPoolPrices(coinTypesBySymbol);
+  const prices = await readPoolPrices(entries);
 
-  // Write into defiPrices
-  for (const [sym, usd] of Object.entries(prices)) {
-    if (usd > 0) defiPrices[sym] = usd;
+  // Write into exact coin-type prices first, then seed symbol fallbacks once per symbol.
+  const symbolWrites = new Set();
+  for (const meta of Object.values(prices)) {
+    if (!(meta?.usd > 0)) continue;
+    setDefiUsdPriceForCoinType(meta.coinType, meta.usd);
+    if (!symbolWrites.has(meta.symbol)) {
+      defiPrices[meta.symbol] = meta.usd;
+      symbolWrites.add(meta.symbol);
+    }
   }
   oraclePricesTs = Date.now();
-  persistDefiPriceState();
 }
 
 async function ensurePrices(coinTypes) {
@@ -2786,20 +2819,24 @@ async function ensurePrices(coinTypes) {
   }
   if (!needed.length) return;
   await fetchPoolOraclePrices(needed);
-  persistDefiPriceState();
 }
 
 function syncPeggedPrices() {
   if (defiPrices.SUI) { for (const sym of SUI_PEGGED_SYMBOLS) defiPrices[sym] = defiPrices.SUI; }
-  defiPrices.USDC = 1; defiPrices.USDT = 1; defiPrices.wUSDC = 1;
-  defiPrices.BUCK = 1; defiPrices.AUSD = 1; defiPrices.FDUSD = 1;
-  defiPrices.USDY = 1; defiPrices.SUI_USDE = 1; defiPrices.suiUSDe = 1;
+  for (const sym of USD_PEGGED_SYMBOLS) defiPrices[sym] = 1;
   if (defiPrices[BTC_PRICE_SOURCE]) { for (const sym of BTC_PEGGED_SYMBOLS) defiPrices[sym] = defiPrices[BTC_PRICE_SOURCE]; }
+  for (const [coinType, meta] of Object.entries(KNOWN_COIN_TYPES)) {
+    if (meta.symbol === "SUI" && defiPrices.SUI) setDefiUsdPriceForCoinType(coinType, defiPrices.SUI);
+    if (USD_PEGGED_SYMBOLS.has(meta.symbol)) setDefiUsdPriceForCoinType(coinType, 1);
+    if (SUI_PEGGED_SYMBOLS.has(meta.symbol) && defiPrices.SUI) setDefiUsdPriceForCoinType(coinType, defiPrices.SUI);
+    if (BTC_PEGGED_SYMBOLS.has(meta.symbol) && defiPrices[BTC_PRICE_SOURCE]) setDefiUsdPriceForCoinType(coinType, defiPrices[BTC_PRICE_SOURCE]);
+  }
 }
 
 function persistDefiPriceState() {
   writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.defiPrices, {
     prices: defiPrices,
+    pricesByCoinType: defiPricesByCoinType,
     deepbookSuiPriceTs,
     oraclePricesTs,
   }, 50000);
@@ -2811,6 +2848,9 @@ function hydratePersistedDefiPriceState() {
   if (!persisted || typeof persisted !== "object") return;
   if (persisted.prices && typeof persisted.prices === "object") {
     defiPrices = { ...defiPrices, ...persisted.prices };
+  }
+  if (persisted.pricesByCoinType && typeof persisted.pricesByCoinType === "object") {
+    defiPricesByCoinType = { ...defiPricesByCoinType, ...persisted.pricesByCoinType };
   }
   deepbookSuiPriceTs = Number(persisted.deepbookSuiPriceTs || deepbookSuiPriceTs || 0);
   oraclePricesTs = Number(persisted.oraclePricesTs || oraclePricesTs || 0);
@@ -2838,6 +2878,7 @@ async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
 
     if (deepBookSuiPrice && Number.isFinite(deepBookSuiPrice)) {
       defiPrices.SUI = deepBookSuiPrice;
+      setDefiUsdPriceForCoinType(QUOTE_COINS.SUI.type, deepBookSuiPrice);
       deepbookSuiPriceTs = Date.now();
     }
 
@@ -2847,10 +2888,46 @@ async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
     }
 
     syncPeggedPrices();
-    persistDefiPriceState();
   })().finally(() => { defiPricesInFlight = null; });
 
   return defiPricesInFlight;
+}
+
+function resolveWalletBalancePriceInfo(balance) {
+  const symbol = String(balance?.symbol || "");
+  const isLST = !!balance?.isLST;
+  const lstRate = isLST ? (lstExchangeRates[symbol] || 1) : 1;
+  if (isLST) {
+    const price = getDefiUsdPrice("SUI", QUOTE_COINS.SUI.type) * lstRate;
+    return {
+      price: price > 0 ? price : 0,
+      priceTrusted: price > 0,
+      priceReason: price > 0 ? "lst" : "missingPrice",
+      lstRate,
+    };
+  }
+  if (!isKnownCoinType(balance?.coinType)) {
+    return {
+      price: 0,
+      priceTrusted: false,
+      priceReason: "untrustedCoinType",
+      lstRate: 1,
+    };
+  }
+  const price = getDefiUsdPrice(symbol, balance?.coinType);
+  return {
+    price: price > 0 ? price : 0,
+    priceTrusted: price > 0,
+    priceReason: price > 0 ? "knownCoinType" : "missingPrice",
+    lstRate: 1,
+  };
+}
+
+function sortWalletBalances(rows) {
+  return rows.sort((a, b) =>
+    (b.usdValue || 0) - (a.usdValue || 0)
+    || Number(!!b.priceTrusted) - Number(!!a.priceTrusted)
+    || b.amount - a.amount);
 }
 
 // ── DeFi Ecosystem Stats (DeFiLlama) ──────────────────────────────────
@@ -3006,6 +3083,97 @@ const CORE_LENDING_TOKENS = new Set(["SUI", "USDC", "USDT", "ETH", "WETH", "BTC"
 function isCoreToken(sym) { return CORE_LENDING_TOKENS.has(sym); }
 
 // ── Protocol Fetchers ──────────────────────────────────────────────────
+async function fetchSuilendSupportedCoinTypes() {
+  const data = await gql(`{
+    object(address: "${SUILEND_MAIN_POOL_OBJECT}") {
+      asMoveObject { contents { json } }
+    }
+  }`);
+  return {
+    coinTypes: uniqueNonEmptyStrings((data?.object?.asMoveObject?.contents?.json?.reserves || [])
+      .map((reserve) => normalizeCoinTypeLike(reserve?.coin_type?.name || ""))),
+    partial: false,
+  };
+}
+
+async function fetchNaviSupportedCoinTypes() {
+  const coinTypes = [];
+  let after = null;
+  let partial = false;
+  for (let page = 0; page < PROTOCOL_METADATA_MAX_PAGES; page += 1) {
+    const data = await gql(`query($after: String) {
+      address(address: "${NAVI_RESERVES_TABLE}") {
+        dynamicFields(first: 50, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes { value { ... on MoveValue { json } } }
+        }
+      }
+    }`, { after });
+    const conn = data?.address?.dynamicFields;
+    for (const node of (conn?.nodes || [])) {
+      const coinType = normalizeCoinTypeLike(node?.value?.json?.coin_type || "");
+      if (coinType) coinTypes.push(coinType);
+    }
+    if (!conn?.pageInfo?.hasNextPage) {
+      after = null;
+      break;
+    }
+    after = conn?.pageInfo?.endCursor || null;
+    if (!after) break;
+  }
+  if (after) partial = true;
+  return { coinTypes: uniqueNonEmptyStrings(coinTypes), partial };
+}
+
+async function fetchProtocolSupportedCoinTypes(force = false) {
+  return withTimedCache(protocolSupportedCoinTypesCache, PROTOCOL_SUPPORTED_COIN_TYPES_TTL_MS, force, async () => {
+    const labels = ["Suilend", "NAVI", "Scallop"];
+    const settled = await Promise.allSettled([
+      fetchSuilendSupportedCoinTypes(),
+      fetchNaviSupportedCoinTypes(),
+      (async () => {
+        const scallopMeta = await fetchScallopUnderlyingCoinTypes();
+        return {
+          coinTypes: uniqueNonEmptyStrings(Object.values(scallopMeta?.byCoinType || {})
+            .map((row) => row?.coinType || "")),
+          partial: !!scallopMeta?.partial,
+        };
+      })(),
+    ]);
+    const byProtocol = {};
+    const coinTypeKeys = new Set();
+    const summaryParts = [];
+    let partial = false;
+    for (let i = 0; i < labels.length; i += 1) {
+      const label = labels[i];
+      const result = settled[i];
+      const coinTypes = result.status === "fulfilled"
+        ? uniqueNonEmptyStrings(result.value?.coinTypes || [])
+        : [];
+      const protocolPartial = result.status === "fulfilled" ? !!result.value?.partial : true;
+      if (protocolPartial) partial = true;
+      if (coinTypes.length) summaryParts.push(`${label} ${coinTypes.length}`);
+      byProtocol[label] = {
+        coinTypes,
+        count: coinTypes.length,
+        partial: protocolPartial,
+        error: result.status === "rejected" ? (result.reason?.message || "Failed to fetch supported coin types") : "",
+      };
+      for (const coinType of coinTypes) {
+        const key = coinTypeKey(coinType);
+        if (key) coinTypeKeys.add(key);
+      }
+    }
+    return {
+      coinTypeKeys,
+      byProtocol,
+      totalSupported: coinTypeKeys.size,
+      summary: summaryParts.join(" · "),
+      partial,
+    };
+  });
+}
+
 function buildRateRow(protocol, token, borrowBps, supplyBps, utilization, sourceId, sourceLabel, note = "", totalSupplyHuman = 0, totalBorrowHuman = 0) {
   return {
     protocol,
@@ -3805,7 +3973,7 @@ function buildDefiFlowFromTxs(txs = [], sharedCoverage = {}) {
     for (const [ct, changes] of Object.entries(byCoin)) {
       coinBucketsSeen++;
       const resolved = resolveCoinType(ct);
-      const price = Number(defiPrices[resolved.symbol] || 0);
+      const price = Number(getDefiUsdPrice(resolved.symbol, ct) || 0);
       if (!(price > 0)) {
         unpricedCoinBuckets++;
         continue;
@@ -4454,7 +4622,7 @@ async function fetchRecentStablecoinFlowsSample(windowKeyOrForce = DEFI_WINDOW_D
       const amount = Math.abs(amountRaw) / Math.pow(10, resolved.decimals || 9);
       if (!Number.isFinite(amount) || amount <= 0) continue;
       const symbol = stableSymbolDisplay(resolved.symbol);
-      const price = Number(defiPrices[resolved.symbol] || defiPrices[symbol] || 1);
+      const price = Number(getDefiUsdPrice(resolved.symbol, ct) || getDefiUsdPrice(symbol) || 1);
       const usdValue = amount * (price > 0 ? price : 1);
       const agg = bySymbol[symbol] || { symbol, amount: 0, usdValue: 0, changes: 0 };
       agg.amount += amount;
@@ -4659,41 +4827,170 @@ async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY,
   });
 }
 
-async function fetchDefiWalletBalances(addr) {
-  const allBalances = [];
-  let cursor = null;
-  let pages = 0;
-  while (pages < 5) {
-    const afterClause = cursor ? `, after: "${cursor}"` : "";
-    const data = await gql(`{ address(address: "${addr}") { balances(first: 50${afterClause}) { pageInfo { hasNextPage endCursor } nodes { totalBalance coinType { repr } } } } }`);
-    const balances = data.address?.balances;
-    if (!balances) break;
-    for (const node of balances.nodes) {
-      const sym = node.coinType.repr.split("::").pop() || "?";
-      allBalances.push({ symbol: sym, coinType: node.coinType.repr, rawBalance: node.totalBalance });
+async function fetchAddressBalancesRaw(addr, force = false) {
+  const addrNorm = normalizeSuiAddress(addr);
+  if (!addrNorm) return { balances: [], partial: false, scannedPages: 0 };
+  const cacheState = getKeyedCacheState(addressBalanceCache, addrNorm);
+  return withTimedCache(cacheState, ADDRESS_BALANCE_TTL_MS, force, async () => {
+    const allBalances = [];
+    let cursor = null;
+    let pages = 0;
+    let partial = false;
+    while (pages < ADDRESS_BALANCE_MAX_PAGES) {
+      const afterClause = cursor ? `, after: "${cursor}"` : "";
+      const data = await gql(`{ address(address: "${addrNorm}") { balances(first: ${ADDRESS_BALANCE_PAGE_SIZE}${afterClause}) { pageInfo { hasNextPage endCursor } nodes { totalBalance coinType { repr } } } } }`);
+      const balances = data.address?.balances;
+      if (!balances) break;
+      for (const node of (balances.nodes || [])) {
+        const sym = node?.coinType?.repr?.split("::").pop() || "?";
+        allBalances.push({ symbol: sym, coinType: node?.coinType?.repr || "", rawBalance: node?.totalBalance || "0" });
+      }
+      pages += 1;
+      if (!balances.pageInfo?.hasNextPage) {
+        cursor = null;
+        break;
+      }
+      cursor = balances.pageInfo.endCursor || null;
+      if (!cursor) break;
     }
-    pages++;
-    if (!balances.pageInfo.hasNextPage) break;
-    cursor = balances.pageInfo.endCursor;
-  }
-  const nonZero = allBalances.filter(b => Number(b.rawBalance) > 0);
-  // Prefetch on-chain CoinMetadata for unknown coin types → accurate decimals & symbols
-  const unknownTypes = nonZero.map(b => b.coinType).filter(ct => !KNOWN_COIN_TYPES[ct] && !coinMetaCache[ct]);
-  if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
-  return nonZero
-    .map(b => {
-      const resolved = resolveCoinType(b.coinType);
+    if (cursor) partial = true;
+    const nonZero = allBalances.filter((balance) => Number(balance.rawBalance) > 0);
+    const unknownTypes = nonZero.map((balance) => balance.coinType).filter((coinType) => !KNOWN_COIN_TYPES[coinType] && !coinMetaCache[coinType]);
+    if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
+    return { balances: nonZero, partial, scannedPages: pages };
+  });
+}
+
+async function fetchDefiWalletBalances(addr) {
+  const raw = await fetchAddressBalancesRaw(addr);
+  const rows = sortWalletBalances((raw.balances || [])
+    .map((balance) => {
+      const resolved = resolveCoinType(balance.coinType);
       const sym = resolved.symbol;
       const dec = resolved.decimals;
-      const amount = Number(b.rawBalance) / Math.pow(10, dec);
-      const isLST = !!LST_TYPES[b.coinType];
-      // LSTs: price = SUI_price * exchange_rate; regular: price from cached market feeds
-      const lstRate = isLST ? (lstExchangeRates[sym] || 1) : 1;
-      const price = isLST ? (defiPrices.SUI || 0) * lstRate : (defiPrices[sym] || 0);
-      const suiEquiv = isLST ? amount * lstRate : 0;
-      return { symbol: sym, coinType: b.coinType, decimals: dec, amount, price, usdValue: amount * price, isLST, suiEquiv };
-    })
-    .sort((a, b) => (b.usdValue || 0) - (a.usdValue || 0) || b.amount - a.amount);
+      const amount = Number(balance.rawBalance) / Math.pow(10, dec);
+      const isLST = !!LST_TYPES[balance.coinType];
+      const row = { symbol: sym, coinType: balance.coinType, decimals: dec, amount, isLST };
+      const priceInfo = resolveWalletBalancePriceInfo(row);
+      return {
+        ...row,
+        price: priceInfo.price,
+        priceTrusted: priceInfo.priceTrusted,
+        priceReason: priceInfo.priceReason,
+        usdValue: amount * priceInfo.price,
+        suiEquiv: isLST ? amount * priceInfo.lstRate : 0,
+      };
+    }));
+  return { rows, partial: !!raw.partial, scannedPages: raw.scannedPages || 0 };
+}
+
+function emberVaultDisplayName(name) {
+  const base = String(name || "").replace(/^Ember\s+/i, "").trim() || String(name || "Vault").trim() || "Vault";
+  return /vault$/i.test(base) ? base : `${base} Vault`;
+}
+
+async function fetchEmberVaultCatalog() {
+  if (emberSuiVaultCatalog) return emberSuiVaultCatalog;
+  const byVaultId = {};
+  const byReceiptCoinType = {};
+  const receiptCoinTypeKeys = new Set();
+  const vaultObjectIds = [];
+  for (const [receiptCoinTypeRaw, row] of Object.entries(EMBER_SUI_VAULTS)) {
+    const receiptCoinType = normalizeCoinTypeLike(receiptCoinTypeRaw);
+    const vaultObjectId = normalizeSuiAddress(row?.vaultObjectId || "");
+    if (!receiptCoinType || !vaultObjectId) continue;
+    const depositCoinType = normalizeCoinTypeLike(row?.depositCoinType || "");
+    const receiptResolved = resolveCoinType(receiptCoinType);
+    const depositResolved = resolveCoinType(depositCoinType);
+    const meta = {
+      vaultId: vaultObjectId,
+      vaultObjectId,
+      vaultName: String(row?.vaultName || "Ember Vault").trim(),
+      displayName: emberVaultDisplayName(row?.vaultName || "Vault"),
+      receiptCoinType,
+      receiptSymbol: String(row?.receiptSymbol || receiptResolved.symbol || "?").trim() || "?",
+      receiptDecimals: Number.isFinite(Number(row?.receiptDecimals)) ? Number(row.receiptDecimals) : receiptResolved.decimals,
+      depositCoinType,
+      depositSymbol: String(row?.depositSymbol || depositResolved.symbol || "?").trim() || "?",
+      depositDecimals: Number.isFinite(Number(row?.depositDecimals)) ? Number(row.depositDecimals) : depositResolved.decimals,
+      managerLabel: String(row?.managerLabel || "Ember").trim() || "Ember",
+      targetApyPct: Number.isFinite(Number(row?.targetApyPct)) ? Number(row.targetApyPct) : 0,
+    };
+    byVaultId[vaultObjectId] = meta;
+    const receiptKey = coinTypeKey(receiptCoinType);
+    byReceiptCoinType[receiptKey] = meta;
+    receiptCoinTypeKeys.add(receiptKey);
+    vaultObjectIds.push(vaultObjectId);
+  }
+  emberSuiVaultCatalog = { byVaultId, byReceiptCoinType, receiptCoinTypeKeys, vaultObjectIds };
+  return emberSuiVaultCatalog;
+}
+
+async function fetchEmberReceiptBalances(addr, receiptCoinTypeKeys) {
+  const allowedKeys = receiptCoinTypeKeys instanceof Set
+    ? receiptCoinTypeKeys
+    : new Set(Array.from(receiptCoinTypeKeys || []).map(coinTypeKey).filter(Boolean));
+  if (!allowedKeys.size) return { matches: [], partial: false, scannedPages: 0 };
+  const raw = await fetchAddressBalancesRaw(addr);
+  const matches = [];
+  for (const balance of (raw.balances || [])) {
+    const coinType = normalizeCoinTypeLike(balance.coinType || "");
+    const rawBalance = parseBigIntSafe(balance.rawBalance || 0);
+    if (!coinType || rawBalance <= 0n) continue;
+    if (!allowedKeys.has(coinTypeKey(coinType))) continue;
+    matches.push({ coinType, rawBalance });
+  }
+  return { matches, partial: !!raw.partial, scannedPages: raw.scannedPages || 0 };
+}
+
+async function fetchEmberPositions(addr) {
+  const catalog = await fetchEmberVaultCatalog();
+  const receiptScan = await fetchEmberReceiptBalances(addr, catalog.receiptCoinTypeKeys);
+  const receiptBalances = receiptScan.matches || [];
+  if (!receiptBalances.length) return { positions: [], consumedKeys: new Set(), totalUsd: 0, partial: !!receiptScan.partial };
+  const vaultObjects = await multiGetObjectsTypeJsonByAddress(uniqueNonEmptyStrings(
+    receiptBalances.map((balance) => catalog.byReceiptCoinType[coinTypeKey(balance.coinType)]?.vaultObjectId)
+  ));
+  const positions = [];
+  const consumedKeys = new Set();
+  for (const balance of receiptBalances) {
+    const meta = catalog.byReceiptCoinType[coinTypeKey(balance.coinType)];
+    if (!meta) continue;
+    const vaultObject = vaultObjects[normalizeSuiAddress(meta.vaultObjectId)];
+    const rateRaw = parseBigIntSafe(vaultObject?.asMoveObject?.contents?.json?.rate?.value || 0);
+    const sharesRaw = parseBigIntSafe(balance.rawBalance);
+    if (rateRaw <= 0n || sharesRaw <= 0n) continue;
+    const underlyingRaw = (sharesRaw * EMBER_RATE_SCALE) / rateRaw;
+    const shareAmount = txListRawToApproxAbs(sharesRaw, meta.receiptDecimals);
+    const underlyingAmount = txListRawToApproxAbs(underlyingRaw, meta.depositDecimals);
+    const amountUsd = priceAmountUsd(underlyingAmount, meta.depositSymbol, meta.depositCoinType);
+    positions.push({
+      protocol: "Ember",
+      vaultId: meta.vaultId,
+      vaultObjectId: meta.vaultObjectId,
+      vaultName: meta.vaultName,
+      displayName: meta.displayName,
+      managerLabel: meta.managerLabel,
+      receiptCoinType: meta.receiptCoinType,
+      receiptSymbol: meta.receiptSymbol,
+      shareAmount,
+      amount: underlyingAmount,
+      symbol: meta.depositSymbol,
+      coinType: meta.depositCoinType,
+      amountUsd: Number.isFinite(amountUsd) ? amountUsd : 0,
+      yieldUsd: 0,
+      apyPct: meta.targetApyPct,
+      status: "SYNC",
+    });
+    consumedKeys.add(coinTypeKey(meta.receiptCoinType));
+  }
+  positions.sort((a, b) => (b.amountUsd || 0) - (a.amountUsd || 0));
+  return {
+    positions,
+    consumedKeys,
+    totalUsd: positions.reduce((sum, row) => sum + (row.amountUsd || 0), 0),
+    partial: !!receiptScan.partial,
+  };
 }
 
 async function fetchSuilendPositions(addr) {
@@ -4701,28 +4998,31 @@ async function fetchSuilendPositions(addr) {
   const caps = capData.address?.objects?.nodes || [];
   if (!caps.length) return [];
   const obligationIds = caps.map(c => c.contents.json.obligation_id);
-  const parts = obligationIds.map((id, i) => `ob${i}: object(address: "${id}") { ${GQL_F_MOVE_JSON} }`);
+  const parts = obligationIds.map((id, i) => `ob${i}: object(address: "${id}") { asMoveObject { contents { json } } }`);
   const obData = await gql(`{ ${parts.join("\n")} }`);
   const positions = [];
   for (let i = 0; i < obligationIds.length; i++) {
     const ob = obData[`ob${i}`]?.asMoveObject?.contents?.json;
     if (!ob) continue;
     const deposits = (ob.deposits || []).map(d => {
-      const sym = (d.coin_type?.name || "").split("::").pop();
+      const coinType = normalizeCoinTypeLike(d.coin_type?.name || "");
+      const sym = resolveCoinType(coinType).symbol || (d.coin_type?.name || "").split("::").pop();
       const usd = Number(d.market_value?.value || 0) / 1e18;
       const dec = getDecimals(sym);
       const raw = Number(d.deposited_ctoken_amount || 0);
-      const amount = raw > 0 ? raw / Math.pow(10, dec) : (usd > 0 && defiPrices[sym] > 0 ? usd / defiPrices[sym] : 0);
-      return { symbol: sym, amount, amountUsd: usd };
+      const price = getDefiUsdPrice(sym, coinType);
+      const amount = raw > 0 ? raw / Math.pow(10, dec) : (usd > 0 && price > 0 ? usd / price : 0);
+      return { symbol: sym, coinType, amount, amountUsd: usd };
     });
     const borrows = (ob.borrows || []).map(b => {
-      const sym = (b.coin_type?.name || "").split("::").pop();
+      const coinType = normalizeCoinTypeLike(b.coin_type?.name || "");
+      const sym = resolveCoinType(coinType).symbol || (b.coin_type?.name || "").split("::").pop();
       const usd = Number(b.market_value?.value || 0) / 1e18;
       // borrowed_amount.value is NOT in native decimals — it's a cumulative
       // interest-scaled value. Derive human amount from USD / price instead.
-      const price = defiPrices[sym] || 0;
+      const price = getDefiUsdPrice(sym, coinType);
       const amount = usd > 0 && price > 0 ? usd / price : 0;
-      return { symbol: sym, amount, amountUsd: usd };
+      return { symbol: sym, coinType, amount, amountUsd: usd };
     });
     const depositedUsd = Number(ob.deposited_value_usd?.value || 0) / 1e18;
     const borrowedUsd = Number(ob.unweighted_borrowed_value_usd?.value || 0) / 1e18;
@@ -4795,7 +5095,7 @@ async function fetchNaviPositions(addr) {
     return ct;
   };
   // Prefetch CoinMetadata for coin types not in our static lookup table
-  const unknownTypes = balResults.map(b => normalizeCt(b.reserve.coin_type)).filter(ct => ct && !KNOWN_COIN_TYPES[ct]);
+  const unknownTypes = balResults.map(b => normalizeCoinTypeLike(b.reserve.coin_type)).filter(ct => ct && !KNOWN_COIN_TYPES[ct]);
   if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
   // Step 4: Convert scaled balances to human-readable amounts.
   // Formula: human_amount = scaled_balance * (current_index / 1e27) / 1e9
@@ -4805,7 +5105,7 @@ async function fetchNaviPositions(addr) {
   let totalDepUsd = 0, totalBorUsd = 0;
   for (const b of balResults) {
     const rv = b.reserve;
-    const coinType = normalizeCt(rv.coin_type);
+    const coinType = normalizeCoinTypeLike(rv.coin_type);
     const resolved = resolveCoinType(coinType);
     const sym = resolved.symbol || `Asset${b.assetId}`;
     const dec = 9; // NAVI 9-decimal internal precision — do NOT use coin's native decimals
@@ -4813,15 +5113,15 @@ async function fetchNaviPositions(addr) {
     if (b.type === "supply") {
       const idx = Number(rv.current_supply_index || 1e27) / NAVI_RAY;
       const human = (scaled * idx) / Math.pow(10, dec);
-      const usd = human * (defiPrices[sym] || 0);
+      const usd = priceAmountUsd(human, sym, coinType);
       totalDepUsd += usd;
-      deposits.push({ symbol: sym, amount: human, amountUsd: usd, ltv: Number(rv.ltv || 0) / NAVI_RAY });
+      deposits.push({ symbol: sym, coinType, amount: human, amountUsd: usd, ltv: Number(rv.ltv || 0) / NAVI_RAY });
     } else {
       const idx = Number(rv.current_borrow_index || 1e27) / NAVI_RAY;
       const human = (scaled * idx) / Math.pow(10, dec);
-      const usd = human * (defiPrices[sym] || 0);
+      const usd = priceAmountUsd(human, sym, coinType);
       totalBorUsd += usd;
-      borrows.push({ symbol: sym, amount: human, amountUsd: usd });
+      borrows.push({ symbol: sym, coinType, amount: human, amountUsd: usd });
     }
   }
   // Health factor = sum(deposit_usd * ltv) / total_borrow_usd
@@ -4851,11 +5151,18 @@ async function fetchAlphaPositions(addr) {
       const sym = ALPHA_MARKETS[m] || `Market${m}`;
       const dec = getDecimals(sym);
       const amount = Number(c.value || 0) / Math.pow(10, dec);
-      const price = defiPrices[sym] || 0;
+      const price = getDefiUsdPrice(sym);
       const amountUsd = amount * price;
       return { symbol: sym, amount, amountUsd };
     });
-    const loans = (data.loans || []).map(l => { const sym = String(l.coin_type?.name || "").split("::").pop() || "?"; const dec = getDecimals(sym); const human = Number(l.amount || 0) / Math.pow(10, dec); const usd = human * (defiPrices[sym] || 0); return { symbol: sym, amount: human, amountUsd: usd }; });
+    const loans = (data.loans || []).map(l => {
+      const coinType = normalizeCoinTypeLike(l.coin_type?.name || "");
+      const sym = resolveCoinType(coinType).symbol || (String(l.coin_type?.name || "").split("::").pop() || "?");
+      const dec = getDecimals(sym);
+      const human = Number(l.amount || 0) / Math.pow(10, dec);
+      const usd = priceAmountUsd(human, sym, coinType);
+      return { symbol: sym, coinType, amount: human, amountUsd: usd };
+    });
     // Recompute USD totals from per-asset amounts when on-chain values are 0
     const computedDepUsd = deps.reduce((s, d) => s + d.amountUsd, 0);
     const computedBorUsd = loans.reduce((s, l) => s + l.amountUsd, 0);
@@ -4907,7 +5214,7 @@ async function fetchCetusPositions(addr) {
     const typeRepr = pd.contents.type.repr;
     const tps = typeRepr.match(/<(.+)>/)?.[1]?.split(",").map(s => s.trim()) || [];
     const rA = resolveCoinType(tps[0] || ""), rB = resolveCoinType(tps[1] || "");
-    pools[id] = { json: pd.contents.json, symbolA: rA.symbol, symbolB: rB.symbol, decA: rA.decimals, decB: rB.decimals };
+    pools[id] = { json: pd.contents.json, typeA: tps[0] || "", typeB: tps[1] || "", symbolA: rA.symbol, symbolB: rB.symbol, decA: rA.decimals, decB: rB.decimals };
   });
   const positions = [];
   for (const node of posNodes) {
@@ -4919,7 +5226,8 @@ async function fetchCetusPositions(addr) {
     const liq = Number(pj.liquidity);
     const { coinA, coinB } = getCoinAmountsFromLiquidity(liq, curSqrt, lowSqrt, upSqrt);
     const amtA = coinA / Math.pow(10, pool.decA), amtB = coinB / Math.pow(10, pool.decB);
-    const usdA = amtA * (defiPrices[pool.symbolA] || 0), usdB = amtB * (defiPrices[pool.symbolB] || 0);
+    const usdA = priceAmountUsd(amtA, pool.symbolA, pool.typeA);
+    const usdB = priceAmountUsd(amtB, pool.symbolB, pool.typeB);
     const inRange = curTick >= lowTick && curTick < upTick;
     positions.push({ protocol: "Cetus LP", pair: `${pool.symbolA}/${pool.symbolB}`, symbolA: pool.symbolA, symbolB: pool.symbolB, amountA: amtA, amountB: amtB, usdA, usdB, totalUsd: usdA + usdB, inRange, posId: node.address });
   }
@@ -5008,6 +5316,7 @@ async function fetchDeepBookPositions(addr) {
 
 // ── Scallop Lending Fetcher ─────────────────────────────────────────────
 let scallopBorrowIndicesCache = null;
+let scallopUnderlyingCoinTypesCache = null;
 async function fetchScallopBorrowIndices() {
   if (scallopBorrowIndicesCache) return scallopBorrowIndicesCache;
   try {
@@ -5023,6 +5332,151 @@ async function fetchScallopBorrowIndices() {
     scallopBorrowIndicesCache = indices;
     return indices;
   } catch (e) { return {}; }
+}
+
+async function fetchScallopUnderlyingCoinTypes() {
+  if (scallopUnderlyingCoinTypesCache) return scallopUnderlyingCoinTypesCache;
+  try {
+    const coinTypes = [];
+    const balanceSheetRows = [];
+    let after = null;
+    let partial = false;
+    for (let page = 0; page < PROTOCOL_METADATA_MAX_PAGES; page += 1) {
+      const data = await gql(`query($after: String) {
+        address(address: "${SCALLOP_BALANCE_SHEETS_TABLE}") {
+          dynamicFields(first: 50, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              name { json }
+              value { ... on MoveValue { json } }
+            }
+          }
+        }
+      }`, { after });
+      const conn = data?.address?.dynamicFields;
+      balanceSheetRows.push(...(conn?.nodes || []));
+      for (const row of (conn?.nodes || [])) {
+        const coinType = normalizeCoinTypeLike(row?.name?.json?.name || "");
+        if (!coinType) continue;
+        coinTypes.push(coinType);
+      }
+      if (!conn?.pageInfo?.hasNextPage) {
+        after = null;
+        break;
+      }
+      after = conn?.pageInfo?.endCursor || null;
+      if (!after) break;
+    }
+    if (after) partial = true;
+    const uniqueCoinTypes = uniqueNonEmptyStrings(coinTypes);
+    const unknownTypes = uniqueCoinTypes.filter(ct =>
+      !KNOWN_COIN_TYPES[ct]
+      && !KNOWN_COIN_TYPES[normalizeCoinType(ct)]
+      && !coinMetaCache[ct]
+      && !coinMetaCache[normalizeCoinType(ct)]);
+    if (unknownTypes.length) await prefetchCoinMeta(unknownTypes);
+    const bySymbol = {};
+    const byCoinType = {};
+    for (const row of balanceSheetRows) {
+      const coinType = normalizeCoinTypeLike(row?.name?.json?.name || "");
+      if (!coinType) continue;
+      const resolved = resolveCoinType(coinType);
+      const symbolKey = String(resolved.symbol || "").toUpperCase();
+      const sheet = row?.value?.json || {};
+      const totalUnderlying = Math.max(0, numOrZero(sheet.cash) + numOrZero(sheet.debt) - numOrZero(sheet.revenue));
+      const marketCoinSupply = numOrZero(sheet.market_coin_supply);
+      const exchangeRate = totalUnderlying > 0 && marketCoinSupply > 0 ? totalUnderlying / marketCoinSupply : 1;
+      const entry = {
+        coinType,
+        symbol: resolved.symbol,
+        decimals: resolved.decimals,
+        exchangeRate: exchangeRate > 0 ? exchangeRate : 1,
+      };
+      byCoinType[coinTypeKey(coinType)] = entry;
+      if (symbolKey && !bySymbol[symbolKey]) {
+        bySymbol[symbolKey] = entry;
+      }
+    }
+    scallopUnderlyingCoinTypesCache = { bySymbol, byCoinType, partial };
+    return scallopUnderlyingCoinTypesCache;
+  } catch (_) {
+    scallopUnderlyingCoinTypesCache = { bySymbol: {}, byCoinType: {}, partial: true };
+    return scallopUnderlyingCoinTypesCache;
+  }
+}
+
+function getScallopWrapperSymbolHints(balance) {
+  const coinType = normalizeCoinTypeLike(balance?.coinType || "");
+  if (!coinType) return [];
+  const parts = coinType.split("::");
+  if (parts.length < 3) return [];
+  const moduleName = String(parts[1] || "");
+  const typeName = String(parts[2] || "");
+  if (!/^scallop_/i.test(moduleName) && !/^SCALLOP_/i.test(typeName)) return [];
+  const hints = [];
+  const moduleHint = moduleName.replace(/^scallop_/i, "").trim();
+  if (moduleHint) hints.push(moduleHint.toUpperCase());
+  const balanceSymbol = String(balance?.symbol || "").trim();
+  if (/^s[A-Za-z0-9_]+$/.test(balanceSymbol)) hints.push(balanceSymbol.slice(1).toUpperCase());
+  const meta = coinMetaCache[coinType] || coinMetaCache[normalizeCoinType(coinType)] || null;
+  const metaSymbol = String(meta?.symbol || "").trim();
+  if (/^s[A-Za-z0-9_]+$/.test(metaSymbol)) hints.push(metaSymbol.slice(1).toUpperCase());
+  return [...new Set(hints.filter(Boolean))];
+}
+
+async function buildSyntheticScallopWalletPositions(walletBalances) {
+  const balances = Array.isArray(walletBalances) ? walletBalances : [];
+  const wrapperRows = balances
+    .map((balance) => ({ balance, hints: getScallopWrapperSymbolHints(balance) }))
+    .filter((row) => row.hints.length);
+  if (!wrapperRows.length) return { positions: [], consumedKeys: new Set(), coinTypes: [] };
+  const underlyingMeta = await fetchScallopUnderlyingCoinTypes();
+  const underlyingBySymbol = underlyingMeta?.bySymbol || {};
+  const deposits = [];
+  const consumedKeys = new Set();
+  const neededCoinTypes = [];
+  for (const row of wrapperRows) {
+    let underlying = null;
+    for (const hint of row.hints) {
+      if (underlyingBySymbol[hint]) {
+        underlying = underlyingBySymbol[hint];
+        break;
+      }
+    }
+    if (!underlying?.coinType) continue;
+    const shareAmount = Number(row.balance?.amount || 0);
+    if (!(shareAmount > 0)) continue;
+    const exchangeRate = Number(underlying.exchangeRate || 1);
+    const amount = shareAmount * (exchangeRate > 0 ? exchangeRate : 1);
+    deposits.push({
+      symbol: underlying.symbol,
+      coinType: underlying.coinType,
+      amount,
+      amountUsd: priceAmountUsd(amount, underlying.symbol, underlying.coinType),
+      sourceCoinType: row.balance.coinType,
+      sourceSymbol: row.balance.symbol,
+      shareAmount,
+      exchangeRate: exchangeRate > 0 ? exchangeRate : 1,
+    });
+    consumedKeys.add(coinTypeKey(row.balance.coinType));
+    neededCoinTypes.push(underlying.coinType);
+  }
+  if (!deposits.length) return { positions: [], consumedKeys, coinTypes: uniqueNonEmptyStrings(neededCoinTypes) };
+  const depositedUsd = deposits.reduce((sum, row) => sum + (row.amountUsd || 0), 0);
+  return {
+    positions: [{
+      protocol: "Scallop",
+      note: "Wallet-held Scallop receipt tokens are grouped here as supply.",
+      deposits,
+      borrows: [],
+      depositedUsd,
+      borrowedUsd: 0,
+      healthFactor: Infinity,
+      netUsd: depositedUsd,
+    }],
+    consumedKeys,
+    coinTypes: uniqueNonEmptyStrings(neededCoinTypes),
+  };
 }
 
 async function fetchScallopPositions(addr) {
@@ -5080,9 +5534,9 @@ async function fetchScallopPositions(addr) {
       const resolved = resolveCoinType(coinType);
       const amount = Number(f.value?.json?.amount || 0);
       const human = amount / Math.pow(10, resolved.decimals);
-      const usd = human * (defiPrices[resolved.symbol] || 0);
+      const usd = priceAmountUsd(human, resolved.symbol, coinType);
       totalDepUsd += usd;
-      deposits.push({ symbol: resolved.symbol, amount: human, amountUsd: usd });
+      deposits.push({ symbol: resolved.symbol, coinType, amount: human, amountUsd: usd });
     }
     for (const f of debtNodes) {
       const coinType = "0x" + (f.name?.json?.name || "");
@@ -5092,9 +5546,9 @@ async function fetchScallopPositions(addr) {
       const marketIndex = marketIndices[coinType] || 0;
       const amount = (userIndex > 0 && marketIndex > 0) ? rawAmount * marketIndex / userIndex : rawAmount;
       const human = amount / Math.pow(10, resolved.decimals);
-      const usd = human * (defiPrices[resolved.symbol] || 0);
+      const usd = priceAmountUsd(human, resolved.symbol, coinType);
       totalBorUsd += usd;
-      borrows.push({ symbol: resolved.symbol, amount: human, amountUsd: usd });
+      borrows.push({ symbol: resolved.symbol, coinType, amount: human, amountUsd: usd });
     }
     const healthFactor = totalBorUsd > 0 ? totalDepUsd / totalBorUsd : Infinity;
     positions.push({ protocol: "Scallop", deposits, borrows, depositedUsd: totalDepUsd, borrowedUsd: totalBorUsd, healthFactor, netUsd: totalDepUsd - totalBorUsd });
@@ -5150,7 +5604,10 @@ async function fetchTurbosPositions(addr) {
     if (liq === 0) continue;
     const { coinA, coinB } = getCoinAmountsFromLiquidity(liq, curSqrt, lowSqrt, upSqrt);
     const amtA = coinA / Math.pow(10, resolvedA.decimals), amtB = coinB / Math.pow(10, resolvedB.decimals);
-    const usdA = amtA * (defiPrices[resolvedA.symbol] || 0), usdB = amtB * (defiPrices[resolvedB.symbol] || 0);
+    const coinTypeA = nft.contents.json.coin_type_a?.name ? ("0x" + nft.contents.json.coin_type_a.name) : (pool.typeA || "");
+    const coinTypeB = nft.contents.json.coin_type_b?.name ? ("0x" + nft.contents.json.coin_type_b.name) : (pool.typeB || "");
+    const usdA = priceAmountUsd(amtA, resolvedA.symbol, coinTypeA);
+    const usdB = priceAmountUsd(amtB, resolvedB.symbol, coinTypeB);
     const inRange = curTick >= lowTick && curTick < upTick;
     positions.push({ protocol: "Turbos LP", pair: `${resolvedA.symbol}/${resolvedB.symbol}`, symbolA: resolvedA.symbol, symbolB: resolvedB.symbol, amountA: amtA, amountB: amtB, usdA, usdB, totalUsd: usdA + usdB, inRange, posId: nft.address });
   }
@@ -5195,7 +5652,8 @@ async function fetchBluefinSpotPositions(addr) {
     if (liq === 0) continue;
     const { coinA, coinB } = getCoinAmountsFromLiquidity(liq, curSqrt, lowSqrt, upSqrt);
     const amtA = coinA / Math.pow(10, resolvedA.decimals), amtB = coinB / Math.pow(10, resolvedB.decimals);
-    const usdA = amtA * (defiPrices[resolvedA.symbol] || 0), usdB = amtB * (defiPrices[resolvedB.symbol] || 0);
+    const usdA = priceAmountUsd(amtA, resolvedA.symbol, coinTypeA);
+    const usdB = priceAmountUsd(amtB, resolvedB.symbol, coinTypeB);
     const inRange = curTick >= lowTick && curTick < upTick;
     positions.push({ protocol: "Bluefin LP", pair: `${resolvedA.symbol}/${resolvedB.symbol}`, symbolA: resolvedA.symbol, symbolB: resolvedB.symbol, amountA: amtA, amountB: amtB, usdA, usdB, totalUsd: usdA + usdB, inRange, posId: nft.address });
   }
@@ -5260,6 +5718,9 @@ function afRoleLabel(role) {
   if (role === "assistant") return "Assistant";
   return "Unknown";
 }
+function afIsEconomicRole(role) {
+  return role !== "admin" && role !== "assistant";
+}
 function afMarketAccountKey(chId, accountId) {
   return `${chId}::${accountId}`;
 }
@@ -5279,7 +5740,10 @@ async function fetchAftermathAccountCaps(addr) {
             pageInfo { hasNextPage endCursor }
             nodes {
               address
-              ${GQL_F_CONTENTS_TYPE_JSON}
+              contents {
+                type { repr }
+                json
+              }
             }
           }
         }
@@ -5616,7 +6080,10 @@ async function fetchAftermathRecentOrderEvents(addr, accountSet) {
             timestamp
             events(first: ${AF_ORDER_EVENT_PER_TX}) {
               nodes {
-                ${GQL_F_CONTENTS_TYPE_JSON}
+                contents {
+                  type { repr }
+                  json
+                }
               }
             }
           }
@@ -5659,12 +6126,16 @@ async function fetchAftermathPerpsPositions(addr) {
     const capsMeta = await fetchAftermathAccountCaps(addr);
     const caps = capsMeta.caps || [];
     const accounts = capsMeta.accounts || [];
+    const economicAccounts = accounts.filter((row) => afIsEconomicRole(row.role));
+    if (accounts.length > economicAccounts.length) {
+      warnings.push(`${accounts.length - economicAccounts.length} admin/assistant account(s) excluded from exposure totals.`);
+    }
     if (capsMeta.partial) {
       partial = true;
       warnings.push("AccountCap scan reached pagination cap; account coverage may be partial.");
     }
     if (!accounts.length) {
-      return { accounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial, warnings };
+      return { accounts: [], economicAccounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial, warnings };
     }
 
     let marketRows = [];
@@ -5685,7 +6156,7 @@ async function fetchAftermathPerpsPositions(addr) {
       }));
     }
 
-    const posMeta = await fetchAftermathPositionStates(accounts, marketRows);
+    const posMeta = await fetchAftermathPositionStates(economicAccounts, marketRows);
     const states = posMeta.states || [];
     const stateByKey = {};
     for (const s of states) stateByKey[s.key] = s;
@@ -5709,7 +6180,7 @@ async function fetchAftermathPerpsPositions(addr) {
 
     const expectedByKey = {};
     const accountSetByMarket = {};
-    const allAccountIds = new Set(accounts.map((c) => c.accountId));
+    const allAccountIds = new Set(economicAccounts.map((c) => c.accountId));
     for (const s of states) {
       if (!s.hasOpenOrders) continue;
       const expected = s.pendingOrders > 0 ? s.pendingOrders : 1;
@@ -5832,6 +6303,7 @@ async function fetchAftermathPerpsPositions(addr) {
 
     return {
       accounts,
+      economicAccounts,
       caps,
       markets: marketRows,
       positions,
@@ -5843,6 +6315,7 @@ async function fetchAftermathPerpsPositions(addr) {
   } catch (e) {
     return {
       accounts: [],
+      economicAccounts: [],
       caps: [],
       markets: [],
       positions: [],
@@ -5855,34 +6328,10 @@ async function fetchAftermathPerpsPositions(addr) {
 }
 
 // ── Address View ────────────────────────────────────────────────────────
-async function fetchAddressShell(addrNorm, force = false) {
-  const addressShellStorageKey = persistedEntityCacheKey(PERSISTED_CACHE_KEYS.addressShellPrefix, addrNorm);
-  const addressShellState = getKeyedCacheState(addressShellCache, addrNorm);
-  hydratePersistedTimedCacheState(addressShellState, addressShellStorageKey, ENTITY_SHELL_TTL_MS);
-  return withTimedCache(addressShellState, ENTITY_SHELL_TTL_MS, force, async () => {
-    const result = await gql(`query($addr: SuiAddress!) {
-      address(address: $addr) {
-        address
-        defaultNameRecord { domain }
-        objects(first: 20) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            address version digest
-            ${GQL_F_CONTENTS_TYPE_JSON}
-          }
-        }
-      }
-    }`, { addr: addrNorm });
-    writePersistedTimedCacheRecord(addressShellStorageKey, result, 45000);
-    return result;
-  });
-}
-
 async function renderAddress(app, addr) {
-  const localRouteToken = routeRenderToken;
-  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const rawAddr = decodeURIComponent(String(addr || ""));
   const addrNorm = normalizeSuiAddress(rawAddr);
+  const addrRouteToken = routeRenderToken;
   if (!addrNorm) {
     const asCoinType = normalizeCoinTypeQueryInput(rawAddr);
     if (asCoinType) {
@@ -5893,7 +6342,19 @@ async function renderAddress(app, addr) {
     return;
   }
 
-  const data = await fetchAddressShell(addrNorm, false);
+  const data = await gql(`query($addr: SuiAddress!) {
+    address(address: $addr) {
+      address
+      defaultNameRecord { domain }
+      objects(first: 20) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          address version digest
+          contents { type { repr } json }
+        }
+      }
+    }
+  }`, { addr: addrNorm });
 
   // If address query returns null, try as object
   if (!data.address) {
@@ -5910,12 +6371,12 @@ async function renderAddress(app, addr) {
   let allObjects = a.objects?.nodes || [];
   let objPageInfo = a.objects?.pageInfo || {};
   const name = a.defaultNameRecord?.domain;
-  let activeTab = "txs";
-  let initialTxLoadPromise = null;
 
   // DeFi data is loaded only when the user opens the DeFi tab.
   let defiLoaded = false;
   let defiHtml = "";
+  let defiWalletSectionRenderer = null;
+  let walletProtocolFilterOnly = false;
 
   async function loadAddressTransactions(before = null, append = false) {
     txLoadError = "";
@@ -5946,7 +6407,7 @@ async function renderAddress(app, addr) {
                 checkpoint { sequenceNumber }
                 balanceChanges(first: 50) {
                   pageInfo { hasNextPage }
-                  nodes { ${GQL_F_BAL_NODE} }
+                  nodes { owner { address } amount coinType { repr } }
                 }
                 events(first: 3) { nodes { contents { type { repr } } } }
               }
@@ -5971,20 +6432,9 @@ async function renderAddress(app, addr) {
     }
   }
 
-  async function ensureInitialAddressTransactions() {
-    if (initialTxLoadPromise) return initialTxLoadPromise;
-    initialTxLoadPromise = (async () => {
-      try {
-        await loadAddressTransactions(null, false);
-      } finally {
-        txLoading = false;
-        if (isActiveRoute()) renderTabs(activeTab);
-      }
-    })();
-    return initialTxLoadPromise;
-  }
-
   txLoading = true;
+  await loadAddressTransactions(null, false);
+  txLoading = false;
 
   const tabContent = {
     txs: () => {
@@ -6065,7 +6515,7 @@ async function renderAddress(app, addr) {
       fetchSuilendPositions(addrNorm), fetchNaviPositions(addrNorm),
       fetchAlphaPositions(addrNorm), fetchScallopPositions(addrNorm),
       fetchCetusPositions(addrNorm), fetchTurbosPositions(addrNorm),
-      fetchDefiWalletBalances(addrNorm), fetchDeepBookPositions(addrNorm),
+      fetchDefiWalletBalances(addrNorm), fetchEmberPositions(addrNorm), fetchDeepBookPositions(addrNorm),
       fetchBluefinSpotPositions(addrNorm), fetchBluefinProPositions(addrNorm),
       fetchAftermathPerpsPositions(addrNorm),
       ]),
@@ -6073,20 +6523,32 @@ async function renderAddress(app, addr) {
     // Sync LSTs + stablecoins + BTC variants now that oracle is done
     syncPeggedPrices();
 
-    const [suilend, navi, alpha, scallop, cetus, turbos, wallet, deepbook, bluefinSpot, bluefinPro, aftermathPerps] = results;
+    const [suilend, navi, alpha, scallop, cetus, turbos, wallet, ember, deepbook, bluefinSpot, bluefinPro, aftermathPerps] = results;
     const suilendPos = suilend.status === "fulfilled" ? suilend.value : [];
     const naviPos = navi.status === "fulfilled" ? navi.value : [];
     const alphaPos = alpha.status === "fulfilled" ? alpha.value : [];
-    const scallopPos = scallop.status === "fulfilled" ? scallop.value : [];
+    const scallopBasePos = scallop.status === "fulfilled" ? scallop.value : [];
     const cetusPos = cetus.status === "fulfilled" ? cetus.value : [];
     const turbosPos = turbos.status === "fulfilled" ? turbos.value : [];
-    const walletBals = wallet.status === "fulfilled" ? wallet.value : [];
+    const walletData = wallet.status === "fulfilled" ? wallet.value : { rows: [], partial: false, scannedPages: 0 };
+    let walletBals = walletData.rows || [];
+    const walletBalancePartial = !!walletData.partial;
+    const emberData = ember.status === "fulfilled" ? ember.value : { positions: [], consumedKeys: new Set(), totalUsd: 0, partial: false };
     const db = deepbook.status === "fulfilled" ? deepbook.value : { positions: [], pools: {}, riskConfigs: {} };
     const bluefinSpotPos = bluefinSpot.status === "fulfilled" ? bluefinSpot.value : [];
     const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
     const afPerpsData = aftermathPerps.status === "fulfilled"
       ? aftermathPerps.value
-      : { accounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
+      : { accounts: [], economicAccounts: [], caps: [], markets: [], positions: [], orders: [], collateral: 0, partial: true, warnings: ["Aftermath fetch failed."] };
+    const scallopWalletSupply = await buildSyntheticScallopWalletPositions(walletBals);
+    if (scallopWalletSupply.consumedKeys.size) {
+      walletBals = walletBals.filter((balance) => !scallopWalletSupply.consumedKeys.has(coinTypeKey(balance.coinType)));
+    }
+    const scallopPos = [...scallopBasePos, ...(scallopWalletSupply.positions || [])];
+    if (emberData.consumedKeys.size) {
+      walletBals = walletBals.filter((balance) => !emberData.consumedKeys.has(coinTypeKey(balance.coinType)));
+    }
+    const emberPos = emberData.positions || [];
 
     // Derive XAUM (gold) price from Aftermath XAUT/USD order prices if no DEX liquidity
     if (!defiPrices.XAUM || defiPrices.XAUM <= 0) {
@@ -6103,56 +6565,176 @@ async function renderAddress(app, addr) {
     // Second pricing pass: price any tokens discovered by fetchers but missing from defiPrices
     const allCoinTypes = new Set();
     for (const b of walletBals) { if (b.coinType) allCoinTypes.add(b.coinType); }
+    for (const coinType of (scallopWalletSupply.coinTypes || [])) { if (coinType) allCoinTypes.add(coinType); }
+    for (const pos of emberPos) { if (pos.coinType) allCoinTypes.add(pos.coinType); }
+    for (const pos of [...suilendPos, ...naviPos, ...alphaPos, ...scallopPos]) {
+      for (const row of (pos.deposits || [])) if (row.coinType) allCoinTypes.add(row.coinType);
+      for (const row of (pos.borrows || [])) if (row.coinType) allCoinTypes.add(row.coinType);
+    }
     await ensurePrices([...allCoinTypes]);
     // Recompute wallet USD values with fresh prices
     for (const b of walletBals) {
-      const lstRate = b.isLST ? (lstExchangeRates[b.symbol] || 1) : 1;
-      b.price = b.isLST ? (defiPrices.SUI || 0) * lstRate : (defiPrices[b.symbol] || 0);
+      const priceInfo = resolveWalletBalancePriceInfo(b);
+      b.price = priceInfo.price;
+      b.priceTrusted = priceInfo.priceTrusted;
+      b.priceReason = priceInfo.priceReason;
+      b.suiEquiv = b.isLST ? b.amount * priceInfo.lstRate : 0;
       b.usdValue = b.amount * b.price;
     }
-    // Recompute lending position USD values now that prices are available
-    for (const pos of [...naviPos, ...alphaPos]) {
+    sortWalletBalances(walletBals);
+    // Recompute lending position USD values now that exact prices are available
+    for (const pos of [...suilendPos, ...naviPos, ...alphaPos, ...scallopPos]) {
       let depUsd = 0, borUsd = 0;
       for (const d of (pos.deposits || [])) {
-        if (d.amountUsd <= 0 && d.amount > 0 && defiPrices[d.symbol] > 0) d.amountUsd = d.amount * defiPrices[d.symbol];
+        if (d.amountUsd <= 0 && d.amount > 0) d.amountUsd = priceAmountUsd(d.amount, d.symbol, d.coinType);
         depUsd += d.amountUsd;
       }
       for (const b of (pos.borrows || [])) {
-        if (b.amountUsd <= 0 && b.amount > 0 && defiPrices[b.symbol] > 0) b.amountUsd = b.amount * defiPrices[b.symbol];
+        if (b.amountUsd <= 0 && b.amount > 0) b.amountUsd = priceAmountUsd(b.amount, b.symbol, b.coinType);
         borUsd += b.amountUsd;
       }
-      if (pos.depositedUsd <= 0 && depUsd > 0) pos.depositedUsd = depUsd;
-      if (pos.borrowedUsd <= 0 && borUsd > 0) pos.borrowedUsd = borUsd;
-      pos.netUsd = pos.depositedUsd - pos.borrowedUsd;
+      if ((pos.deposits || []).length) pos.depositedUsd = depUsd;
+      else if (pos.depositedUsd <= 0 && depUsd > 0) pos.depositedUsd = depUsd;
+      if ((pos.borrows || []).length) pos.borrowedUsd = borUsd;
+      else if (pos.borrowedUsd <= 0 && borUsd > 0) pos.borrowedUsd = borUsd;
+      pos.netUsd = (pos.depositedUsd || 0) - (pos.borrowedUsd || 0);
+    }
+    for (const pos of emberPos) {
+      pos.amountUsd = priceAmountUsd(pos.amount, pos.symbol, pos.coinType);
     }
 
     // Separate LSTs from regular wallet holdings
     const lstBals = walletBals.filter(b => b.isLST);
     const regularBals = walletBals.filter(b => !b.isLST);
+    let protocolCoinTypes = {
+      coinTypeKeys: new Set(),
+      byProtocol: {},
+      totalSupported: 0,
+      summary: "",
+      partial: false,
+      loading: regularBals.length > 0,
+      error: "",
+    };
+    const refreshWalletHoldingsSection = () => {
+      const walletEl = document.getElementById("addr-wallet-holdings");
+      if (walletEl && defiWalletSectionRenderer) walletEl.innerHTML = defiWalletSectionRenderer();
+    };
+    if (regularBals.length) {
+      void fetchProtocolSupportedCoinTypes()
+        .then((value) => {
+          if (addrRouteToken !== routeRenderToken) return;
+          protocolCoinTypes = {
+            coinTypeKeys: value?.coinTypeKeys instanceof Set ? value.coinTypeKeys : new Set(),
+            byProtocol: value?.byProtocol || {},
+            totalSupported: Number(value?.totalSupported || 0),
+            summary: String(value?.summary || ""),
+            partial: !!value?.partial,
+            loading: false,
+            error: "",
+          };
+          refreshWalletHoldingsSection();
+        })
+        .catch((err) => {
+          if (addrRouteToken !== routeRenderToken) return;
+          protocolCoinTypes = {
+            coinTypeKeys: new Set(),
+            byProtocol: {},
+            totalSupported: 0,
+            summary: "",
+            partial: true,
+            loading: false,
+            error: err?.message || "Failed to fetch supported coin types.",
+          };
+          refreshWalletHoldingsSection();
+        });
+    }
 
     // Aggregate totals
     const allLending = [...suilendPos, ...naviPos, ...alphaPos, ...scallopPos];
     const allDexLp = [...cetusPos, ...turbosPos, ...bluefinSpotPos];
-    let totalSupplied = allLending.reduce((s, p) => s + (p.depositedUsd || 0), 0);
+    const totalSupplied = allLending.reduce((s, p) => s + (p.depositedUsd || 0), 0);
     const totalBorrowed = allLending.reduce((s, p) => s + (p.borrowedUsd || 0), 0);
     const totalWallet = regularBals.reduce((s, b) => s + b.usdValue, 0);
     const totalLst = lstBals.reduce((s, b) => s + b.usdValue, 0);
+    const totalEmber = emberPos.reduce((sum, row) => sum + (row.amountUsd || 0), 0);
     const totalDexLp = allDexLp.reduce((s, p) => s + p.totalUsd, 0);
     let dbCollateralUsd = 0;
     for (const pos of db.positions) {
       for (const c of pos.collateral) {
         const dec = c.decimals || getDecimals(c.symbol);
-        dbCollateralUsd += (c.amount / Math.pow(10, dec)) * (defiPrices[c.symbol] || 0);
+        dbCollateralUsd += priceAmountUsd(c.amount / Math.pow(10, dec), c.symbol, c.coinType);
       }
     }
-    totalSupplied += dbCollateralUsd;
-    totalSupplied += bluefinProData.collateral;
-    totalSupplied += afPerpsData.collateral * (defiPrices["USDC"] || 1);
-    const netWorth = totalWallet + totalLst + totalSupplied - totalBorrowed + totalDexLp;
+    const bluefinCollateralUsd = Number(bluefinProData.collateral || 0);
+    const aftermathCollateralUsd = afPerpsData.collateral * getDefiUsdPrice("USDC", QUOTE_COINS.USDC.type || "");
+    const totalMarginCollateral = dbCollateralUsd + bluefinCollateralUsd + aftermathCollateralUsd;
+    const marginBreakdown = [];
+    if (dbCollateralUsd > 0) marginBreakdown.push(`DeepBook ${fmtUsdFromFloat(dbCollateralUsd)}`);
+    if (bluefinCollateralUsd > 0) marginBreakdown.push(`Bluefin ${fmtUsdFromFloat(bluefinCollateralUsd)}`);
+    if (aftermathCollateralUsd > 0) marginBreakdown.push(`Aftermath ${fmtUsdFromFloat(aftermathCollateralUsd)}`);
+    const dbActiveDebtCount = db.positions.filter((pos) =>
+      Number(pos?.mgr?.borrowed_base_shares || 0) > 0 || Number(pos?.mgr?.borrowed_quote_shares || 0) > 0).length;
+    const dbCollateralOnlyCount = db.positions.filter((pos) =>
+      !(Number(pos?.mgr?.borrowed_base_shares || 0) > 0 || Number(pos?.mgr?.borrowed_quote_shares || 0) > 0)
+      && (pos?.collateral || []).some((row) => Number(row?.amount || 0) > 0)).length;
+    const afEconomicExposureCount = (afPerpsData.positions?.length || 0) + (afPerpsData.orders?.length || 0);
+    const bluefinCollateralOnly = bluefinCollateralUsd > 0 && !(bluefinProData.positions?.length > 0);
+    const aftermathCollateralOnly = afPerpsData.collateral > 0 && afEconomicExposureCount === 0;
+    const aftermathAccountsOnly = (afPerpsData.accounts?.length || 0) > 0 && afEconomicExposureCount === 0 && !(afPerpsData.collateral > 0);
+    const netWorth = totalWallet + totalLst + totalEmber + totalSupplied - totalBorrowed + totalDexLp + totalMarginCollateral;
+    const renderWalletHoldingsSection = () => {
+      if (!regularBals.length) return "";
+      const protocolFilterLoading = !!protocolCoinTypes.loading;
+      const protocolFilterAvailable = !protocolFilterLoading && protocolCoinTypes.coinTypeKeys.size > 0;
+      const visibleRegularBals = walletProtocolFilterOnly && protocolFilterAvailable
+        ? regularBals.filter((balance) => protocolCoinTypes.coinTypeKeys.has(coinTypeKey(balance.coinType)))
+        : regularBals;
+      const hiddenByProtocolFilter = Math.max(0, regularBals.length - visibleRegularBals.length);
+      const protocolFilterSummary = protocolFilterLoading
+        ? "Loading protocol-supported coin-type list..."
+        : protocolCoinTypes.summary
+          ? `Exact coin types from ${protocolCoinTypes.summary}`
+          : (protocolCoinTypes.error || "Protocol-supported coin-type list unavailable.");
+      const protocolFilterNote = !protocolFilterLoading && protocolCoinTypes.partial ? " · partial" : "";
+      const walletScanNote = walletBalancePartial ? ` Balance scan partial after ${walletData.scannedPages * ADDRESS_BALANCE_PAGE_SIZE} rows; some long-tail wallet tokens may be omitted.` : "";
+      const symbolCounts = Object.create(null);
+      for (const b of regularBals) symbolCounts[b.symbol] = (symbolCounts[b.symbol] || 0) + 1;
+      let walletHtml = `<h3 style="font-size:14px;margin-bottom:8px;color:var(--text-dim)">Wallet Holdings</h3>`;
+      walletHtml += `<div class="u-mb12" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <label class="u-fs12-dim" style="display:flex;align-items:center;gap:6px;${protocolFilterAvailable ? "cursor:pointer" : "opacity:0.75"}">
+          <input type="checkbox" data-action="addr-wallet-protocol-filter" ${walletProtocolFilterOnly ? "checked" : ""} ${protocolFilterAvailable ? "" : "disabled"}>
+          Protocol-supported only
+        </label>
+        <div class="u-fs11-dim">${escapeHtml(protocolFilterSummary)}${protocolFilterNote}${protocolFilterAvailable && hiddenByProtocolFilter > 0 ? ` · hiding ${hiddenByProtocolFilter}` : ""}</div>
+      </div>`;
+      walletHtml += `<div class="u-fs12-dim u-mb12">Click a coin type to inspect supply and recent activity. USD values are only shown for trusted tracked coin types; lookalike symbols from other packages stay unpriced. Scallop receipt tokens are grouped under Lending. Ember receipt tokens are grouped under Ember Vaults.${escapeHtml(walletScanNote)}</div>`;
+      walletHtml += `<table><thead><tr><th>Token</th><th>Amount</th><th>USD Value</th><th class="u-c-dim">Total Supply</th></tr></thead><tbody>`;
+      if (!visibleRegularBals.length) {
+        walletHtml += `<tr><td colspan="4" style="color:var(--text-dim);font-size:12px">No wallet holdings match the protocol-supported coin type filter.</td></tr>`;
+      }
+      for (const b of visibleRegularBals.slice(0, 15)) {
+        const meta = coinMetaCache[b.coinType] || coinMetaCache[normalizeCoinType(b.coinType)] || null;
+        const supplyDecimals = Number.isFinite(Number(meta?.decimals)) ? Number(meta.decimals) : (b.decimals || 9);
+        const supplyRaw = meta?.supply != null ? Number(meta.supply) : null;
+        const supplyFmt = supplyRaw != null ? fmtCompact(supplyRaw / Math.pow(10, supplyDecimals)) : '<span class="trunc-note">inc_data</span>';
+        const rowNotes = [];
+        if ((symbolCounts[b.symbol] || 0) > 1) rowNotes.push("symbol collision");
+        if (b.priceReason === "untrustedCoinType") rowNotes.push("USD hidden");
+        const tokenCell = `<div class="u-mono-12">${escapeHtml(b.symbol)}</div>
+          <div class="u-mono-11-dim">${coinTypeLink(b.coinType)} ${copyBtn(b.coinType)}</div>
+          ${rowNotes.length ? `<div class="u-fs10-dim">${escapeHtml(rowNotes.join(" · "))}</div>` : ""}`;
+        walletHtml += `<tr><td>${tokenCell}</td><td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td><td style="font-family:var(--mono);font-size:12px;color:${b.usdValue > 0 ? 'var(--green)' : 'var(--text-dim)'}">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}</td><td class="u-mono-11-dim">${supplyFmt}</td></tr>`;
+      }
+      if (visibleRegularBals.length > 15) walletHtml += `<tr><td colspan="4" style="color:var(--text-dim);font-size:12px">... and ${visibleRegularBals.length - 15} more tokens</td></tr>`;
+      walletHtml += `</tbody></table>`;
+      return walletHtml;
+    };
+    defiWalletSectionRenderer = renderWalletHoldingsSection;
 
     const hasAnything = allLending.length
       || allDexLp.length
       || walletBals.length
+      || emberPos.length
       || db.positions.length
       || bluefinProData.positions.length
       || afPerpsData.accounts.length
@@ -6167,14 +6749,13 @@ async function renderAddress(app, addr) {
       if (scallop.status === "rejected") errors.push("Scallop");
       if (cetus.status === "rejected") errors.push("Cetus");
       if (turbos.status === "rejected") errors.push("Turbos");
+      if (ember.status === "rejected") errors.push("Ember");
       if (deepbook.status === "rejected") errors.push("DeepBook");
       if (bluefinSpot.status === "rejected") errors.push("Bluefin Spot");
       if (bluefinPro.status === "rejected") errors.push("Bluefin Pro");
       if (aftermathPerps.status === "rejected") errors.push("Aftermath Perps");
       defiHtml = renderEmpty("No DeFi positions found." + (errors.length ? " (Failed: " + errors.map(escapeHtml).join(", ") + ")" : ""));
-      defiLoaded = true;
-      if (isActiveRoute()) renderTabs("defi");
-      return;
+      defiLoaded = true; renderTabs("defi"); return;
     }
 
     let html = `<div style="padding:16px">`;
@@ -6183,31 +6764,42 @@ async function renderAddress(app, addr) {
     html += `<div class="stat-box"><div class="stat-label">Net Worth</div><div class="stat-value" style="color:${netWorth >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsdFromFloat(Math.abs(netWorth))}</div></div>`;
     if (totalWallet > 0) html += `<div class="stat-box"><div class="stat-label">Wallet</div><div class="stat-value u-c-purple">${fmtUsdFromFloat(totalWallet)}</div><div class="stat-sub">${regularBals.length} tokens</div></div>`;
     if (totalLst > 0) html += `<div class="stat-box"><div class="stat-label">Liquid Staking</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalLst)}</div><div class="stat-sub">${lstBals.length} LSTs</div></div>`;
+    if (totalEmber > 0) html += `<div class="stat-box"><div class="stat-label">Ember Vaults</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalEmber)}</div><div class="stat-sub">${emberPos.length} vault${emberPos.length === 1 ? "" : "s"}</div></div>`;
     if (totalSupplied > 0 || totalBorrowed > 0) {
       const netSupply = totalSupplied - totalBorrowed;
       html += `<div class="stat-box"><div class="stat-label">Net Supply</div><div class="stat-value" style="color:${netSupply >= 0 ? 'var(--green)' : 'var(--red)'}">${netSupply >= 0 ? '' : '-'}${fmtUsdFromFloat(Math.abs(netSupply))}</div><div class="stat-sub">${fmtUsdFromFloat(totalSupplied)} supplied · ${fmtUsdFromFloat(totalBorrowed)} borrowed</div></div>`;
     }
     if (totalDexLp > 0) html += `<div class="stat-box"><div class="stat-label">DEX LP</div><div class="stat-value u-c-accent">${fmtUsdFromFloat(totalDexLp)}</div><div class="stat-sub">${allDexLp.length} positions</div></div>`;
-    if (db.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">DeepBook Margin</div><div class="stat-value u-c-accent">${db.positions.length}</div><div class="stat-sub">positions</div></div>`;
-    if (bluefinProData.positions.length > 0) html += `<div class="stat-box"><div class="stat-label">Bluefin Perps</div><div class="stat-value u-c-blue">${bluefinProData.positions.length}</div><div class="stat-sub">${fmtUsdFromFloat(bluefinProData.collateral)} collateral</div></div>`;
+    if (db.positions.length > 0) {
+      const dbState = [];
+      if (dbActiveDebtCount > 0) dbState.push(`${dbActiveDebtCount} active`);
+      if (dbCollateralOnlyCount > 0) dbState.push(`${dbCollateralOnlyCount} collateral-only`);
+      if (!dbState.length) dbState.push(`${db.positions.length} manager${db.positions.length === 1 ? "" : "s"}`);
+      html += `<div class="stat-box"><div class="stat-label">DeepBook Margin</div><div class="stat-value u-c-accent">${db.positions.length}</div><div class="stat-sub">${dbState.join(" · ")}</div></div>`;
+    }
+    if (totalMarginCollateral > 0) html += `<div class="stat-box"><div class="stat-label">Margin Collateral</div><div class="stat-value u-c-blue">${fmtUsdFromFloat(totalMarginCollateral)}</div><div class="stat-sub">${marginBreakdown.length ? marginBreakdown.join(" · ") : "perps + margin accounts"}</div></div>`;
+    if (bluefinProData.positions.length > 0 || bluefinCollateralUsd > 0) {
+      const bluefinSub = bluefinCollateralOnly
+        ? `collateral only · ${fmtUsdFromFloat(bluefinCollateralUsd)} collateral`
+        : `${fmtUsdFromFloat(bluefinCollateralUsd)} collateral`;
+      html += `<div class="stat-box"><div class="stat-label">Bluefin Perps</div><div class="stat-value u-c-blue">${bluefinProData.positions.length}</div><div class="stat-sub">${bluefinSub}</div></div>`;
+    }
     if (afPerpsData.accounts.length || afPerpsData.positions.length > 0 || afPerpsData.orders.length > 0 || afPerpsData.collateral > 0) {
-      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afPerpsData.positions.length + afPerpsData.orders.length}</div><div class="stat-sub">${afPerpsData.accounts.length} acct · ${afPerpsData.positions.length} pos · ${afPerpsData.orders.length} orders · ${fmtUsdFromFloat(afPerpsData.collateral)} collateral</div></div>`;
+      const exposureAccounts = afPerpsData.economicAccounts?.length ?? afPerpsData.accounts.length;
+      const partialSuffix = afPerpsData.partial ? " · partial" : "";
+      const afState = [];
+      if (aftermathCollateralOnly) afState.push("collateral only");
+      else if (aftermathAccountsOnly) afState.push("accounts only");
+      afState.push(`${afPerpsData.accounts.length} acct (${exposureAccounts} economic)`);
+      afState.push(`${afPerpsData.positions.length} pos`);
+      afState.push(`${afPerpsData.orders.length} orders`);
+      afState.push(`${fmtUsdFromFloat(afPerpsData.collateral)} collateral${partialSuffix}`);
+      html += `<div class="stat-box"><div class="stat-label">Aftermath Perps</div><div class="stat-value u-c-blue">${afEconomicExposureCount}</div><div class="stat-sub">${afState.join(" · ")}</div></div>`;
     }
     html += `</div>`;
 
     // ─── Wallet Holdings ────────────────────
-    if (regularBals.length) {
-      html += `<h3 style="font-size:14px;margin-bottom:8px;color:var(--text-dim)">Wallet Holdings</h3>`;
-      html += `<table><thead><tr><th>Token</th><th>Amount</th><th>USD Value</th><th class="u-c-dim">Total Supply</th></tr></thead><tbody>`;
-      for (const b of regularBals.slice(0, 15)) {
-        const meta = coinMetaCache[b.coinType];
-        const supplyRaw = meta?.supply != null ? Number(meta.supply) : null;
-        const supplyFmt = supplyRaw != null ? fmtCompact(supplyRaw / Math.pow(10, meta?.decimals || 9)) : '<span class="trunc-note">inc_data</span>';
-        html += `<tr><td class="u-mono-12">${b.symbol}</td><td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td><td style="font-family:var(--mono);font-size:12px;color:var(--green)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}</td><td class="u-mono-11-dim">${supplyFmt}</td></tr>`;
-      }
-      if (regularBals.length > 15) html += `<tr><td colspan="3" style="color:var(--text-dim);font-size:12px">... and ${regularBals.length - 15} more tokens</td></tr>`;
-      html += `</tbody></table>`;
-    }
+    if (regularBals.length) html += `<div id="addr-wallet-holdings">${renderWalletHoldingsSection()}</div>`;
 
     // ─── Liquid Staking Tokens ──────────────
     if (lstBals.length) {
@@ -6228,6 +6820,49 @@ async function renderAddress(app, addr) {
       html += `</tbody></table>`;
     }
 
+    if (emberPos.length) {
+      html += `<h3 class="u-section-h3">Ember Vaults</h3>`;
+      html += `<div class="u-fs12-dim u-mb12">Receipt-token balances are grouped here to avoid double counting in Wallet Holdings.${emberData.partial ? " Balance scan partial; some Ember receipt tokens may be omitted." : ""}</div>`;
+      html += `<table><thead><tr><th>Vault</th><th>Balance</th><th>APY</th><th>USD Value</th></tr></thead><tbody>`;
+      for (const pos of emberPos) {
+        const shareText = pos.shareAmount >= 1000
+          ? fmtCompact(pos.shareAmount)
+          : pos.shareAmount >= 1
+            ? pos.shareAmount.toFixed(1)
+            : pos.shareAmount >= 0.01
+              ? pos.shareAmount.toLocaleString(undefined, { maximumFractionDigits: 6 })
+              : pos.shareAmount.toFixed(8);
+        const underlyingText = pos.amount > 0
+          ? (pos.amount >= 1000
+            ? fmtCompact(pos.amount)
+            : pos.amount >= 1
+              ? pos.amount.toFixed(3)
+              : pos.amount >= 0.01
+                ? pos.amount.toLocaleString(undefined, { maximumFractionDigits: 6 })
+                : pos.amount.toFixed(8))
+          : "";
+        const apyText = pos.apyPct > 0
+          ? `${pos.apyPct.toFixed(pos.apyPct >= 10 ? 0 : 1).replace(/\.0$/, "")}%✨`
+          : '<span class="u-c-dim">—</span>';
+        const statusNote = pos.status && pos.status !== "SYNC" ? ` · ${escapeHtml(pos.status)}` : "";
+        const yieldNote = pos.yieldUsd > 0 ? ` · ${fmtUsdFromFloat(pos.yieldUsd)} yield` : "";
+        html += `<tr>
+          <td>
+            <div class="u-fw-600">${escapeHtml(pos.displayName)}</div>
+            <div class="u-fs11-dim">${escapeHtml(pos.managerLabel || "Ember")}${statusNote}${yieldNote}</div>
+            <div class="u-mono-11-dim">${coinTypeLink(pos.receiptCoinType)} ${copyBtn(pos.receiptCoinType)}</div>
+          </td>
+          <td>
+            <div class="u-mono-12">${shareText} ${escapeHtml(pos.receiptSymbol)}</div>
+            <div class="u-fs11-dim">${underlyingText ? `≈ ${escapeHtml(underlyingText)} ${escapeHtml(pos.symbol)}` : "—"}</div>
+          </td>
+          <td class="u-mono-12">${apyText}</td>
+          <td class="u-c-green" style="font-family:var(--mono);font-size:12px">${pos.amountUsd > 0 ? fmtUsdFromFloat(pos.amountUsd) : '<span class="trunc-note">inc_data</span>'}</td>
+        </tr>`;
+      }
+      html += `</tbody></table>`;
+    }
+
     // ─── Lending Positions ──────────────────
     if (allLending.length) {
       html += `<h3 class="u-section-h3">Lending</h3>`;
@@ -6237,10 +6872,11 @@ async function renderAddress(app, addr) {
         const healthDisplay = pos.healthFactor === Infinity ? "---" : pos.healthFactor.toFixed(3);
         html += `<div class="u-bg-panel-12">`;
         html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span class="u-fw-600">${pos.protocol}</span><span class="badge" style="color:${healthColor};background:${healthColor}20">${healthLabel} ${healthDisplay}</span></div>`;
+        if (pos.note) html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">${escapeHtml(pos.note)}</div>`;
         if (pos.deposits?.length) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Supply</div>`;
           for (const d of pos.deposits) {
-            const liveUsd = d.amountUsd > 0 ? d.amountUsd : (d.amount > 0 && defiPrices[d.symbol] > 0 ? d.amount * defiPrices[d.symbol] : 0);
+            const liveUsd = d.amountUsd > 0 ? d.amountUsd : priceAmountUsd(d.amount, d.symbol, d.coinType);
             const fmtAmt = d.amount > 0 ? (d.amount >= 1000 ? fmtCompact(d.amount) : d.amount >= 1 ? d.amount.toFixed(1) : d.amount >= 0.01 ? d.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : d.amount.toFixed(8)) : "";
             const amtCell = fmtAmt ? fmtAmt + " " + d.symbol : '<span class="trunc-note">inc_data</span>';
             const usdCell = liveUsd > 0 ? fmtUsdFromFloat(liveUsd) : '<span class="trunc-note">inc_data</span>';
@@ -6250,7 +6886,7 @@ async function renderAddress(app, addr) {
         if (pos.borrows?.length) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Borrow</div>`;
           for (const b of pos.borrows) {
-            const liveUsd = b.amountUsd > 0 ? b.amountUsd : (b.amount > 0 && defiPrices[b.symbol] > 0 ? b.amount * defiPrices[b.symbol] : 0);
+            const liveUsd = b.amountUsd > 0 ? b.amountUsd : priceAmountUsd(b.amount, b.symbol, b.coinType);
             const fmtAmt = b.amount > 0 ? (b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)) : "";
             const amtCell = fmtAmt ? fmtAmt + " " + b.symbol : '<span class="trunc-note">inc_data</span>';
             const usdCell = liveUsd > 0 ? fmtUsdFromFloat(liveUsd) : '<span class="trunc-note">inc_data</span>';
@@ -6306,18 +6942,19 @@ async function renderAddress(app, addr) {
         for (const c of pos.collateral) {
           const dec = c.decimals || getDecimals(c.symbol);
           const human = c.amount / Math.pow(10, dec);
-          const usd = human * (defiPrices[c.symbol] || 0);
+          const usd = priceAmountUsd(human, c.symbol, c.coinType);
           totalCollUsd += usd;
           html += `<div class="u-row-between-sm"><span>${c.symbol}</span><span class="u-c-green">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
         }
         let totalDebtUsd = 0;
         if (baseBorrowed > 0 || quoteBorrowed > 0) {
           html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Debt</div>`;
+          const pairTypes = inner.split(",").map(s => s.trim());
           if (baseBorrowed > 0) {
             const sym = pairParts[0] || "BASE";
             const dec = getDecimals(sym);
             const human = baseDebt / Math.pow(10, dec);
-            const usd = human * (defiPrices[sym] || 0);
+            const usd = priceAmountUsd(human, sym, pairTypes[0] || "");
             totalDebtUsd += usd;
             html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
           }
@@ -6325,12 +6962,17 @@ async function renderAddress(app, addr) {
             const sym = pairParts[1] || "QUOTE";
             const dec = getDecimals(sym);
             const human = quoteDebt / Math.pow(10, dec);
-            const usd = human * (defiPrices[sym] || 0);
+            const usd = priceAmountUsd(human, sym, pairTypes[1] || "");
             totalDebtUsd += usd;
             html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
           }
         }
         const netUsd = totalCollUsd - totalDebtUsd;
+        if (totalCollUsd > 0 && totalDebtUsd <= 0) {
+          html += `<div style="font-size:12px;color:var(--text-dim);margin-top:6px">Idle collateral only. No active margin debt.</div>`;
+        } else if (totalCollUsd <= 0 && totalDebtUsd <= 0) {
+          html += `<div style="font-size:12px;color:var(--text-dim);margin-top:6px">Manager discovered, but no active collateral or debt is currently visible.</div>`;
+        }
         if (riskConfig && totalDebtUsd > 0) {
           const liqRatio = Number(riskConfig.risk_ratios.liquidation_risk_ratio) / SCALE;
           const healthRatio = totalCollUsd / (totalDebtUsd * liqRatio);
@@ -6346,26 +6988,31 @@ async function renderAddress(app, addr) {
     }
 
     // ─── Bluefin Perps ─────────────────────
-    if (bluefinProData.positions.length) {
+    if (bluefinProData.positions.length || bluefinCollateralUsd > 0) {
       html += `<h3 class="u-section-h3">Bluefin Perpetuals</h3>`;
       html += `<div class="u-bg-panel-12">`;
-      if (bluefinProData.collateral > 0) {
-        html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(bluefinProData.collateral)}</span></div>`;
+      if (bluefinCollateralUsd > 0) {
+        html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(bluefinCollateralUsd)}</span></div>`;
       }
-      html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Mode</th></tr></thead><tbody>`;
-      for (const p of bluefinProData.positions) {
-        const sideColor = p.isLong ? "var(--green)" : "var(--red)";
-        const sideLabel = p.isLong ? "LONG" : "SHORT";
-        html += `<tr>
-          <td style="font-weight:500">${p.symbol}</td>
-          <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
-          <td class="u-mono">${p.size.toLocaleString(undefined, {maximumFractionDigits:4})}</td>
-          <td class="u-mono">$${p.entryPrice.toLocaleString(undefined, {maximumFractionDigits:2})}</td>
-          <td class="u-ta-right-mono">${fmtUsdFromFloat(p.notional)}</td>
-          <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.isCross ? "Cross" : p.leverage > 0 ? p.leverage.toFixed(0) + "x Isolated" : "Isolated"}</td>
-        </tr>`;
+      if (bluefinProData.positions.length) {
+        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Mode</th></tr></thead><tbody>`;
+        for (const p of bluefinProData.positions) {
+          const sideColor = p.isLong ? "var(--green)" : "var(--red)";
+          const sideLabel = p.isLong ? "LONG" : "SHORT";
+          html += `<tr>
+            <td style="font-weight:500">${p.symbol}</td>
+            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
+            <td class="u-mono">${p.size.toLocaleString(undefined, {maximumFractionDigits:4})}</td>
+            <td class="u-mono">$${p.entryPrice.toLocaleString(undefined, {maximumFractionDigits:2})}</td>
+            <td class="u-ta-right-mono">${fmtUsdFromFloat(p.notional)}</td>
+            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.isCross ? "Cross" : p.leverage > 0 ? p.leverage.toFixed(0) + "x Isolated" : "Isolated"}</td>
+          </tr>`;
+        }
+        html += `</tbody></table>`;
+      } else {
+        html += `<div style="font-size:12px;color:var(--text-dim)">No open Bluefin perps positions. Collateral is still reserved in the Bluefin account.</div>`;
       }
-      html += `</tbody></table></div>`;
+      html += `</div>`;
     }
 
     // ─── Aftermath Perps ─────────────────────
@@ -6374,6 +7021,14 @@ async function renderAddress(app, addr) {
       html += `<div class="u-bg-panel-12">`;
       if (afPerpsData.collateral > 0) {
         html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
+      }
+      if ((afPerpsData.accounts.length || 0) > (afPerpsData.economicAccounts?.length || 0)) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Admin/Assistant accounts are shown for inspection but excluded from collateral, position, and order totals.</div>`;
+      }
+      if (aftermathCollateralOnly) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Idle collateral only. No economic positions or open orders are currently active.</div>`;
+      } else if (aftermathAccountsOnly) {
+        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Accounts found for inspection, but no economic collateral, positions, or open orders were detected.</div>`;
       }
       if (afPerpsData.accounts.length) {
         html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Perps Accounts</div>`;
@@ -6471,19 +7126,17 @@ async function renderAddress(app, addr) {
 
     // ─── Errors ─────────────────────────────
     const failed = [];
-    const protoResults = { Suilend: suilend, NAVI: navi, Alpha: alpha, Scallop: scallop, Cetus: cetus, Turbos: turbos, DeepBook: deepbook, "Bluefin Spot": bluefinSpot, "Bluefin Pro": bluefinPro, "Aftermath Perps": aftermathPerps };
+    const protoResults = { Suilend: suilend, NAVI: navi, Alpha: alpha, Scallop: scallop, Cetus: cetus, Turbos: turbos, Ember: ember, DeepBook: deepbook, "Bluefin Spot": bluefinSpot, "Bluefin Pro": bluefinPro, "Aftermath Perps": aftermathPerps };
     for (const [name, r] of Object.entries(protoResults)) { if (r.status === "rejected") failed.push(name); }
     if (failed.length) html += `<div style="margin-top:12px;font-size:12px;color:var(--text-dim)">Could not query: ${failed.join(", ")}</div>`;
 
     html += `</div>`;
     defiHtml = html;
     defiLoaded = true;
-    if (!isActiveRoute()) return;
     renderTabs("defi");
   }
 
   function renderTabs(active) {
-    activeTab = active;
     const tabs = ["defi", "txs", "objects"];
     const labels = { defi: "DeFi Portfolio", txs: "Transactions", objects: "Owned Objects" };
     const counts = { defi: "", txs: allTxs.length + (txPageInfo.hasPreviousPage ? "+" : ""), objects: allObjects.length + (objPageInfo.hasNextPage ? "+" : "") };
@@ -6492,12 +7145,10 @@ async function renderAddress(app, addr) {
         data-action="addr-switch-tab" data-tab="${t}">${labels[t]}${counts[t] ? " (" + counts[t] + ")" : ""}</div>`
     ).join("");
     document.getElementById("addr-tab-content").innerHTML = tabContent[active]();
-    if (isActiveRoute()) scheduleVisibleObjectShellPrefetch(app);
 
     // Lazy-load DeFi data when tab is clicked
     if (active === "defi" && !defiLoaded) {
       loadDefi().catch(e => {
-        if (!isActiveRoute()) return;
         defiHtml = renderEmpty("Failed to load DeFi data: " + escapeHtml(e.message));
         defiLoaded = true;
         renderTabs("defi");
@@ -6539,7 +7190,7 @@ async function renderAddress(app, addr) {
         const more = await gql(`query($addr: SuiAddress!, $after: String) {
           address(address: $addr) { objects(first: 20, after: $after) {
             pageInfo { hasNextPage endCursor }
-            nodes { address version digest ${GQL_F_CONTENTS_TYPE_JSON} }
+            nodes { address version digest contents { type { repr } json } }
           } }
         }`, { addr: addrNorm, after: objPageInfo.endCursor });
         allObjects = [...allObjects, ...(more.address.objects.nodes || [])];
@@ -6583,6 +7234,13 @@ async function renderAddress(app, addr) {
       renderTabs(trigger.getAttribute("data-tab") || "txs");
       return;
     }
+    if (action === "addr-wallet-protocol-filter") {
+      if (trigger.hasAttribute("disabled")) return;
+      walletProtocolFilterOnly = !walletProtocolFilterOnly;
+      const walletEl = document.getElementById("addr-wallet-holdings");
+      if (walletEl && defiWalletSectionRenderer) walletEl.innerHTML = defiWalletSectionRenderer();
+      return;
+    }
     if (action === "addr-tx-date-apply") {
       if (txLoading) return;
       txFilterState = txListNormalizeDateState({
@@ -6618,10 +7276,6 @@ async function renderAddress(app, addr) {
   };
   app.addEventListener("click", app._addressClickHandler);
   renderTabs("txs");
-  setTimeout(() => {
-    if (!isActiveRoute()) return;
-    ensureInitialAddressTransactions().catch(() => {});
-  }, 0);
 }
 
 // ── Object Detail ───────────────────────────────────────────────────────
@@ -9331,7 +9985,7 @@ async function renderTransfers(app) {
     syncPeggedPrices();
     return trackedCoinTypes.filter((ct) => {
       const resolved = resolveCoinType(ct);
-      return !(Number(defiPrices[resolved.symbol] || 0) > 0);
+      return !(Number(getDefiUsdPrice(resolved.symbol, ct) || 0) > 0);
     });
   }
 
@@ -9354,7 +10008,7 @@ async function renderTransfers(app) {
       for (const [ct, changes] of Object.entries(byCoin)) {
         const symbol = TRACKED_TOKENS[ct];
         const resolved = resolveCoinType(ct);
-        const price = Number(defiPrices[symbol] || 0);
+        const price = Number(getDefiUsdPrice(symbol, ct) || 0);
         const senders = changes.filter(c => Number(c.amount) < 0);
         const receivers = changes.filter(c => Number(c.amount) > 0);
         const totalSent = senders.reduce((s, c) => s + Math.abs(Number(c.amount)), 0);
@@ -9394,7 +10048,7 @@ async function renderTransfers(app) {
           <div class="stat-sub">From ${txs.length} recent txs</div>
         </div>
         ${tokenEntries.map(([sym, count]) => {
-          const price = Number(defiPrices[sym] || 0);
+          const price = Number(getDefiUsdPrice(sym) || 0);
           const priceLabel = price > 0
             ? `$${price.toFixed(sym === "SUI" || sym === "DEEP" || sym === "WAL" ? 4 : 2)}`
             : (pricingPending ? "Loading price..." : "Price unavailable");

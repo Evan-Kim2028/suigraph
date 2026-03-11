@@ -421,6 +421,7 @@ const SUI_RPC = "https://fullnode.mainnet.sui.io:443";
 // Pool oracle: on-chain pricing via Cetus + Bluefin CLMM pools
 const POOL_ORACLE_PRICE_TTL_MS = 15_000;
 const POOL_ORACLE_DISCOVERY_TTL_MS = 10 * 60_000;
+const POOL_ORACLE_DISCOVERY_PER_ALIAS = 10;
 const CETUS_POOL_TYPE_PREFIX = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool";
 const BLUEFIN_POOL_TYPE_PREFIX = "0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267::pool::Pool";
 const QUOTE_COINS = {
@@ -428,9 +429,11 @@ const QUOTE_COINS = {
   USDC: { type: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", decimals: 6 },
 };
 const POOL_ORACLE_SKIP = new Set(["SUI", "USDC", "USDT", "wUSDC", "BUCK", "AUSD", "FDUSD", "USDY", "SUI_USDE", "suiUSDe"]);
+const USD_PEGGED_SYMBOLS = new Set(["USDC", "USDT", "wUSDC", "BUCK", "AUSD", "FDUSD", "USDY", "SUI_USDE", "suiUSDe"]);
 const SUI_PEGGED_SYMBOLS = new Set(["haSUI", "afSUI", "vSUI", "sSUI", "HASUI", "SPRING_SUI", "MSUI", "KSUI", "CERT", "stSUI", "mSUI", "kSUI"]);
-const BTC_PEGGED_SYMBOLS = new Set(["WBTC", "BTC", "LBTC", "stBTC", "enzoBTC", "MBTC", "YBTC", "XBTC", "EXBTC"]);
+const BTC_PEGGED_SYMBOLS = new Set(["WBTC", "BTC", "LBTC", "stBTC", "enzoBTC", "MBTC", "YBTC", "XBTC", "EXBTC", "tBTC", "TBTC", "BTCvc"]);
 const BTC_PRICE_SOURCE = "xBTC";
+const EMBER_RATE_SCALE = 1_000_000_000n;
 let poolAddressCache = {};
 let oraclePricesTs = 0;
 const COMMON_DECIMALS = {
@@ -438,11 +441,13 @@ const COMMON_DECIMALS = {
   NAVX: 9, CETUS: 9, BLUE: 9, MSUI: 9, KSUI: 9, CERT: 9, stSUI: 9,
   sSUI: 9, SPRING_SUI: 9, IKA: 9, HASUI: 9, haSUI: 9, afSUI: 9, vSUI: 9,
   BUCK: 9, AUSD: 6, FUD: 5, XBTC: 8, wUSDC: 6, mSUI: 9, kSUI: 9,
-  BTC: 8, LBTC: 8, stBTC: 8, enzoBTC: 8, MBTC: 8, YBTC: 8, xBTC: 8,
+  BTC: 8, LBTC: 8, stBTC: 8, enzoBTC: 8, MBTC: 8, YBTC: 8, xBTC: 8, tBTC: 8, TBTC: 8, BTCvc: 8,
   SOL: 8, NS: 6, SEND: 6, HAEDAL: 9, ALKIMI: 9, XAUM: 9, UP: 6,
+  SCA: 9, LOFI: 9,
   FDUSD: 6, USDY: 6, SUI_USDE: 6, suiUSDe: 6,
 };
 let defiPrices = {};
+let defiPricesByCoinType = {};
 const DEEPBOOK_SPOT_PACKAGE = "0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963357661df5d3204809";
 const DEEPBOOK_SUI_USDC_POOL = "0xe05dafb5133bcffb8d59f4e12465dc0e9faeaa05e3e342a08fe135800e3e4407";
 const DEEPBOOK_BASE_DECIMALS = 9;  // SUI
@@ -541,7 +546,13 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
 let deepbookSuiPriceTs = 0;
 let defiPricesInFlight = null;
 const LENDING_RATES_TTL_MS = 60 * 1000;
+const PROTOCOL_SUPPORTED_COIN_TYPES_TTL_MS = 30 * 60 * 1000;
+const ADDRESS_BALANCE_TTL_MS = 20 * 1000;
+const ADDRESS_BALANCE_PAGE_SIZE = 50;
+const ADDRESS_BALANCE_MAX_PAGES = 20;
+const PROTOCOL_METADATA_MAX_PAGES = 12;
 let lendingRatesCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.lendingRates, LENDING_RATES_TTL_MS);
+let protocolSupportedCoinTypesCache = { data: null, ts: 0, inFlight: null };
 let lendingRatesInFlight = null;
 let defiLstCache = initPersistedTimedCacheState(PERSISTED_CACHE_KEYS.defiLst, DEFI_LST_TTL_MS);
 let gqlServiceConfigCache = { data: null, ts: 0, inFlight: null };
@@ -555,6 +566,7 @@ const searchClassificationCache = {};
 const addressShellCache = {};
 const checkpointDetailCache = {};
 const epochDetailCache = {};
+const addressBalanceCache = {};
 const defiActivityCacheByWindow = {};
 const defiOverviewCacheByWindow = {};
 const defiDexCacheByWindow = {};
@@ -597,6 +609,8 @@ const KNOWN_COIN_TYPES = {
   "0x0041f9f9344cac094454cd574e333c4fdb132d7bcc9379bcd4aab485b2a63942::wbtc::WBTC": { symbol: "WBTC", decimals: 8 },
   "0xaafb102dd0902f5055cadecd687fb5b71ca82ef0e0285d90afde828ec58ca96b::btc::BTC": { symbol: "BTC", decimals: 8 },
   "0x876a4b7bce8aeaef60464c11f4026903e9afacab79b9b142686158aa86560b50::xbtc::XBTC": { symbol: "xBTC", decimals: 8 },
+  "0x77045f1b9f811a7a8fb9ebd085b5b0c55c5cb0d1520ff55f7037f89b5da9f5f1::TBTC::TBTC": { symbol: "tBTC", decimals: 8 },
+  "0xd8fe9619ff2bcef53e0330b83b31ab380a04ee787dafecc19aac365a9824517f::btcvc::BTCVC": { symbol: "BTCvc", decimals: 8 },
   "0x3e8e9423d80e1774a7ca128fccd8bf5f1f7753be658c5e645929037f7c819040::lbtc::LBTC": { symbol: "LBTC", decimals: 8 },
   "0x5f496ed5d9d045c5b788dc1bb85f54100f2ede11e46f6a232c29daada4c5bdb6::coin::COIN": { symbol: "stBTC", decimals: 8 },
   "0x8f2b5eb696ed88b71fea398d330bccfa52f6e2a5a8e1ac6180fcb25c6de42ebc::coin::COIN": { symbol: "enzoBTC", decimals: 8 },
@@ -624,10 +638,36 @@ const KNOWN_COIN_TYPES = {
   "0x3c1e5a06dfa28e3823c6a2e9b999f74c12b3e72d38e4a056be0e0bb22df3bb1a::ika::IKA": { symbol: "IKA", decimals: 9 },
   "0x7262fb2f7a3a14c888c438a3cd9b912469a58cf60f367352c46584262e8299aa::ika::IKA": { symbol: "IKA", decimals: 9 },
   "0x1a8f4bc33f8ef7fbc851f156857aa65d397a6a6fd27a7ac2ca717b51f2fd9489::alkimi::ALKIMI": { symbol: "ALKIMI", decimals: 9 },
+  "0x7016aae72cfc67f2fadf55769c0a7dd54291a583b63051a5ed71081cce836ac6::sca::SCA": { symbol: "SCA", decimals: 9 },
+  "0xf22da9a24ad027cccb5f2d496cbe91de953d363513db08a3a734d361c7c17503::LOFI::LOFI": { symbol: "LOFI", decimals: 9 },
   "0x9d297676e7a4b771ab023291377b2adfaa4938fb9080b8d12430e4b108b836a9::xaum::XAUM": { symbol: "XAUM", decimals: 9 },
   "0x76cb819b01abed502bee8a702b4c2d547532c12f25001c9dea795a5e631c26f1::fud::FUD": { symbol: "FUD", decimals: 5 },
   "0x87dfe1248a1dc4ce473bd9cb2937d66cdc6c30fee63f3fe0dbb55c7a09d35dec::up::UP": { symbol: "UP", decimals: 6 },
 };
+
+const EMBER_SUI_VAULTS = {
+  "0x88eb44ba72b24f31bcd022e6a0f85e149f533ee5319cb4891f2eab0ef37baa34::eacred::EACRED": { vaultObjectId: "0xc73fc473135e790d62f31f64859f602c6fa136615e92e0f789427c8a11b1b744", vaultName: "Ember Apollo ACRED", receiptSymbol: "eACRED", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Third Eye", targetApyPct: 10.0 },
+  "0x34469c8accdd673df02600265cbbad3688577f0e716866e257f88d448d463492::eearn::EEARN": { vaultObjectId: "0x0779d2a4e1a6d3412982404cfe5567aac8cea229f17622c7b72d198b22a22e37", vaultName: "Ember Earn Vault", receiptSymbol: "eEARN", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Ember", targetApyPct: 10.0 },
+  "0xe5401963924c21a3b2fafda7869dc0acd91571443b5c08215550e24d26c6e8a2::esuig::ESUIG": { vaultObjectId: "0x7c79c55ba1c1273585eea36482ddaa12196830a3a746a27b40f9771d6fa1db18", vaultName: "Ember SUIG Vault", receiptSymbol: "eSUIG", receiptDecimals: 9, depositCoinType: "0x2::sui::SUI", depositSymbol: "SUI", depositDecimals: 9, managerLabel: "Ember, SUIG", targetApyPct: 5.0 },
+  "0xc360f622a9e77bb774061c44c11915e3cfc4242488cd668652dbff39cf0cdd58::esuiusde::ESUIUSDE": { vaultObjectId: "0x2a906b7633db9fca6c2f16c1efe73c7e289dfce8ed64a98ec5a5be10a9fb9aa1", vaultName: "suiUSDe Vault", receiptSymbol: "esuiUSDe", receiptDecimals: 6, depositCoinType: "0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE", depositSymbol: "suiUSDe", depositDecimals: 6, managerLabel: "SUIG, Ember", targetApyPct: 10.0 },
+  "0x820dd6ead8b56abb89a76cfc8e676703876a906a2e4dddde6c18c8052e5fd194::mrcusd::MRCUSD": { vaultObjectId: "0x6013f760aa089ef027e9b92f7c09edf5fef73ef6b48fc5ecd8af62a4ef2db3d8", vaultName: "R25 Treasury Vault", receiptSymbol: "mrcUSD", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Ember, R25", targetApyPct: 14.0 },
+  "0x001f2e09f885ad96d8b00cf87f4a12ba08643c599f873b5a66173a1682489877::eudl::EUDL": { vaultObjectId: "0x4ae973cffb815734db41cfd1674a7bf7a892727870778103290054aa0efe7e94", vaultName: "UDL Vault", receiptSymbol: "eUDL", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "UDL", targetApyPct: 12.0 },
+  "0xab7ef01122a9e54e2c46a1fc280a3e008b06c7e3f9accc0f4c141b71f3183a61::vbtcvc::VBTCVC": { vaultObjectId: "0xb3ccbc12cd633d3a8da0cf97a4d89f771a9bd8c0cd8ce321de13edc11cfb3e1c", vaultName: "Vishwa BTC Vault", receiptSymbol: "vBTCvc", receiptDecimals: 8, depositCoinType: "0xd8fe9619ff2bcef53e0330b83b31ab380a04ee787dafecc19aac365a9824517f::btcvc::BTCVC", depositSymbol: "BTCvc", depositDecimals: 8, managerLabel: "Vishwa", targetApyPct: 3.0 },
+  "0x6e6b58a710a5d59cfc44ba3af8004dd832af980a62c4519818ff463caf35a493::epoly::EPOLY": { vaultObjectId: "0x34f6f5bf549f760fab8c05eb06c269561f57fc7f16ccf2a0d724d95916cb8394", vaultName: "Polymarket Vault", receiptSymbol: "ePOLY", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Polymarket, Third Eye", targetApyPct: 14.0 },
+  "0x267a6e56d07057ba827c38904eb30614d3f01fd052129a709e74d0bb4ed9be3c::ercusd::ERCUSD": { vaultObjectId: "0x7af46a89faa486c47c60e12357305fbff7e04f4a7404104e890603176f7c7800", vaultName: "rcUSD Vault", receiptSymbol: "ercUSD", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Ember, R25", targetApyPct: 9.0 },
+  "0x56589f5381303a763a62e79ac118e5242f83652f4c5a9448af75162d8cb7140c::exbtc::EXBTC": { vaultObjectId: "0x30844745c8197fdaf9fe06c4ffeb73fe05c092ce0040674a3758dbfcb032a1f4", vaultName: "xBTC Vault", receiptSymbol: "exBTC", receiptDecimals: 8, depositCoinType: "0x876a4b7bce8aeaef60464c11f4026903e9afacab79b9b142686158aa86560b50::xbtc::XBTC", depositSymbol: "xBTC", depositDecimals: 8, managerLabel: "Gamma", targetApyPct: 6.0 },
+  "0x8a398f65f8635be31c181632bf730aea25074505d70c77d9b287e7d4f063ef70::ewal::EWAL": { vaultObjectId: "0x612f2c52885ca7c9ef852174286f696f30e25b5b06a8c833b98d521e68fb8b3d", vaultName: "Walrus Vault", receiptSymbol: "eWAL", receiptDecimals: 9, depositCoinType: "0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL", depositSymbol: "WAL", depositDecimals: 9, managerLabel: "Ember", targetApyPct: 0.0 },
+  "0x09e1ddb610500c5326d91923aba379649982f671583d741dfc3f6b0263dbbcb9::eriver::ERIVER": { vaultObjectId: "0x4a0722fe7d134b28fbd4092cc04ffe18c77c3829ab9da53db7f9b131d662e70d", vaultName: "Concentrated Liquidity Vault", receiptSymbol: "eRIVER", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Ember", targetApyPct: 15.0 },
+  "0xb8d11a432391868eedf0fee3e074baa1eac97c01d5670ee79164d64c6ade3bfd::emft::EMFT": { vaultObjectId: "0xd72710e4344fb7a08afe982bf152f21ea6db640e07945d423d4e23ea6ec7dca2", vaultName: "Trading Vault", receiptSymbol: "eMFT", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Ember Partner", targetApyPct: 7.0 },
+  "0x89b0d4407f17cc1b1294464f28e176e29816a40612f7a553313ea0a797a5f803::ethird::ETHIRD": { vaultObjectId: "0xeadfc1a6ea4915501506945aba6c2acc37c04136a784bafd6ff823a93ef3434a", vaultName: "Crosschain USD Vault", receiptSymbol: "eTHIRD", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Third Eye", targetApyPct: 13.0 },
+  "0xd84b887935d73110c8cb4b981f4925f83b7a20c41ac572840513422c5da283d6::eblue::EBLUE": { vaultObjectId: "0xf8d500875677345b6c0110ee8a48abc7c4974ca697df71eefd229827565168d0", vaultName: "Bluefin Vault", receiptSymbol: "eBLUE", receiptDecimals: 9, depositCoinType: "0xe1b45a0e641b9955a20aa0ad1c1f4ad86aad8afb07296d4085e349a50e90bdca::blue::BLUE", depositSymbol: "BLUE", depositDecimals: 9, managerLabel: "Bluefin", targetApyPct: 13.0 },
+  "0x66629328922d609cf15af779719e248ae0e63fe0b9d9739623f763b33a9c97da::esui::ESUI": { vaultObjectId: "0xfaf4d0ec9b76147c926c0c8b2aba39ea21ec991500c1e3e53b60d447b0e5f655", vaultName: "SUI Vault", receiptSymbol: "eSUI", receiptDecimals: 9, depositCoinType: "0x2::sui::SUI", depositSymbol: "SUI", depositDecimals: 9, managerLabel: "Gamma", targetApyPct: 6.9 },
+  "0x68532559a19101b58757012207d82328e75fde7a696d20a59e8307c1a7f42ad7::egusdc::EGUSDC": { vaultObjectId: "0x94c2826b24e44f710c5f80e3ed7ce898258d7008e3a643c894d90d276924d4b9", vaultName: "USD Vault", receiptSymbol: "egUSDC", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Gamma", targetApyPct: 10.8 },
+  "0x65b3db01dd36de8706128d842ca3d738ed30bd72c155ea175a44aedca37d4caf::ebasis::EBASIS": { vaultObjectId: "0x1fdbd27ba90a7a5385185e3e0b76477202f2cadb0e4343163288c5625e7c5505", vaultName: "Basis Vault", receiptSymbol: "eBASIS", receiptDecimals: 6, depositCoinType: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", depositSymbol: "USDC", depositDecimals: 6, managerLabel: "Ember", targetApyPct: 9.0 },
+  "0x244b98d29bd0bba401c7cfdd89f017c51759dad615e15a872ddfe45af079bb1d::ebtc::EBTC": { vaultObjectId: "0x323578c2b24683ca845c68c1e2097697d65e235826a9dc931abce3b4b1e43642", vaultName: "BTC Vault", receiptSymbol: "eBTC", receiptDecimals: 8, depositCoinType: "0x77045f1b9f811a7a8fb9ebd085b5b0c55c5cb0d1520ff55f7037f89b5da9f5f1::TBTC::TBTC", depositSymbol: "tBTC", depositDecimals: 8, managerLabel: "MEV Capital", targetApyPct: 8.0 },
+};
+
+let emberSuiVaultCatalog = null;
 
 // Stablecoin types for supply tracking (all via GraphQL)
 // Group 1: coinMetadata.supply works directly
@@ -682,6 +722,15 @@ function normalizeCoinTypeQueryInput(raw) {
   return `${addr}::${match[2]}::${match[3]}${suffix}`;
 }
 
+function normalizeCoinTypeLike(raw) {
+  const input = String(raw || "").trim();
+  if (!input) return "";
+  const normalized = normalizeCoinTypeQueryInput(input);
+  if (normalized) return normalized;
+  const prefixed = input.startsWith("0x") ? input : `0x${input}`;
+  return normalizeCoinType(prefixed);
+}
+
 function moveTypeStringHasCoinType(value, targetKey) {
   if (!targetKey) return false;
   const text = String(value || "");
@@ -714,6 +763,37 @@ function valueHasCoinType(value, targetKey, depth = 0) {
     return false;
   }
   return false;
+}
+
+function isKnownCoinType(coinType) {
+  if (!coinType) return false;
+  const normalized = normalizeCoinType(coinType);
+  return !!(KNOWN_COIN_TYPES[coinType] || KNOWN_COIN_TYPES[normalized]);
+}
+
+function setDefiUsdPriceForCoinType(coinType, usd) {
+  const key = coinTypeKey(coinType);
+  const price = Number(usd || 0);
+  if (!key || !(price > 0)) return;
+  defiPricesByCoinType[key] = price;
+}
+
+function getDefiUsdPrice(symbol, coinType = "") {
+  const key = coinTypeKey(coinType);
+  if (key) {
+    const exact = Number(defiPricesByCoinType[key] || 0);
+    if (exact > 0) return exact;
+    if (!isKnownCoinType(coinType)) return 0;
+  }
+  const resolvedSymbol = String(symbol || (coinType ? resolveCoinType(coinType).symbol : "") || "");
+  return Number(defiPrices[resolvedSymbol] || 0);
+}
+
+function priceAmountUsd(amount, symbol, coinType = "") {
+  const human = Number(amount || 0);
+  if (!(human > 0)) return 0;
+  const price = getDefiUsdPrice(symbol, coinType);
+  return price > 0 ? human * price : 0;
 }
 
 // Resolve a full coin type string to { symbol, decimals } (sync, fast path)
@@ -1786,6 +1866,22 @@ function escapeAttr(s) {
   return escapeHtml(s)
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function formatCoinTypeLabel(coinType, addrChars = 6) {
+  const normalized = normalizeCoinTypeQueryInput(coinType) || String(coinType || "");
+  const sep = normalized.indexOf("::");
+  if (sep <= 2) return normalized || "—";
+  const addr = normalized.slice(0, sep);
+  const rest = normalized.slice(sep);
+  return `${truncHash(addr, addrChars)}${rest}`;
+}
+
+function coinTypeLink(coinType, label = "") {
+  const normalized = normalizeCoinTypeQueryInput(coinType);
+  const display = label || formatCoinTypeLabel(coinType);
+  if (!normalized) return `<span class="coin-type-text">${escapeHtml(display)}</span>`;
+  return `<a class="hash-link coin-type-text" href="#/coin?type=${encodeURIComponent(normalized)}" title="${escapeAttr(normalized)}">${escapeHtml(display)}</a>`;
 }
 
 // ── Intent Lite (deterministic, no extra requests) ──────────────────────
