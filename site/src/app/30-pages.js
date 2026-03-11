@@ -9062,6 +9062,7 @@ const QUERIES = {
   },
 };
 
+// ── Coin Search ─────────────────────────────────────────────────────────
 async function renderCoin(app, routeCoinType = "") {
   const routeParams = splitRouteAndParams(getRoute()).params;
   const requestedRaw = String(routeCoinType || routeParams.get("type") || "").trim();
@@ -13224,7 +13225,7 @@ async function renderDefiRates(app) {
   }
   if (data) syncDefiRateToken();
 
-  async function load(force = false, rerender = true) {
+  async function loadDefiRatesData(force = false, rerender = true) {
     const reqId = ++loadReqId;
     dataLoading = !data;
     pricesLoading = true;
@@ -13444,7 +13445,7 @@ async function renderDefiRates(app) {
     app.innerHTML = renderContent();
   };
   const refreshDefiRates = async () => {
-    await load(true);
+    await loadDefiRatesData(true);
   };
   if (app._defiRatesChangeHandler) app.removeEventListener("change", app._defiRatesChangeHandler);
   app._defiRatesChangeHandler = (ev) => {
@@ -13485,7 +13486,7 @@ async function renderDefiRates(app) {
   app.innerHTML = renderContent();
   setTimeout(() => {
     if (!isActiveRoute()) return;
-    load(false).catch(() => null);
+    loadDefiRatesData(false).catch(() => null);
   }, 0);
 }
 

@@ -8,13 +8,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
 
 const ALLOWED_BOOT_TO_EXTRA_CALLS = new Set([
-  "fetchAddressShell",
-  "fetchDefiPrices",
-  "fetchEcosystemStats",
-  "fetchEpochDetailShell",
-  "fetchStablecoinSupply",
-  "renderDonutChart",
-  "renderAddress",
   "renderCoin",
   "renderCongestion",
   "renderDefiDex",
@@ -24,10 +17,8 @@ const ALLOWED_BOOT_TO_EXTRA_CALLS = new Set([
   "renderDefiRates",
   "renderDefiStablecoins",
   "renderDocs",
-  "renderEpochDetail",
   "renderEvents",
   "renderGraphQLPlayground",
-  "renderObjectDetail",
   "renderPackages",
   "renderProtocolConfig",
   "renderSimulator",

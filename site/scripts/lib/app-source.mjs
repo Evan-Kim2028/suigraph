@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { basename, relative, resolve } from "node:path";
 
 function readUtf8(path) {
   return readFileSync(path, "utf8");
@@ -22,8 +22,9 @@ function joinSources(paths) {
   return `${paths.map((path) => readUtf8(path).replace(/\s+$/u, "")).join("\n\n")}\n`;
 }
 
-const PAGE_EXTRA_SPLIT_MARKER = "// ── DeepBook Margin Constants";
+const PAGE_EXTRA_SPLIT_MARKER = "// ── Coin Search";
 const PAGE_INIT_MARKER = "// ── Init";
+const CRITICAL_BOOT_FILES = new Set(["35-defi-adapters.js"]);
 
 export function readAppSource(siteRoot) {
   const appPartsDir = resolve(siteRoot, "src/app");
@@ -100,6 +101,11 @@ export function readAppBundleSources(siteRoot) {
     }
     const source = readUtf8(path).replace(/\s+$/u, "");
     const relPath = relative(siteRoot, path).replace(/\\/g, "/");
+    if (CRITICAL_BOOT_FILES.has(basename(path))) {
+      bootChunks.push(source);
+      bootFiles.push(relPath);
+      continue;
+    }
     if (partPaths.indexOf(path) > pageIndex) {
       extraChunks.push(source);
       extraFiles.push(relPath);

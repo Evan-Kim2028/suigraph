@@ -90,7 +90,7 @@ function parseRoute(route) {
   return { page: "home" };
 }
 
-const CORE_ROUTE_PAGES = new Set(["home", "checkpoints", "checkpoint", "txs", "tx"]);
+const CORE_ROUTE_PAGES = new Set(["home", "checkpoints", "checkpoint", "txs", "tx", "address", "object"]);
 let extraRoutesLoadPromise = null;
 const EXTRA_ROUTES_MAX_SCRIPT_ATTEMPTS = 3;
 const EXTRA_ROUTES_RETRY_DELAY_MS = 250;
