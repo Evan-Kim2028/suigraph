@@ -1,0 +1,73 @@
+name: Fixture Drift
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fixtures-drift.yml
+      - site/fixtures/**
+      - site/package-lock.json
+      - site/package.json
+      - site/src/**
+      - site/scripts/build-single-file.mjs
+      - site/scripts/scan-address-fixtures.mjs
+      - site/scripts/lib/address-defi-smoke.mjs
+      - site/scripts/lib/browser-smoke.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fixture-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Setup Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+
+      - name: Build static bundle
+        run: npm run build
+
+      - name: Scan live address fixtures
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: npm run fixtures:scan
+
+      - name: Write fixture scan report
+        if: always()
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: node scripts/scan-address-fixtures.mjs --json > fixtures-scan.json || true
+
+      - name: Upload fixture scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixtures-scan-report
+          path: site/fixtures-scan.json
+          if-no-files-found: warn
