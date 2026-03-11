@@ -313,6 +313,7 @@ async function main() {
       return {
         bodyText,
         hasError: bodyText.includes("Error loading page:"),
+        hasAccountingWarnings: bodyText.includes("Accounting warnings"),
         hasWalletSection: bodyText.includes("Wallet Holdings"),
         hasProtocolFilter: !!document.querySelector('[data-action="addr-wallet-protocol-filter"]'),
         hasCoinTypeLinks: walletLinkCount > 0,
@@ -324,6 +325,7 @@ async function main() {
     lastSnapshot = snapshot;
 
     if (snapshot?.hasError) throw new Error("Address route rendered an error shell");
+    if (snapshot?.hasAccountingWarnings) throw new Error("Address route rendered accounting warnings");
     if (!snapshot?.hasWalletSection) throw new Error("Wallet Holdings section did not render");
     if (!snapshot?.hasProtocolFilter) throw new Error("Protocol-supported wallet filter did not render");
     if (!snapshot?.hasCoinTypeLinks) throw new Error("Wallet section did not expose clickable coin-type links");

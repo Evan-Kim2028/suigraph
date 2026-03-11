@@ -6391,6 +6391,219 @@ async function fetchAftermathPerpsPositions(addr) {
   }
 }
 
+function defiAccountingCloseEnough(actual, expected, tolerance = 0.05) {
+  if (!Number.isFinite(actual) || !Number.isFinite(expected)) return true;
+  const diff = Math.abs(actual - expected);
+  if (diff <= tolerance) return true;
+  const scale = Math.max(1, Math.abs(actual), Math.abs(expected));
+  return (diff / scale) <= 0.001;
+}
+function pushUniqueDefiWarning(warnings, message) {
+  const text = String(message || "").trim();
+  if (!text || warnings.includes(text)) return;
+  warnings.push(text);
+}
+function validateLendingProtocolAccounting(positions) {
+  const warnings = [];
+  let sawNetMismatch = false;
+  let sawNegativeRows = false;
+  for (const pos of (positions || [])) {
+    const depositedUsd = Number(pos?.depositedUsd || 0);
+    const borrowedUsd = Number(pos?.borrowedUsd || 0);
+    const netUsd = Number(pos?.netUsd || 0);
+    if (!defiAccountingCloseEnough(netUsd, depositedUsd - borrowedUsd)) sawNetMismatch = true;
+    for (const row of (pos?.deposits || [])) {
+      if (Number(row?.amount || 0) < -1e-12 || Number(row?.amountUsd || 0) < -1e-9) sawNegativeRows = true;
+    }
+    for (const row of (pos?.borrows || [])) {
+      if (Number(row?.amount || 0) < -1e-12 || Number(row?.amountUsd || 0) < -1e-9) sawNegativeRows = true;
+    }
+  }
+  if (sawNetMismatch) warnings.push("Accounting invariant: netUsd should equal depositedUsd - borrowedUsd.");
+  if (sawNegativeRows) warnings.push("Accounting invariant: deposit and borrow balances must be non-negative.");
+  return warnings;
+}
+function validateDexLpProtocolAccounting(positions) {
+  const warnings = [];
+  let sawTotalMismatch = false;
+  for (const pos of (positions || [])) {
+    const expectedTotal = Number(pos?.usdA || 0) + Number(pos?.usdB || 0);
+    if (!defiAccountingCloseEnough(Number(pos?.totalUsd || 0), expectedTotal)) {
+      sawTotalMismatch = true;
+      break;
+    }
+  }
+  if (sawTotalMismatch) warnings.push("Accounting invariant: totalUsd should equal usdA + usdB.");
+  return warnings;
+}
+function validateEmberProtocolAccounting(data) {
+  const positions = data?.positions || [];
+  const totalUsd = Number(data?.totalUsd || 0);
+  const summedUsd = positions.reduce((sum, row) => sum + Number(row?.amountUsd || 0), 0);
+  return defiAccountingCloseEnough(totalUsd, summedUsd)
+    ? []
+    : ["Accounting invariant: totalUsd should equal the sum of vault position USD values."];
+}
+function validateAftermathPerpsAccounting(data) {
+  const idleCollateral = Number(data?.idleCollateral || 0);
+  const allocatedCollateral = Number(data?.allocatedCollateral || 0);
+  const collateral = Number(data?.collateral || 0);
+  return defiAccountingCloseEnough(collateral, idleCollateral + allocatedCollateral, 0.0001)
+    ? []
+    : ["Accounting invariant: collateral should equal idleCollateral + allocatedCollateral."];
+}
+function buildAddressDefiAdapters(addr) {
+  return [
+    {
+      key: "suilend",
+      label: "Suilend",
+      kind: "lending",
+      load: () => fetchSuilendPositions(addr),
+      empty: () => [],
+      validate: validateLendingProtocolAccounting,
+    },
+    {
+      key: "navi",
+      label: "NAVI",
+      kind: "lending",
+      load: () => fetchNaviPositions(addr),
+      empty: () => [],
+      validate: validateLendingProtocolAccounting,
+    },
+    {
+      key: "alpha",
+      label: "Alpha",
+      kind: "lending",
+      load: () => fetchAlphaPositions(addr),
+      empty: () => [],
+      validate: validateLendingProtocolAccounting,
+    },
+    {
+      key: "scallop",
+      label: "Scallop",
+      kind: "lending",
+      load: () => fetchScallopPositions(addr),
+      empty: () => [],
+      validate: validateLendingProtocolAccounting,
+    },
+    {
+      key: "cetus",
+      label: "Cetus",
+      kind: "dex_lp",
+      load: () => fetchCetusPositions(addr),
+      empty: () => [],
+      validate: validateDexLpProtocolAccounting,
+    },
+    {
+      key: "turbos",
+      label: "Turbos",
+      kind: "dex_lp",
+      load: () => fetchTurbosPositions(addr),
+      empty: () => [],
+      validate: validateDexLpProtocolAccounting,
+    },
+    {
+      key: "wallet",
+      label: "Wallet",
+      kind: "wallet",
+      load: () => fetchDefiWalletBalances(addr),
+      empty: () => ({ rows: [], partial: false, scannedPages: 0 }),
+      validate: () => [],
+    },
+    {
+      key: "ember",
+      label: "Ember",
+      kind: "vault",
+      load: () => fetchEmberPositions(addr),
+      empty: () => ({ positions: [], consumedKeys: new Set(), totalUsd: 0, partial: false }),
+      validate: validateEmberProtocolAccounting,
+    },
+    {
+      key: "deepbook",
+      label: "DeepBook",
+      kind: "margin",
+      load: () => fetchDeepBookPositions(addr),
+      empty: () => ({ positions: [], pools: {}, riskConfigs: {} }),
+      validate: () => [],
+    },
+    {
+      key: "bluefinSpot",
+      label: "Bluefin Spot",
+      kind: "dex_lp",
+      load: () => fetchBluefinSpotPositions(addr),
+      empty: () => [],
+      validate: validateDexLpProtocolAccounting,
+    },
+    {
+      key: "bluefinPro",
+      label: "Bluefin Pro",
+      kind: "perps",
+      load: () => fetchBluefinProPositions(addr),
+      empty: () => ({ positions: [], collateral: 0 }),
+      validate: () => [],
+    },
+    {
+      key: "aftermathPerps",
+      label: "Aftermath Perps",
+      kind: "perps",
+      load: () => fetchAftermathPerpsPositions(addr),
+      empty: () => ({
+        accounts: [],
+        economicAccounts: [],
+        caps: [],
+        markets: [],
+        positions: [],
+        orders: [],
+        collateral: 0,
+        idleCollateral: 0,
+        allocatedCollateral: 0,
+        partial: true,
+        warnings: ["Aftermath fetch failed."],
+      }),
+      validate: validateAftermathPerpsAccounting,
+    },
+  ];
+}
+function resolveAddressDefiAdapterResult(adapter, settled) {
+  const value = settled?.status === "fulfilled" && settled.value != null
+    ? settled.value
+    : adapter.empty();
+  const warnings = [];
+  const embeddedWarnings = Array.isArray(value?.warnings) ? value.warnings : [];
+  for (const warning of embeddedWarnings) pushUniqueDefiWarning(warnings, warning);
+  if (settled?.status !== "fulfilled") {
+    pushUniqueDefiWarning(warnings, settled?.reason?.message || `${adapter.label} fetch failed.`);
+  }
+  const validationResult = adapter.validate?.(value);
+  const validationWarnings = Array.isArray(validationResult) ? validationResult : [];
+  for (const warning of validationWarnings) pushUniqueDefiWarning(warnings, warning);
+  return {
+    ...adapter,
+    status: settled?.status || "rejected",
+    value,
+    partial: (settled?.status !== "fulfilled") || !!value?.partial,
+    warnings,
+    validationWarnings: [...new Set(validationWarnings.map((warning) => String(warning || "").trim()).filter(Boolean))],
+  };
+}
+async function loadAddressDefiAdapters(addr) {
+  const defiAdapters = buildAddressDefiAdapters(addr);
+  const settled = await Promise.allSettled(defiAdapters.map((adapter) => adapter.load()));
+  return Object.fromEntries(defiAdapters.map((adapter, index) => [
+    adapter.key,
+    resolveAddressDefiAdapterResult(adapter, settled[index]),
+  ]));
+}
+function collectDefiAccountingWarnings(protocolResults) {
+  const warnings = [];
+  for (const result of Object.values(protocolResults || {})) {
+    for (const warning of (result?.validationWarnings || [])) {
+      pushUniqueDefiWarning(warnings, `${result.label}: ${warning}`);
+    }
+  }
+  return warnings.slice(0, 12);
+}
+
 // ── Address View ────────────────────────────────────────────────────────
 async function fetchAddressShell(addr, force = false) {
   const addrNorm = normalizeSuiAddress(addr);
@@ -6586,49 +6799,36 @@ async function renderAddress(app, addr) {
     // Phase 1: Get SUI price + stablecoins + LSTs quickly (skip slow pool oracle)
     await Promise.all([fetchDefiPrices(false, { skipOracle: true }), fetchLstExchangeRates()]);
     // Phase 2: Run pool oracle concurrently with position fetchers
-    const [, results] = await Promise.all([
+    const [, protocolResults] = await Promise.all([
       fetchPoolOraclePrices().catch(() => null),
-      Promise.allSettled([
-      fetchSuilendPositions(addrNorm), fetchNaviPositions(addrNorm),
-      fetchAlphaPositions(addrNorm), fetchScallopPositions(addrNorm),
-      fetchCetusPositions(addrNorm), fetchTurbosPositions(addrNorm),
-      fetchDefiWalletBalances(addrNorm), fetchEmberPositions(addrNorm), fetchDeepBookPositions(addrNorm),
-      fetchBluefinSpotPositions(addrNorm), fetchBluefinProPositions(addrNorm),
-      fetchAftermathPerpsPositions(addrNorm),
-      ]),
+      loadAddressDefiAdapters(addrNorm),
     ]);
     // Sync LSTs + stablecoins + BTC variants now that oracle is done
     syncPeggedPrices();
 
-    const [suilend, navi, alpha, scallop, cetus, turbos, wallet, ember, deepbook, bluefinSpot, bluefinPro, aftermathPerps] = results;
-    const suilendPos = suilend.status === "fulfilled" ? suilend.value : [];
-    const naviPos = navi.status === "fulfilled" ? navi.value : [];
-    const alphaPos = alpha.status === "fulfilled" ? alpha.value : [];
-    const scallopBasePos = scallop.status === "fulfilled" ? scallop.value : [];
-    const cetusPos = cetus.status === "fulfilled" ? cetus.value : [];
-    const turbosPos = turbos.status === "fulfilled" ? turbos.value : [];
-    const walletData = wallet.status === "fulfilled" ? wallet.value : { rows: [], partial: false, scannedPages: 0 };
+    const suilendPos = protocolResults.suilend.value;
+    const naviPos = protocolResults.navi.value;
+    const alphaPos = protocolResults.alpha.value;
+    const scallopBasePos = protocolResults.scallop.value;
+    const cetusPos = protocolResults.cetus.value;
+    const turbosPos = protocolResults.turbos.value;
+    const walletData = protocolResults.wallet.value;
     let walletBals = walletData.rows || [];
     const walletBalancePartial = !!walletData.partial;
-    const emberData = ember.status === "fulfilled" ? ember.value : { positions: [], consumedKeys: new Set(), totalUsd: 0, partial: false };
-    const db = deepbook.status === "fulfilled" ? deepbook.value : { positions: [], pools: {}, riskConfigs: {} };
-    const bluefinSpotPos = bluefinSpot.status === "fulfilled" ? bluefinSpot.value : [];
-    const bluefinProData = bluefinPro.status === "fulfilled" ? bluefinPro.value : { positions: [], collateral: 0 };
-    const afPerpsData = aftermathPerps.status === "fulfilled"
-      ? aftermathPerps.value
-      : {
-        accounts: [],
-        economicAccounts: [],
-        caps: [],
-        markets: [],
-        positions: [],
-        orders: [],
-        collateral: 0,
-        idleCollateral: 0,
-        allocatedCollateral: 0,
-        partial: true,
-        warnings: ["Aftermath fetch failed."],
-      };
+    const emberData = protocolResults.ember.value;
+    const db = protocolResults.deepbook.value;
+    const bluefinSpotPos = protocolResults.bluefinSpot.value;
+    const bluefinProData = protocolResults.bluefinPro.value;
+    const afPerpsAdapter = protocolResults.aftermathPerps;
+    const afPerpsData = {
+      ...afPerpsAdapter.value,
+      partial: !!afPerpsAdapter.partial || !!afPerpsAdapter.value?.partial,
+      warnings: [...new Set([...(afPerpsAdapter.value?.warnings || []), ...(afPerpsAdapter.warnings || [])])].slice(0, 12),
+    };
+    const defiAccountingWarnings = collectDefiAccountingWarnings(protocolResults);
+    const failedProtocols = Object.values(protocolResults)
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.label);
     const scallopWalletSupply = await buildSyntheticScallopWalletPositions(walletBals);
     if (scallopWalletSupply.consumedKeys.size) {
       walletBals = walletBals.filter((balance) => !scallopWalletSupply.consumedKeys.has(coinTypeKey(balance.coinType)));
@@ -6838,17 +7038,7 @@ async function renderAddress(app, addr) {
       || afPerpsData.collateral > 0;
     if (!hasAnything) {
       const errors = [];
-      if (suilend.status === "rejected") errors.push("Suilend");
-      if (navi.status === "rejected") errors.push("NAVI");
-      if (alpha.status === "rejected") errors.push("Alpha");
-      if (scallop.status === "rejected") errors.push("Scallop");
-      if (cetus.status === "rejected") errors.push("Cetus");
-      if (turbos.status === "rejected") errors.push("Turbos");
-      if (ember.status === "rejected") errors.push("Ember");
-      if (deepbook.status === "rejected") errors.push("DeepBook");
-      if (bluefinSpot.status === "rejected") errors.push("Bluefin Spot");
-      if (bluefinPro.status === "rejected") errors.push("Bluefin Pro");
-      if (aftermathPerps.status === "rejected") errors.push("Aftermath Perps");
+      errors.push(...failedProtocols);
       defiHtml = renderEmpty("No DeFi positions found." + (errors.length ? " (Failed: " + errors.map(escapeHtml).join(", ") + ")" : ""));
       defiLoaded = true; renderTabs("defi"); return;
     }
@@ -7241,10 +7431,12 @@ async function renderAddress(app, addr) {
       html += `</div>`;
     }
 
+    if (defiAccountingWarnings.length) {
+      html += `<div style="margin-top:12px;font-size:12px;color:var(--yellow);padding:8px 10px;background:var(--panel);border:1px dashed var(--yellow);border-radius:8px"><div style="font-weight:600;margin-bottom:4px">Accounting warnings</div>${defiAccountingWarnings.map((warning) => `<div>${escapeHtml(warning)}</div>`).join("")}</div>`;
+    }
+
     // ─── Errors ─────────────────────────────
-    const failed = [];
-    const protoResults = { Suilend: suilend, NAVI: navi, Alpha: alpha, Scallop: scallop, Cetus: cetus, Turbos: turbos, Ember: ember, DeepBook: deepbook, "Bluefin Spot": bluefinSpot, "Bluefin Pro": bluefinPro, "Aftermath Perps": aftermathPerps };
-    for (const [name, r] of Object.entries(protoResults)) { if (r.status === "rejected") failed.push(name); }
+    const failed = [...failedProtocols];
     if (failed.length) html += `<div style="margin-top:12px;font-size:12px;color:var(--text-dim)">Could not query: ${failed.join(", ")}</div>`;
 
     html += `</div>`;

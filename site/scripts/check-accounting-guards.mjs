@@ -63,6 +63,23 @@ if (!/allAccountIds\s*=\s*new Set\(economicAccounts\.map/.test(aftermathSource))
   issues.push("fetchAftermathPerpsPositions: order enrichment must use economic accounts only");
 }
 
+if (!/function buildAddressDefiAdapters\(/.test(js)) {
+  issues.push("missing buildAddressDefiAdapters helper");
+}
+if (!/function resolveAddressDefiAdapterResult\(/.test(js)) {
+  issues.push("missing resolveAddressDefiAdapterResult helper");
+}
+if (!/function collectDefiAccountingWarnings\(/.test(js)) {
+  issues.push("missing collectDefiAccountingWarnings helper");
+}
+if (!/loadAddressDefiAdapters\(addrNorm\)/.test(js)) {
+  issues.push("loadDefi must fetch protocol data through loadAddressDefiAdapters");
+}
+const aftermathAccountingSource = extractFunctionSource("validateAftermathPerpsAccounting");
+if (!/idleCollateral/.test(aftermathAccountingSource) || !/allocatedCollateral/.test(aftermathAccountingSource) || !/collateral/.test(aftermathAccountingSource)) {
+  issues.push("validateAftermathPerpsAccounting: missing collateral split invariant");
+}
+
 if (issues.length) {
   console.error("check-accounting-guards: failed");
   for (const issue of issues) console.error(`- ${issue}`);
