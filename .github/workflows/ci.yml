@@ -38,5 +38,10 @@ jobs:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: npm run smoke:address
 
+      - name: Smoke tx route
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: npm run smoke:tx
+
       - name: Update baseline metrics
         run: npm run baseline

@@ -3482,11 +3482,6 @@ function getStableSymbolKeys() {
   return out;
 }
 
-function parseTsMs(ts) {
-  const n = new Date(ts || "").getTime();
-  return Number.isFinite(n) ? n : NaN;
-}
-
 async function fetchDeterministicDefiWindowSample(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY, forceMaybe = false, projectionMaybe = "full") {
   const { windowKey, force } = parseDefiWindowAndForce(windowKeyOrForce, forceMaybe);
   const projectionKey = normalizeDefiWindowProjection(projectionMaybe);
@@ -6314,6 +6309,31 @@ async function fetchAftermathPerpsPositions(addr) {
 }
 
 // ── Address View ────────────────────────────────────────────────────────
+async function fetchAddressShell(addr, force = false) {
+  const addrNorm = normalizeSuiAddress(addr);
+  if (!addrNorm) return { address: null };
+  const storageKey = persistedEntityCacheKey(PERSISTED_CACHE_KEYS.addressShellPrefix, addrNorm);
+  const cacheState = getKeyedCacheState(addressShellCache, addrNorm);
+  hydratePersistedTimedCacheState(cacheState, storageKey, ENTITY_SHELL_TTL_MS);
+  return withTimedCache(cacheState, ENTITY_SHELL_TTL_MS, force, async () => {
+    const result = await gql(`query($addr: SuiAddress!) {
+      address(address: $addr) {
+        address
+        defaultNameRecord { domain }
+        objects(first: 20) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            address version digest
+            contents { type { repr } json }
+          }
+        }
+      }
+    }`, { addr: addrNorm });
+    writePersistedTimedCacheRecord(storageKey, result, 70000);
+    return result;
+  });
+}
+
 async function renderAddress(app, addr) {
   const rawAddr = decodeURIComponent(String(addr || ""));
   const addrNorm = normalizeSuiAddress(rawAddr);
@@ -6328,19 +6348,7 @@ async function renderAddress(app, addr) {
     return;
   }
 
-  const data = await gql(`query($addr: SuiAddress!) {
-    address(address: $addr) {
-      address
-      defaultNameRecord { domain }
-      objects(first: 20) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          address version digest
-          contents { type { repr } json }
-        }
-      }
-    }
-  }`, { addr: addrNorm });
+  const data = await fetchAddressShell(addrNorm, false);
 
   // If address query returns null, try as object
   if (!data.address) {

@@ -7,7 +7,10 @@
 - `npm run build`
 - `npm run build:check`
 - `npm run baseline`
+- `npm run check:bundle-boundaries`
 - `npm run smoke:coin`
+- `npm run smoke:address`
+- `npm run smoke:tx`
 - `npm run gql:surface`
 - `npm run perf:budgets`
 - `npm run schema:refresh`
@@ -22,7 +25,9 @@
 2. Run `npm run build` to generate minified `index.html`, `assets/`, `dist/index.html`, and `dist/assets/`.
 3. Run `npm run validate` before commit.
 4. Use `dist/` as the explicit deployment artifact target.
-5. Run `npm run smoke:coin` (or pass custom `--coin`) when touching coin-search logic.
+5. Run `npm run smoke:address` when touching address/DeFi rendering.
+6. Run `npm run smoke:tx` when touching tx detail, routing, or split-bundle boot helpers.
+7. Run `npm run smoke:coin` (or pass custom `--coin`) when touching coin-search logic.
 
 `npm run validate` includes:
 - build-output parity check (`build:check`)
@@ -33,6 +38,7 @@
   - no duplicate `class` attributes in app HTML snippets
   - inline-style budget cap on generated app HTML snippets
   - route pages must have explicit entries in `PAGE_PERF_BUDGETS`
+- boot/extra split guard (`check:bundle-boundaries`) to catch boot references to extra-only helpers
 - schema coverage drift check (`schema:check`) against `docs/schema-root-fields.json`
 
 ## Artifacts

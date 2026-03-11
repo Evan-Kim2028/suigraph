@@ -723,6 +723,11 @@ function normalizeSuiAddress(addr) {
   return `0x${hex}`;
 }
 
+function parseTsMs(ts) {
+  const n = new Date(ts || "").getTime();
+  return Number.isFinite(n) ? n : NaN;
+}
+
 function normalizeCoinTypeQueryInput(raw) {
   const input = String(raw || "").trim();
   if (!input) return "";
