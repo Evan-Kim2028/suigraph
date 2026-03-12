@@ -394,10 +394,12 @@ function scheduleVisibleRouteShellPrefetch(root = null) {
   if (!target) return;
   if (document.visibilityState === "hidden") return;
   if (navigator.connection?.saveData) return;
+  const currentPage = parseRoute(getRoute()).page;
+  // Overview already does enough work on first load; keep tx shell warming intent-driven here.
+  if (currentPage === "defi-overview") return;
   clearVisibleRouteShellPrefetch();
   const candidates = collectVisibleRouteShellPrefetchCandidates(target);
   if (!candidates.length) return;
-  const currentPage = parseRoute(getRoute()).page;
   const critical = selectCriticalRouteShellPrefetchCandidates(candidates, currentPage);
   const criticalKeys = new Set(critical.map((row) => row.key));
   const secondary = candidates

@@ -521,8 +521,8 @@ const QUOTE_COINS = {
   SUI: { type: "0x2::sui::SUI", decimals: 9 },
   USDC: { type: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC", decimals: 6 },
 };
-const POOL_ORACLE_SKIP = new Set(["SUI", "USDC", "USDT", "wUSDC", "BUCK", "AUSD", "FDUSD", "USDY", "SUI_USDE", "suiUSDe"]);
-const USD_PEGGED_SYMBOLS = new Set(["USDC", "USDT", "wUSDC", "BUCK", "AUSD", "FDUSD", "USDY", "SUI_USDE", "suiUSDe"]);
+const POOL_ORACLE_SKIP = new Set(["SUI", "USDC", "USDT", "wUSDC", "BUCK", "AUSD", "FDUSD", "USDY", "SUI_USDE", "suiUSDe", "USDSUI"]);
+const USD_PEGGED_SYMBOLS = new Set(["USDC", "USDT", "wUSDC", "BUCK", "AUSD", "FDUSD", "USDY", "SUI_USDE", "suiUSDe", "USDSUI"]);
 const SUI_PEGGED_SYMBOLS = new Set(["haSUI", "afSUI", "vSUI", "sSUI", "HASUI", "SPRING_SUI", "MSUI", "KSUI", "CERT", "stSUI", "mSUI", "kSUI"]);
 const BTC_PEGGED_SYMBOLS = new Set(["WBTC", "BTC", "LBTC", "stBTC", "enzoBTC", "MBTC", "YBTC", "XBTC", "EXBTC", "tBTC", "TBTC", "BTCvc"]);
 const BTC_PRICE_SOURCE = "xBTC";
@@ -537,7 +537,7 @@ const COMMON_DECIMALS = {
   BTC: 8, LBTC: 8, stBTC: 8, enzoBTC: 8, MBTC: 8, YBTC: 8, xBTC: 8, tBTC: 8, TBTC: 8, BTCvc: 8,
   SOL: 8, NS: 6, SEND: 6, HAEDAL: 9, ALKIMI: 9, XAUM: 9, UP: 6,
   SCA: 9, LOFI: 9,
-  FDUSD: 6, USDY: 6, SUI_USDE: 6, suiUSDe: 6,
+  FDUSD: 6, USDY: 6, SUI_USDE: 6, suiUSDe: 6, USDSUI: 6,
 };
 let defiPrices = {};
 let defiPricesByCoinType = {};
@@ -620,15 +620,15 @@ const PERSISTED_CACHE_KEYS = Object.freeze({
   dashboardActivity: "suigraph_cache_dashboard_activity_v1",
   lendingRates: "suigraph_cache_lending_rates_v1",
   defiPrices: "suigraph_cache_defi_prices_v1",
-  defiOverviewPrefix: "suigraph_cache_defi_overview",
+  defiOverviewPrefix: "suigraph_cache_defi_overview_v2",
   defiDexPrefix: "suigraph_cache_defi_dex",
   packageActivityPrefix: "suigraph_cache_package_activity",
-  defiStablecoinsPrefix: "suigraph_cache_defi_stablecoins",
+  defiStablecoinsPrefix: "suigraph_cache_defi_stablecoins_v2",
   defiFlowsPrefix: "suigraph_cache_defi_flows",
   defiLst: "suigraph_cache_defi_lst_v1",
   dashboardEpochs: "suigraph_cache_dashboard_epochs_v1",
   ecosystemStats: "suigraph_cache_ecosystem_stats_v1",
-  stablecoinSupply: "suigraph_cache_stablecoin_supply_v1",
+  stablecoinSupply: "suigraph_cache_stablecoin_supply_v2",
   checkpointsListFirstPage: "suigraph_cache_checkpoints_first_page_v1",
   transactionsListFirstPage: "suigraph_cache_transactions_first_page_v1",
   addressShellPrefix: "suigraph_cache_address_shell",
@@ -694,6 +694,7 @@ const KNOWN_COIN_TYPES = {
   "0x960b531667636f39e85867775f52f6b1f220a058c4de786905bdf761e06a56bb::usdy::USDY": { symbol: "USDY", decimals: 6 },
   "0xd1b72982e40348d069bb1ff701e634c117bb5f741f44dff91e472d3b01461e55::usde::USDE": { symbol: "SUI_USDE", decimals: 6 },
   "0x41d587e5336f1c86cad50d38a7136db99333bb9bda91cea4ba69115defeb1402::sui_usde::SUI_USDE": { symbol: "suiUSDe", decimals: 6 },
+  "0x44f838219cf67b058f3b37907b655f226153c18e33dfcd0da559a844fea9b1c1::usdsui::USDSUI": { symbol: "USDSUI", decimals: 6 },
   // ── ETH variants ──
   "0xaf8cd5edc19c4512f4259f0bee101a40d41ebed738ade5874359610ef8eeced5::coin::COIN": { symbol: "WETH", decimals: 8 },
   "0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH": { symbol: "ETH", decimals: 8 },
@@ -779,10 +780,17 @@ const STABLECOINS_WORMHOLE = [
   { type: "0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN", symbol: "wUSDC", decimals: 6, color: "#5A9FD4" },
   { type: "0xc060006111016b8a020ad5b33834984a437aaa7d3c74c18e09a95d48aceab08c::coin::COIN", symbol: "wUSDT", decimals: 6, color: "#50C878" },
 ];
-// Group 3: Protocol-specific — BUCK TreasuryCap in BucketProtocol singleton
+// Group 3: Protocol/state objects — singleton treasury/state objects with explicit JSON paths
 const BUCK_PROTOCOL_OBJ = "0x9e3dab13212b27f5434416939db5dec6a319d15b89a84fd074d03ece6350d3df";
 const STABLECOINS_PROTOCOL = [
   { objAddr: BUCK_PROTOCOL_OBJ, supplyPath: "buck_treasury_cap.total_supply.value", symbol: "BUCK", decimals: 9, color: "#F5A623" },
+  {
+    typeFilter: "0x94e8cb8df7796c7ea57f747f330ef61aedd8f48d48f7ac21bc975708a6ca6a1a::stablecoin::Stablecoin<0x94e8cb8df7796c7ea57f747f330ef61aedd8f48d48f7ac21bc975708a6ca6a1a::reserve_ledger::RESERVE_LEDGER, 0x44f838219cf67b058f3b37907b655f226153c18e33dfcd0da559a844fea9b1c1::usdsui::USDSUI>",
+    supplyPath: "treasury_cap.total_supply.value",
+    symbol: "USDSUI",
+    decimals: 6,
+    color: "#0EA5E9",
+  },
 ];
 
 // Normalize a full coin type by stripping leading zeros from the address portion.
@@ -1117,7 +1125,7 @@ const CATEGORY_KEYWORDS = {
   dex: ["deepbook", "cetus", "turbos", "kriya", "flowx", "aftermath", "dex", "swap", "amm"],
   staking: ["haedal", "spring", "volo", "stake", "staking", "lst"],
   perps: ["bluefin", "perp", "perpetual", "futures", "derivative"],
-  stablecoin: ["stable", "usdc", "usdt", "fdusd", "ausd", "usde", "buck"],
+  stablecoin: ["stable", "usdc", "usdt", "fdusd", "ausd", "usde", "usdsui", "buck"],
 };
 const NON_PROTOCOL_NAMES = new Set(["move-stdlib", "sui-framework", "sui-system", "unknown"]);
 
@@ -3265,6 +3273,39 @@ async function getCoinMeta(coinType) {
     }
   } catch (e) { /* ignore */ }
   return null;
+}
+
+async function getCoinMetaMap(coinTypes) {
+  const unique = [...new Set((coinTypes || []).filter(Boolean))];
+  const out = {};
+  const missing = [];
+  for (const coinType of unique) {
+    if (coinMetaCache[coinType]) out[coinType] = coinMetaCache[coinType];
+    else missing.push(coinType);
+  }
+  if (!missing.length) return out;
+
+  const chunks = chunkArray(missing, 5);
+  await Promise.all(chunks.map(async (chunk) => {
+    const aliases = chunk.map((coinType, i) => `c${i}: coinMetadata(coinType: "${coinType}") { decimals symbol name iconUrl supply }`);
+    try {
+      const data = await gql(`{ ${aliases.join("\n")} }`);
+      chunk.forEach((coinType, i) => {
+        const meta = data?.[`c${i}`] || null;
+        if (meta) coinMetaCache[coinType] = meta;
+        out[coinType] = meta;
+      });
+    } catch (_) {
+      await Promise.all(chunk.map(async (coinType) => {
+        out[coinType] = await getCoinMeta(coinType);
+      }));
+    }
+  }));
+
+  for (const coinType of unique) {
+    if (!(coinType in out)) out[coinType] = coinMetaCache[coinType] || null;
+  }
+  return out;
 }
 
 async function fetchCoinTotalSupplyRpc(coinType, shortCoinType = "") {

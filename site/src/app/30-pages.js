@@ -3026,10 +3026,24 @@ async function fetchStablecoinSupply(force = false) {
       (async () => {
         if (!STABLECOINS_PROTOCOL.length) return [];
         try {
-          const fields = STABLECOINS_PROTOCOL.map((p, i) => `p${i}: object(address: "${p.objAddr}") { ${GQL_F_MOVE_JSON} }`);
+          const fields = STABLECOINS_PROTOCOL.map((p, i) => (
+            p.objAddr
+              ? `p${i}: object(address: "${p.objAddr}") { ${GQL_F_MOVE_JSON} }`
+              : `p${i}: objects(filter: { type: "${p.typeFilter}" }, first: 10) { nodes { version asMoveObject { contents { json } } } }`
+          ));
           const data = await gql(`{ ${fields.join("\n")} }`);
           return STABLECOINS_PROTOCOL.map((p, i) => {
-            const json = data?.[`p${i}`]?.asMoveObject?.contents?.json;
+            let json = null;
+            if (p.objAddr) {
+              json = data?.[`p${i}`]?.asMoveObject?.contents?.json;
+            } else {
+              const nodes = Array.isArray(data?.[`p${i}`]?.nodes) ? data[`p${i}`].nodes : [];
+              const latest = nodes.reduce((best, node) => {
+                if (!best) return node;
+                return Number(node?.version || 0) > Number(best?.version || 0) ? node : best;
+              }, null);
+              json = latest?.asMoveObject?.contents?.json || null;
+            }
             if (!json) return null;
             const val = p.supplyPath.split(".").reduce((o, k) => o?.[k], json);
             if (!val) return null;
@@ -3449,6 +3463,7 @@ function stableSymbolKey(sym) {
 
 function stableSymbolDisplay(sym) {
   const key = stableSymbolKey(sym);
+  if (key === "USDSUI") return "USDSUI";
   if (key === "SUIUSDE") return "suiUSDe";
   if (key === "WUSDT") return "wUSDT";
   if (key === "WUSDC") return "wUSDC";
@@ -3474,6 +3489,7 @@ function getStableSymbolKeys() {
   out.add(stableSymbolKey("wUSDT"));
   out.add(stableSymbolKey("suiUSDe"));
   out.add(stableSymbolKey("SUI_USDE"));
+  out.add(stableSymbolKey("USDSUI"));
   out.add(stableSymbolKey("BUCK"));
   out.add(stableSymbolKey("AUSD"));
   out.add(stableSymbolKey("FDUSD"));
@@ -4483,8 +4499,8 @@ async function fetchDefiOverviewSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_
   const storageKey = persistedWindowCacheKey(PERSISTED_CACHE_KEYS.defiOverviewPrefix, windowKey);
   hydratePersistedTimedCacheState(cacheState, storageKey, DEFI_OVERVIEW_TTL_MS);
   return withTimedCache(cacheState, DEFI_OVERVIEW_TTL_MS, force, async () => {
-    await fetchDefiPrices();
-    const [activity, lending, stable, lst] = await Promise.all([
+    const [, activity, lending, stable, lst] = await Promise.all([
+      fetchDefiPrices(force, { skipOracle: true }),
       fetchRecentDefiActivity(windowKey, force),
       fetchLendingRatesOverview(force),
       fetchStablecoinSupply(),
@@ -4696,10 +4712,11 @@ async function fetchDefiStablecoinSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAUL
 
 async function fetchDefiLstSnapshot(force = false) {
   return withTimedCache(defiLstCache, DEFI_LST_TTL_MS, force, async () => {
-    await Promise.all([fetchDefiPrices(), fetchLstExchangeRates()]);
+    await Promise.all([fetchDefiPrices(force, { skipOracle: true }), fetchLstExchangeRates()]);
+    const coinMetaByType = await getCoinMetaMap(Object.keys(LST_TYPES));
     const entries = [];
     for (const [coinType, info] of Object.entries(LST_TYPES)) {
-      const meta = await getCoinMeta(coinType).catch(() => null);
+      const meta = coinMetaByType[coinType] || null;
       const resolved = resolveCoinType(coinType);
       const decimals = meta?.decimals ?? resolved.decimals ?? 9;
       const metaSupplyRaw = Number(meta?.supply || 0);
@@ -11488,9 +11505,24 @@ function renderDefiMethodCard(lines = [], title = "How Computed") {
   `;
 }
 
-function renderDefiParityGuardCard(parity = {}, title = "Cross-Page Parity Guard") {
+function renderDefiParityGuardCard(parity = {}, title = "Cross-Page Checks") {
   if (uiViewMode !== "advanced") return "";
   const p = parity || {};
+  if (p.idle) {
+    return `
+      <div class="card u-mb16">
+        <div class="card-header">${title}</div>
+        <div class="card-body u-p12-16">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="badge" style="background:var(--border);color:var(--text-dim)">Deferred</span>
+            <span class="u-fs12-dim">Window: ${escapeHtml(p.windowLabel || "—")} (${escapeHtml(p.windowKey || "—")})</span>
+            ${p.action ? `<button data-action="${escapeAttr(p.action)}" class="btn-surface-sm">${escapeHtml(p.actionLabel || "Run checks")}</button>` : ""}
+          </div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:8px">Load checks on demand to keep the Summary tab lightweight.</div>
+        </div>
+      </div>
+    `;
+  }
   if (p.loading) {
     return `
       <div class="card u-mb16">
@@ -11499,8 +11531,9 @@ function renderDefiParityGuardCard(parity = {}, title = "Cross-Page Parity Guard
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span class="badge" style="background:var(--blue)22;color:var(--blue)">Loading</span>
             <span class="u-fs12-dim">Window: ${escapeHtml(p.windowLabel || "—")} (${escapeHtml(p.windowKey || "—")})</span>
+            ${p.action ? `<button data-action="${escapeAttr(p.action)}" class="btn-surface-sm">${escapeHtml(p.actionLabel || "Re-run")}</button>` : ""}
           </div>
-          <div style="font-size:12px;color:var(--text-dim);margin-top:8px">Package and DEX parity is loading asynchronously after first paint.</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:8px">Checking selected-window totals against the Packages and DEX pages.</div>
         </div>
       </div>
     `;
@@ -11513,6 +11546,7 @@ function renderDefiParityGuardCard(parity = {}, title = "Cross-Page Parity Guard
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span class="badge" style="background:var(--yellow)22;color:var(--yellow)">Unavailable</span>
             <span class="u-fs12-dim">Window: ${escapeHtml(p.windowLabel || "—")} (${escapeHtml(p.windowKey || "—")})</span>
+            ${p.action ? `<button data-action="${escapeAttr(p.action)}" class="btn-surface-sm">${escapeHtml(p.actionLabel || "Re-run")}</button>` : ""}
           </div>
           <div style="font-size:12px;color:var(--yellow);margin-top:8px">${escapeHtml(p.error)}</div>
         </div>
@@ -11529,6 +11563,7 @@ function renderDefiParityGuardCard(parity = {}, title = "Cross-Page Parity Guard
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
           <span class="badge" style="background:${ok ? "var(--green)22" : "var(--yellow)22"};color:${statusColor}">${ok ? "OK" : "Mismatch"}</span>
           <span class="u-fs12-dim">Window: ${escapeHtml(p.windowLabel || "—")} (${escapeHtml(p.windowKey || "—")})</span>
+          ${p.action ? `<button data-action="${escapeAttr(p.action)}" class="btn-surface-sm">${escapeHtml(p.actionLabel || "Re-run")}</button>` : ""}
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-bottom:${mismatches.length ? "10px" : "0"}">
           <div class="u-fs12-dim">Packages rows: <span class="u-c-text">${fmtNumber(p.packagesRowsOverview || 0)}</span> (overview) vs <span class="u-c-text">${fmtNumber(p.packagesRowsPackages || 0)}</span> (packages)</div>
@@ -12131,16 +12166,20 @@ async function renderDefiOverview(app) {
   const routeParams = splitRouteAndParams(getRoute()).params;
   let windowKey = normalizeDefiWindowKey(routeParams.get("w"));
   let data = await fetchDefiOverviewSnapshot(windowKey);
+  const routeTab = routeParams.get("tab");
+  let activeTab = uiViewMode === "advanced" && ["checks", "qa"].includes(routeTab) ? "checks" : "summary";
   let categoryFilter = routeParams.get("cat") || "all";
   let sortKey = ["tx", "success", "latest", "name"].includes(routeParams.get("sort")) ? routeParams.get("sort") : "tx";
   let historyMetric = routeParams.get("metric") === "object" ? "object" : "network";
   let historyRange = DEFI_HISTORY_PRESETS[routeParams.get("range")] ? routeParams.get("range") : "1W";
   let historyObject = routeParams.get("obj") || DEFAULT_DEFI_HISTORY_OBJECT;
   let historyFormat = routeParams.get("fmt") || DEFAULT_DEFI_HISTORY_FORMAT;
+  let historyRequested = routeParams.has("metric") || routeParams.has("range") || routeParams.has("obj") || routeParams.has("fmt");
   let historyData = null;
   let historyErr = "";
   let historyLoading = false;
   let historyReqId = 0;
+  let parityRequested = activeTab === "checks";
   let parityData = null;
   let parityErr = "";
   let parityLoading = false;
@@ -12149,6 +12188,7 @@ async function renderDefiOverview(app) {
   function persistDefiOverviewState() {
     setRouteParams({
       w: windowKey !== DEFI_WINDOW_DEFAULT_KEY ? windowKey : null,
+      tab: uiViewMode === "advanced" && activeTab === "checks" ? "checks" : null,
       cat: categoryFilter !== "all" ? categoryFilter : null,
       sort: sortKey !== "tx" ? sortKey : null,
       metric: historyMetric !== "network" ? historyMetric : null,
@@ -12217,6 +12257,21 @@ async function renderDefiOverview(app) {
     return rows;
   }
 
+  function renderOverviewTabs() {
+    if (uiViewMode !== "advanced") return "";
+    const tabs = [
+      { key: "summary", label: "Summary" },
+      { key: "checks", label: "Checks" },
+    ];
+    return `
+      <div class="card u-mb16">
+        <div id="defi-overview-tabs" class="inner-tabs">
+          ${tabs.map((tab) => `<div class="inner-tab ${tab.key === activeTab ? "active" : ""}" data-action="defi-overview-switch-tab" data-tab="${tab.key}">${tab.label}</div>`).join("")}
+        </div>
+      </div>
+    `;
+  }
+
   function renderContent() {
     const top = topRows();
     const cats = data.categoryRows || [];
@@ -12255,23 +12310,43 @@ async function renderDefiOverview(app) {
     ]);
     const signals = renderDefiSignalsCard(data.signals || []);
     const parityCard = renderDefiParityGuardCard(
-      parityLoading
+      !parityRequested
         ? {
-            loading: true,
+            idle: true,
             windowKey,
             windowLabel: sampleCoverage.windowLabel || "",
+            action: "defi-parity-load",
+            actionLabel: "Run checks",
           }
-        : (parityErr
+        : (parityLoading
           ? {
-              error: parityErr,
-              windowKey,
-              windowLabel: sampleCoverage.windowLabel || "",
-            }
-          : (parityData || {
               loading: true,
               windowKey,
               windowLabel: sampleCoverage.windowLabel || "",
-            }))
+              action: "defi-parity-refresh",
+              actionLabel: "Re-run",
+            }
+          : (parityErr
+            ? {
+                error: parityErr,
+                windowKey,
+                windowLabel: sampleCoverage.windowLabel || "",
+                action: "defi-parity-refresh",
+                actionLabel: "Re-run",
+              }
+            : (parityData
+              ? {
+                  ...parityData,
+                  action: "defi-parity-refresh",
+                  actionLabel: "Re-run",
+                }
+              : {
+                  loading: true,
+                  windowKey,
+                  windowLabel: sampleCoverage.windowLabel || "",
+                  action: "defi-parity-refresh",
+                  actionLabel: "Re-run",
+                })))
     );
     const hs = historyData?.stats || {};
     const hc = historyData?.coverage || {};
@@ -12294,16 +12369,17 @@ async function renderDefiOverview(app) {
             <select data-action="defi-history-range" class="ui-control">
               ${Object.keys(DEFI_HISTORY_PRESETS).map(k => `<option value="${k}" ${historyRange === k ? "selected" : ""}>${k}</option>`).join("")}
             </select>
-            <button data-action="defi-history-refresh" class="btn-surface-sm">Reload</button>
+            <button data-action="${historyRequested ? "defi-history-refresh" : "defi-history-load"}" class="btn-surface-sm">${historyRequested ? "Reload" : "Load"}</button>
           </div>
           ${historyMetric === "object" ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
             <input id="defi-hist-object" value="${escapeAttr(historyObject)}" placeholder="Object address" style="flex:1;min-width:260px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;font-size:12px" />
             <input id="defi-hist-format" value="${escapeAttr(historyFormat)}" placeholder="format() path, e.g. {state.total_supply:json}" style="flex:1;min-width:260px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;font-size:12px" />
             <button data-action="defi-history-apply" class="btn-accent-sm">Apply</button>
           </div>` : ""}
-          ${historyLoading ? `<div style="padding:12px 0">${renderLoading()}</div>` : ""}
-          ${!historyLoading && historyErr ? `<div style="padding:8px 0">${renderEmpty(escapeHtml(historyErr))}</div>` : ""}
-          ${!historyLoading && !historyErr && historyData ? `
+          ${!historyRequested ? `<div style="padding:8px 0">${renderEmpty("Historical snapshots are deferred. Click Load to fetch them.")}</div>` : ""}
+          ${historyRequested && historyLoading ? `<div style="padding:12px 0">${renderLoading()}</div>` : ""}
+          ${historyRequested && !historyLoading && historyErr ? `<div style="padding:8px 0">${renderEmpty(escapeHtml(historyErr))}</div>` : ""}
+          ${historyRequested && !historyLoading && !historyErr && historyData ? `
             <div class="stats-grid u-mb12">
               <div class="stat-box"><div class="stat-label">Latest</div><div class="stat-value">${latestVal}</div><div class="stat-sub">${historyMetric === "network" ? "transactions/day" : "snapshot value"}</div></div>
               <div class="stat-box"><div class="stat-label">Delta (Last Step)</div><div class="stat-value" style="color:${deltaColor}">${deltaVal}</div><div class="stat-sub">${Number.isFinite(hs.deltaPct) ? `${hs.deltaPct >= 0 ? "+" : ""}${hs.deltaPct.toFixed(2)}%` : "—"}</div></div>
@@ -12319,14 +12395,12 @@ async function renderDefiOverview(app) {
                 : "Computed from checkpoint.query.object(...) using MoveValue.format(...) at each mapped daily checkpoint."}
             </div>
           ` : ""}
-          ${!historyLoading && !historyErr && !historyData ? renderEmpty("No historical snapshot data loaded.") : ""}
+          ${historyRequested && !historyLoading && !historyErr && !historyData ? renderEmpty("No historical snapshot data loaded.") : ""}
         </div>
       </div>
     `;
 
-    return `
-      <div class="page-title">DeFi Overview <span class="type-tag">GraphQL</span></div>
-      ${scope}
+    const summaryContent = `
       <div class="stats-grid">
         <div class="stat-box">
           <div class="stat-label">Protocols Seen</div>
@@ -12370,8 +12444,6 @@ async function renderDefiOverview(app) {
         </div>
       </div>
       ${renderDefiCoveragePanel(sampleCoverage, "DeFi Overview Sampling Coverage")}
-      ${parityCard}
-
       ${historyCard}
       ${signals}
       ${methods}
@@ -12431,6 +12503,38 @@ async function renderDefiOverview(app) {
         </div>
       </div>
     `;
+    const qaContent = `
+      <div class="card u-mb16">
+        <div class="card-header">Checks Guide</div>
+        <div class="card-body u-p12-16">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;align-items:start">
+            <div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+                <span class="badge" style="background:var(--surface2);color:var(--text)">Window ${escapeHtml(sampleCoverage.windowLabel || "—")}</span>
+                <span class="badge" style="background:var(--surface2);color:var(--text-dim)">${fmtNumber(data.activity.sampleSize)} programmable txs</span>
+              </div>
+              <div class="u-fs12-dim">Use this tab to verify that Overview totals still line up with the Packages and DEX pages for the selected window.</div>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--surface)">
+              <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-dim);margin-bottom:8px">Validation Scope</div>
+              <ul style="margin:0;padding-left:18px;display:grid;gap:6px;font-size:12px;color:var(--text-dim)">
+                <li>Protocol row counts in Overview vs Packages.</li>
+                <li>DEX protocol counts and tracked transactions in Overview vs DEX.</li>
+                <li>Selected-window alignment after changing the sampler window.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+      ${parityCard}
+    `;
+
+    return `
+      <div class="page-title">DeFi Overview <span class="type-tag">GraphQL</span></div>
+      ${scope}
+      ${renderOverviewTabs()}
+      ${uiViewMode === "advanced" && activeTab === "checks" ? qaContent : summaryContent}
+    `;
   }
 
   const setDefiOverviewCategory = (v) => {
@@ -12443,34 +12547,47 @@ async function renderDefiOverview(app) {
     persistDefiOverviewState();
     app.innerHTML = renderContent();
   };
+  const setDefiOverviewTab = async (v) => {
+    if (uiViewMode !== "advanced") return;
+    const nextTab = v === "checks" ? "checks" : "summary";
+    if (activeTab === nextTab) return;
+    activeTab = nextTab;
+    if (activeTab === "checks") parityRequested = true;
+    persistDefiOverviewState();
+    app.innerHTML = renderContent();
+    if (!isActiveRoute()) return;
+    if (activeTab === "checks") {
+      if (!parityLoading && !parityData && !parityErr) await loadParity(false);
+      return;
+    }
+    if (historyRequested && !historyLoading && !historyData && !historyErr) await loadHistory(false);
+  };
   const setDefiOverviewWindow = async (v) => {
     windowKey = normalizeDefiWindowKey(v);
     persistDefiOverviewState();
     app.innerHTML = renderLoading();
     data = await fetchDefiOverviewSnapshot(windowKey, false);
     if (!isActiveRoute()) return;
-    historyReqId += 1;
     parityReqId += 1;
-    historyData = null;
-    historyErr = "";
-    historyLoading = true;
     parityData = null;
     parityErr = "";
-    parityLoading = true;
+    parityLoading = activeTab === "checks";
+    parityRequested = activeTab === "checks";
     app.innerHTML = renderContent();
     setTimeout(() => {
       if (!isActiveRoute()) return;
-      loadHistory(false).catch(() => {});
-      loadParity(false).catch(() => {});
+      if (activeTab === "checks") loadParity(false).catch(() => {});
     }, 0);
   };
   const setDefiHistoryMetric = async (v) => {
     historyMetric = v === "object" ? "object" : "network";
+    historyRequested = true;
     persistDefiOverviewState();
     await loadHistory(false);
   };
   const setDefiHistoryRange = async (v) => {
     historyRange = DEFI_HISTORY_PRESETS[v] ? v : "1W";
+    historyRequested = true;
     persistDefiOverviewState();
     await loadHistory(false);
   };
@@ -12479,29 +12596,43 @@ async function renderDefiOverview(app) {
     const fmt = document.getElementById("defi-hist-format")?.value?.trim() || "";
     if (obj) historyObject = obj;
     if (fmt) historyFormat = fmt;
+    historyRequested = true;
     persistDefiOverviewState();
     await loadHistory(true);
   };
   const refreshDefiHistory = async () => {
+    historyRequested = true;
     await loadHistory(true);
+  };
+  const loadDefiHistory = async () => {
+    historyRequested = true;
+    historyErr = "";
+    historyData = null;
+    await loadHistory(false);
+  };
+  const loadDefiParity = async () => {
+    parityRequested = true;
+    parityErr = "";
+    parityData = null;
+    await loadParity(false);
+  };
+  const refreshDefiParity = async () => {
+    parityRequested = true;
+    await loadParity(true);
   };
   const refreshDefiOverview = async () => {
     app.innerHTML = renderLoading();
     data = await fetchDefiOverviewSnapshot(windowKey, true);
     if (!isActiveRoute()) return;
-    historyReqId += 1;
     parityReqId += 1;
-    historyData = null;
-    historyErr = "";
-    historyLoading = true;
     parityData = null;
     parityErr = "";
-    parityLoading = true;
+    parityLoading = activeTab === "checks";
+    parityRequested = activeTab === "checks";
     app.innerHTML = renderContent();
     setTimeout(() => {
       if (!isActiveRoute()) return;
-      loadHistory(true).catch(() => {});
-      loadParity(true).catch(() => {});
+      if (activeTab === "checks") loadParity(true).catch(() => {});
     }, 0);
   };
   if (app._defiOverviewChangeHandler) app.removeEventListener("change", app._defiOverviewChangeHandler);
@@ -12537,14 +12668,34 @@ async function renderDefiOverview(app) {
     if (!trigger || !app.contains(trigger)) return;
     const action = trigger.getAttribute("data-action");
     if (!action) return;
+    if (action === "defi-overview-switch-tab") {
+      ev.preventDefault();
+      await setDefiOverviewTab(trigger.getAttribute("data-tab") || "summary");
+      return;
+    }
     if (action === "defi-history-apply") {
       ev.preventDefault();
       await applyDefiHistoryObject();
       return;
     }
+    if (action === "defi-history-load") {
+      ev.preventDefault();
+      await loadDefiHistory();
+      return;
+    }
     if (action === "defi-history-refresh") {
       ev.preventDefault();
       await refreshDefiHistory();
+      return;
+    }
+    if (action === "defi-parity-load") {
+      ev.preventDefault();
+      await loadDefiParity();
+      return;
+    }
+    if (action === "defi-parity-refresh") {
+      ev.preventDefault();
+      await refreshDefiParity();
       return;
     }
     if (action === "defi-overview-refresh") {
@@ -12553,14 +12704,14 @@ async function renderDefiOverview(app) {
     }
   };
   app.addEventListener("click", app._defiOverviewClickHandler);
-  historyLoading = true;
-  parityLoading = true;
   app.innerHTML = renderContent();
-  setTimeout(() => {
-    if (!isActiveRoute()) return;
-    loadHistory(false).catch(() => {});
-    loadParity(false).catch(() => {});
-  }, 0);
+  if ((activeTab === "summary" && historyRequested) || activeTab === "checks") {
+    setTimeout(() => {
+      if (!isActiveRoute()) return;
+      if (activeTab === "summary" && historyRequested) loadHistory(false).catch(() => {});
+      if (activeTab === "checks") loadParity(false).catch(() => {});
+    }, 0);
+  }
 }
 
 // ── DeFi DEX ───────────────────────────────────────────────────────────

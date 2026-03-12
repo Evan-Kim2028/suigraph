@@ -9,8 +9,8 @@ Generated from snapshot: `2026-02-28T20:58:08.939Z`
 
 | Metric | Value |
 |---|---:|
-| Total gql call sites | 100 |
-| Static template query call sites | 95 |
+| Total gql call sites | 101 |
+| Static template query call sites | 96 |
 | Dynamic/non-literal call sites | 5 |
 | Query root fields in schema snapshot | 32 |
 | Query root fields used (static scan) | 22 |
