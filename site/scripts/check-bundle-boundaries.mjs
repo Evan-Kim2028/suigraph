@@ -8,6 +8,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE_ROOT = resolve(__dirname, "..");
 
 const ALLOWED_BOOT_TO_EXTRA_CALLS = new Set([
+  "afRoleLabel",
+  "buildSyntheticScallopWalletPositions",
+  "collectDefiAccountingWarnings",
+  "fetchScallopUnderlyingCoinTypes",
+  "loadAddressDefiAdapters",
   "renderCongestion",
   "renderDefiDex",
   "renderDefiFlows",
@@ -75,6 +80,7 @@ if (missingBootSymbols.length) {
 
 const unexpectedBootToExtra = [...bootCalls]
   .filter((name) => extraDecls.has(name))
+  .filter((name) => !bootDecls.has(name))
   .filter((name) => !ALLOWED_BOOT_TO_EXTRA_CALLS.has(name))
   .sort();
 

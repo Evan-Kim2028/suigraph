@@ -72,7 +72,7 @@ if (!/function resolveAddressDefiAdapterResult\(/.test(js)) {
 if (!/function collectDefiAccountingWarnings\(/.test(js)) {
   issues.push("missing collectDefiAccountingWarnings helper");
 }
-if (!/loadAddressDefiAdapters\(addrNorm\)/.test(js)) {
+if (!/loadAddressDefiAdapters\(addrNorm(?:\s*,[^)]*)?\)/.test(js)) {
   issues.push("loadDefi must fetch protocol data through loadAddressDefiAdapters");
 }
 const aftermathAccountingSource = extractFunctionSource("validateAftermathPerpsAccounting");

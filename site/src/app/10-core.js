@@ -265,6 +265,20 @@ const PAGE_PERF_BUDGETS = Object.freeze({
   docs: { gqlCalls: 1, renderMs: 900 },
 });
 let pagePerf = null;
+let perfBadgeUpdateHandle = 0;
+
+function schedulePerfBadgeUpdate() {
+  if (perfBadgeUpdateHandle) return;
+  const flush = () => {
+    perfBadgeUpdateHandle = 0;
+    applyPerfBadge();
+  };
+  if (typeof requestAnimationFrame === "function") {
+    perfBadgeUpdateHandle = requestAnimationFrame(flush);
+    return;
+  }
+  perfBadgeUpdateHandle = setTimeout(flush, 0);
+}
 
 function startPagePerf(page) {
   const budget = PAGE_PERF_BUDGETS[page] || {};
@@ -281,6 +295,9 @@ function startPagePerf(page) {
     cacheMisses: 0,
     dedupedGql: 0,
     retriedGql: 0,
+    firstGqlAtMs: null,
+    lastGqlAtMs: null,
+    detailRows: Object.create(null),
     queryStats: Object.create(null),
     status: "loading",
   };
@@ -291,6 +308,7 @@ function notePerfCache(hit) {
   if (!pagePerf) return;
   if (hit) pagePerf.cacheHits++;
   else pagePerf.cacheMisses++;
+  schedulePerfBadgeUpdate();
 }
 
 function notePerfGql(elapsedMs, reqBytes, resBytes, queryKey = "", ok = true) {
@@ -299,8 +317,14 @@ function notePerfGql(elapsedMs, reqBytes, resBytes, queryKey = "", ok = true) {
   pagePerf.gqlMs += Number(elapsedMs) || 0;
   pagePerf.reqBytes += Number(reqBytes) || 0;
   pagePerf.resBytes += Number(resBytes) || 0;
+  const atMs = Math.round(performance.now() - pagePerf.startedAt);
+  if (!Number.isFinite(pagePerf.firstGqlAtMs)) pagePerf.firstGqlAtMs = atMs;
+  pagePerf.lastGqlAtMs = atMs;
   const qk = String(queryKey || "").trim();
-  if (!qk) return;
+  if (!qk) {
+    schedulePerfBadgeUpdate();
+    return;
+  }
   if (!pagePerf.queryStats[qk]) {
     pagePerf.queryStats[qk] = { calls: 0, errors: 0, ms: 0, samples: [] };
   }
@@ -310,16 +334,72 @@ function notePerfGql(elapsedMs, reqBytes, resBytes, queryKey = "", ok = true) {
   if (!ok) row.errors += 1;
   row.samples.push(Number(elapsedMs) || 0);
   if (row.samples.length > 120) row.samples.shift();
+  schedulePerfBadgeUpdate();
 }
 
 function notePerfGqlDeduped() {
   if (!pagePerf) return;
   pagePerf.dedupedGql += 1;
+  schedulePerfBadgeUpdate();
 }
 
 function notePerfGqlRetry() {
   if (!pagePerf) return;
   pagePerf.retriedGql += 1;
+  schedulePerfBadgeUpdate();
+}
+
+function setPagePerfDetailRow(key, row) {
+  if (!pagePerf) return;
+  const id = String(key || "").trim();
+  if (!id) return;
+  if (!row) {
+    delete pagePerf.detailRows[id];
+    applyPerfBadge();
+    return;
+  }
+  pagePerf.detailRows[id] = {
+    label: String(row.label || id),
+    value: String(row.value || ""),
+    sub: String(row.sub || ""),
+    warn: !!row.warn,
+  };
+  applyPerfBadge();
+}
+
+function getPerfAssetRows() {
+  const entries = performance.getEntriesByType("resource");
+  if (!entries?.length) return [];
+  const rows = [];
+  const pick = (needle) => entries.find((entry) => String(entry?.name || "").includes(needle));
+  const push = (label, needle) => {
+    const entry = pick(needle);
+    if (!entry) return;
+    const bytes = Math.max(Number(entry.transferSize || 0), Number(entry.encodedBodySize || 0));
+    rows.push({
+      label,
+      value: `${Math.round(entry.duration)}ms`,
+      sub: bytes > 0 ? `${fmtNumber(bytes)} bytes` : "",
+    });
+  };
+  push("Asset app.js", "/assets/app.js");
+  push("Asset extra.js", "/assets/app-extra.js");
+  push("Asset styles", "/assets/styles.css");
+  return rows;
+}
+
+function getPerfNavigationRows() {
+  const nav = performance.getEntriesByType("navigation")?.[0];
+  if (!nav) return [];
+  const rows = [];
+  const push = (label, value) => {
+    if (!(Number.isFinite(value) && value > 0)) return;
+    rows.push({ label, value: `${Math.round(value)}ms` });
+  };
+  push("Nav resp", nav.responseEnd);
+  push("Nav DCL", nav.domContentLoadedEventEnd);
+  push("Nav load", nav.loadEventEnd);
+  return rows;
 }
 
 function topPageQueryPerf(queryStats) {
@@ -374,12 +454,22 @@ function applyPerfBadge() {
   el.style.color = warn ? "var(--yellow)" : "var(--text-dim)";
   el.style.borderColor = warn ? "var(--yellow)" : "var(--border)";
   const topQuery = topPageQueryPerf(pagePerf.queryStats);
+  const lastGqlTail = Number.isFinite(pagePerf.lastGqlAtMs)
+    ? Math.max(0, pagePerf.lastGqlAtMs - render)
+    : NaN;
+  const detailRows = Object.values(pagePerf.detailRows || {});
   el._perfRows = [
     { label: "Page",       value: pagePerf.page || "unknown" },
     { label: "Status",     value: pagePerf.status, warn: pagePerf.status === "error" },
     { label: "Render",     value: `${render}ms`, sub: `budget ${budgetRenderMs}ms`, warn: render > budgetRenderMs },
     { label: "GQL calls",  value: String(pagePerf.gqlCalls), sub: `budget ${budgetGqlCalls}`, warn: budgetGqlCalls > 0 && pagePerf.gqlCalls > budgetGqlCalls },
     { label: "GQL time",   value: `${Math.round(pagePerf.gqlMs)}ms` },
+    ...(Number.isFinite(pagePerf.lastGqlAtMs) ? [{
+      label: "Last GQL",
+      value: `${pagePerf.lastGqlAtMs}ms`,
+      sub: lastGqlTail > 0 ? `+${lastGqlTail}ms after render` : "within render window",
+      warn: lastGqlTail > 1500,
+    }] : []),
     { label: "Req bytes",  value: fmtNumber(Math.round(pagePerf.reqBytes)) },
     { label: "Res bytes",  value: fmtNumber(Math.round(pagePerf.resBytes)) },
     { label: "GQL dedupe", value: String(pagePerf.dedupedGql || 0) },
@@ -390,6 +480,9 @@ function applyPerfBadge() {
       sub: `${Math.round(topQuery.totalMs)}ms total · p95 ${Math.round(topQuery.p95)}ms · calls ${topQuery.calls}${topQuery.errors ? ` · err ${topQuery.errors}` : ""}`,
     }] : []),
     { label: "Cache",      value: `${pagePerf.cacheHits} hits / ${pagePerf.cacheMisses} misses` },
+    ...getPerfNavigationRows(),
+    ...getPerfAssetRows(),
+    ...detailRows,
   ];
   initPerfTooltip(el);
 }

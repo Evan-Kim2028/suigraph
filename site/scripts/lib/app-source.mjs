@@ -24,7 +24,13 @@ function joinSources(paths) {
 
 const PAGE_EXTRA_SPLIT_MARKER = "// ── Top Token Transfers";
 const PAGE_INIT_MARKER = "// ── Init";
-const CRITICAL_BOOT_FILES = new Set(["35-defi-adapters.js"]);
+const ADDRESS_DEFI_EXTRA_START_MARKER = "// ── Address DeFi Helpers (extra bundle)";
+const ADDRESS_DEFI_EXTRA_END_MARKER = "// ── Address View";
+const CRITICAL_BOOT_FILES = new Set();
+
+function joinNonEmptyChunks(chunks) {
+  return chunks.filter(Boolean).join("\n\n");
+}
 
 export function readAppSource(siteRoot) {
   const appPartsDir = resolve(siteRoot, "src/app");
@@ -82,8 +88,19 @@ export function readAppBundleSources(siteRoot) {
   if (splitIdx === -1 || initIdx === -1 || initIdx <= splitIdx) {
     throw new Error("src/app/30-pages.js does not contain the expected bundle split markers");
   }
+  const addressDefiStartIdx = pagesSource.indexOf(ADDRESS_DEFI_EXTRA_START_MARKER);
+  const addressDefiEndIdx = addressDefiStartIdx === -1
+    ? -1
+    : pagesSource.indexOf(ADDRESS_DEFI_EXTRA_END_MARKER, addressDefiStartIdx);
+  if (addressDefiStartIdx === -1 || addressDefiEndIdx === -1 || addressDefiEndIdx <= addressDefiStartIdx || addressDefiEndIdx > splitIdx) {
+    throw new Error("src/app/30-pages.js does not contain the expected address DeFi extra-bundle markers");
+  }
 
-  const corePagesSource = pagesSource.slice(0, splitIdx).replace(/\s+$/u, "");
+  const addressDefiSource = pagesSource.slice(addressDefiStartIdx, addressDefiEndIdx).replace(/\s+$/u, "");
+  const corePagesSource = joinNonEmptyChunks([
+    pagesSource.slice(0, addressDefiStartIdx).replace(/\s+$/u, ""),
+    pagesSource.slice(addressDefiEndIdx, splitIdx).replace(/^\s*/u, "").replace(/\s+$/u, ""),
+  ]);
   const extraPagesSource = pagesSource.slice(splitIdx, initIdx).replace(/\s+$/u, "");
   const initSource = pagesSource.slice(initIdx).replace(/^\s*/u, "").replace(/\s+$/u, "");
   const relPages = relative(siteRoot, pagesPath).replace(/\\/g, "/");
@@ -95,8 +112,8 @@ export function readAppBundleSources(siteRoot) {
     if (path === pagesPath) {
       bootChunks.push(corePagesSource, initSource);
       bootFiles.push(`${relPages}#boot`, `${relPages}#init`);
-      extraChunks.push(extraPagesSource);
-      extraFiles.push(`${relPages}#extra`);
+      extraChunks.push(addressDefiSource, extraPagesSource);
+      extraFiles.push(`${relPages}#address-defi`, `${relPages}#extra`);
       continue;
     }
     const source = readUtf8(path).replace(/\s+$/u, "");

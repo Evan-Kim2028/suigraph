@@ -4808,6 +4808,15 @@ async function fetchDefiFlowSnapshot(windowKeyOrForce = DEFI_WINDOW_DEFAULT_KEY,
   });
 }
 
+function sqrtPriceToHumanPrice(sqrtPriceStr, decimalsA, decimalsB) {
+  const s = Number(sqrtPriceStr);
+  if (!s || !Number.isFinite(s)) return 0;
+  const ratio = s / (2 ** 64);
+  const p = ratio * ratio * Math.pow(10, decimalsA - decimalsB);
+  return Number.isFinite(p) && p > 0 ? p : 0;
+}
+
+// ── Address DeFi Helpers (extra bundle) ────────────────────────────────
 async function fetchAddressBalancesRaw(addr, force = false) {
   const addrNorm = normalizeSuiAddress(addr);
   if (!addrNorm) return { balances: [], partial: false, scannedPages: 0 };
@@ -6255,20 +6264,30 @@ async function fetchAftermathPerpsPositions(addr) {
       const refMeta = await fetchAftermathOrderbookRefs(marketsWithOpenOrders);
       if (refMeta.partial) partial = true;
       for (const w of (refMeta.warnings || [])) warnings.push(w);
-
-      for (const market of marketsWithOpenOrders) {
+      const orderResults = await Promise.all(marketsWithOpenOrders.map(async (market) => {
         const refs = refMeta.refs?.[market.id];
         const accountSet = accountSetByMarket[market.id];
-        if (!refs || !accountSet?.size) continue;
+        if (!refs || !accountSet?.size) {
+          return { orders: [], partial: false, warnings: [] };
+        }
         const [asks, bids] = await Promise.all([
           fetchAftermathOrdersFromMap(refs.asksMapId, "short", market, accountSet),
           fetchAftermathOrdersFromMap(refs.bidsMapId, "long", market, accountSet),
         ]);
-        orders.push(...asks.orders, ...bids.orders);
+        const resultWarnings = [];
         if (asks.partial || bids.partial) {
-          partial = true;
-          warnings.push(`Orderbook scan for ${market.label} reached pagination cap; open-order detail may be partial.`);
+          resultWarnings.push(`Orderbook scan for ${market.label} reached pagination cap; open-order detail may be partial.`);
         }
+        return {
+          orders: [...asks.orders, ...bids.orders],
+          partial: asks.partial || bids.partial,
+          warnings: resultWarnings,
+        };
+      }));
+      for (const result of orderResults) {
+        orders.push(...(result.orders || []));
+        if (result.partial) partial = true;
+        for (const warning of (result.warnings || [])) warnings.push(warning);
       }
     }
 
@@ -6421,6 +6440,7 @@ async function renderAddress(app, addr) {
   const rawAddr = decodeURIComponent(String(addr || ""));
   const addrNorm = normalizeSuiAddress(rawAddr);
   const addrRouteToken = routeRenderToken;
+  const isActiveAddressRoute = () => !!app?.isConnected && addrRouteToken === routeRenderToken;
   if (!addrNorm) {
     const asCoinType = normalizeCoinTypeQueryInput(rawAddr);
     if (asCoinType) {
@@ -6447,6 +6467,7 @@ async function renderAddress(app, addr) {
   let txLoadError = "";
   let allObjects = a.objects?.nodes || [];
   let objPageInfo = a.objects?.pageInfo || {};
+  let activeTab = "txs";
   const name = a.defaultNameRecord?.domain;
 
   // DeFi data is loaded only when the user opens the DeFi tab.
@@ -6454,6 +6475,23 @@ async function renderAddress(app, addr) {
   let defiHtml = "";
   let defiWalletSectionRenderer = null;
   let walletProtocolFilterOnly = false;
+
+  function getAddressDefiAdapterContext() {
+    if (objPageInfo?.hasNextPage) {
+      return {
+        ownedObjectTypesComplete: false,
+        ownedObjectTypes: null,
+      };
+    }
+    return {
+      ownedObjectTypesComplete: true,
+      ownedObjectTypes: new Set(
+        allObjects
+          .map((objectRow) => String(objectRow?.contents?.type?.repr || "").trim())
+          .filter(Boolean)
+      ),
+    };
+  }
 
   async function loadAddressTransactions(before = null, append = false) {
     txLoadError = "";
@@ -6508,10 +6546,6 @@ async function renderAddress(app, addr) {
       txLoadError = e?.message || "Failed to load transactions.";
     }
   }
-
-  txLoading = true;
-  await loadAddressTransactions(null, false);
-  txLoading = false;
 
   const tabContent = {
     txs: () => {
@@ -6583,12 +6617,15 @@ async function renderAddress(app, addr) {
 
   async function loadDefi() {
     if (defiLoaded) return;
+    const defiLoadStartedAt = performance.now();
+    setPagePerfDetailRow("addr-defi-tab", { label: "Addr DeFi tab", value: "loading" });
+    await ensureExtraRoutesLoaded();
     // Phase 1: Get SUI price + stablecoins + LSTs quickly (skip slow pool oracle)
     await Promise.all([fetchDefiPrices(false, { skipOracle: true }), fetchLstExchangeRates()]);
     // Phase 2: Run pool oracle concurrently with position fetchers
     const [, protocolResults] = await Promise.all([
       fetchPoolOraclePrices().catch(() => null),
-      loadAddressDefiAdapters(addrNorm),
+      loadAddressDefiAdapters(addrNorm, getAddressDefiAdapterContext()),
     ]);
     // Sync LSTs + stablecoins + BTC variants now that oracle is done
     syncPeggedPrices();
@@ -6827,7 +6864,15 @@ async function renderAddress(app, addr) {
       const errors = [];
       errors.push(...failedProtocols);
       defiHtml = renderEmpty("No DeFi positions found." + (errors.length ? " (Failed: " + errors.map(escapeHtml).join(", ") + ")" : ""));
-      defiLoaded = true; renderTabs("defi"); return;
+      defiLoaded = true;
+      setPagePerfDetailRow("addr-defi-tab", {
+        label: "Addr DeFi tab",
+        value: `${Math.round(performance.now() - defiLoadStartedAt)}ms`,
+        sub: errors.length ? `no positions · ${errors.length} failed` : "no positions",
+        warn: errors.length > 0,
+      });
+      if (isActiveAddressRoute() && activeTab === "defi") renderTabs("defi");
+      return;
     }
 
     let html = `<div style="padding:16px">`;
@@ -7229,10 +7274,17 @@ async function renderAddress(app, addr) {
     html += `</div>`;
     defiHtml = html;
     defiLoaded = true;
-    renderTabs("defi");
+    setPagePerfDetailRow("addr-defi-tab", {
+      label: "Addr DeFi tab",
+      value: `${Math.round(performance.now() - defiLoadStartedAt)}ms`,
+      sub: failedProtocols.length ? `${failedProtocols.length} failed protocol${failedProtocols.length === 1 ? "" : "s"}` : "loaded",
+      warn: failedProtocols.length > 0,
+    });
+    if (isActiveAddressRoute() && activeTab === "defi") renderTabs("defi");
   }
 
   function renderTabs(active) {
+    activeTab = active;
     const tabs = ["defi", "txs", "objects"];
     const labels = { defi: "DeFi Portfolio", txs: "Transactions", objects: "Owned Objects" };
     const counts = { defi: "", txs: allTxs.length + (txPageInfo.hasPreviousPage ? "+" : ""), objects: allObjects.length + (objPageInfo.hasNextPage ? "+" : "") };
@@ -7247,7 +7299,13 @@ async function renderAddress(app, addr) {
       loadDefi().catch(e => {
         defiHtml = renderEmpty("Failed to load DeFi data: " + escapeHtml(e.message));
         defiLoaded = true;
-        renderTabs("defi");
+        setPagePerfDetailRow("addr-defi-tab", {
+          label: "Addr DeFi tab",
+          value: "error",
+          sub: e?.message || "failed to load",
+          warn: true,
+        });
+        if (isActiveAddressRoute() && activeTab === "defi") renderTabs("defi");
       });
     }
 
@@ -7371,7 +7429,32 @@ async function renderAddress(app, addr) {
     }
   };
   app.addEventListener("click", app._addressClickHandler);
+  txLoading = true;
   renderTabs("txs");
+  const txInitStartedAt = performance.now();
+  setPagePerfDetailRow("addr-tx-init", { label: "Addr tx init", value: "loading" });
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(() => {
+      if (isActiveAddressRoute()) void ensureExtraRoutesLoaded().catch(() => {});
+    }, { timeout: 1200 });
+  } else {
+    setTimeout(() => {
+      if (isActiveAddressRoute()) void ensureExtraRoutesLoaded().catch(() => {});
+    }, 180);
+  }
+  void (async () => {
+    await loadAddressTransactions(null, false);
+    txLoading = false;
+    setPagePerfDetailRow("addr-tx-init", {
+      label: "Addr tx init",
+      value: `${Math.round(performance.now() - txInitStartedAt)}ms`,
+      sub: txLoadError
+        ? "error"
+        : `${fmtNumber(allTxs.length)} row${allTxs.length === 1 ? "" : "s"}${txPageInfo.hasPreviousPage ? "+" : ""}`,
+      warn: !!txLoadError,
+    });
+    if (isActiveAddressRoute()) renderTabs(activeTab);
+  })();
 }
 
 // ── Object Detail ───────────────────────────────────────────────────────
@@ -7808,6 +7891,10 @@ async function renderDeletedObjectDetail(app, id) {
 async function renderObjectDetail(app, id) {
   const localRouteToken = routeRenderToken;
   const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
+  const setObjectPerfRow = (key, row) => {
+    if (!isActiveRoute()) return;
+    setPagePerfDetailRow(key, row);
+  };
   const rawId = decodeURIComponent(String(id || ""));
   const idNorm = normalizeSuiAddress(rawId);
   if (!idNorm) {
@@ -7864,7 +7951,14 @@ async function renderObjectDetail(app, id) {
   let expandedFunctions = new Set();
 
   async function loadDynamicFieldsPage(after = null) {
+    const dynamicLoadStartedAt = performance.now();
+    setObjectPerfRow("obj-dynamic-tab", {
+      label: "Obj dynamic tab",
+      value: after ? "loading more" : "loading",
+      sub: dynFields.length ? `${fmtNumber(dynFields.length)} rows` : "",
+    });
     dynFieldsLoading = true;
+    let dynamicErr = "";
     try {
       const more = await gql(`query($id: SuiAddress!, $after: String) {
         object(address: $id) {
@@ -7895,8 +7989,21 @@ async function renderObjectDetail(app, id) {
     } catch (e) {
       dynFieldsLoaded = true;
       dynFieldsHasNext = false;
+      dynamicErr = e?.message || "Failed to load dynamic fields.";
     } finally {
       dynFieldsLoading = false;
+      setObjectPerfRow("obj-dynamic-tab", dynamicErr
+        ? {
+          label: "Obj dynamic tab",
+          value: "error",
+          sub: dynamicErr,
+          warn: true,
+        }
+        : {
+          label: "Obj dynamic tab",
+          value: `${Math.round(performance.now() - dynamicLoadStartedAt)}ms`,
+          sub: `${fmtNumber(dynFields.length)} rows${dynFieldsHasNext ? "+" : ""}${after ? " · paged" : ""}`,
+        });
       const active = document.querySelector(".inner-tab.active")?.textContent || "";
       if (active.includes("Dynamic Fields")) {
         const c = document.getElementById("obj-tab-content");
@@ -8210,6 +8317,8 @@ async function renderObjectDetail(app, id) {
     let depsHtml = "";
     tabContent.deps = () => {
       if (depsLoaded) return depsHtml;
+      const depsLoadStartedAt = performance.now();
+      setObjectPerfRow("pkg-deps-tab", { label: "Pkg deps tab", value: "loading" });
       depsHtml = '<div class="loading">Loading dependencies...</div>';
       (async () => {
         try {
@@ -8256,12 +8365,23 @@ async function renderObjectDetail(app, id) {
           }
           depsHtml = html;
           depsLoaded = true;
+          setObjectPerfRow("pkg-deps-tab", {
+            label: "Pkg deps tab",
+            value: `${Math.round(performance.now() - depsLoadStartedAt)}ms`,
+            sub: `${fmtNumber(linkage.length)} links${typeOrigins.length ? ` · ${fmtNumber(typeOrigins.length)} origins` : ""}`,
+          });
           if (document.getElementById("obj-tab-content") && document.querySelector('.inner-tab.active')?.textContent?.includes("Dependencies")) {
             document.getElementById("obj-tab-content").innerHTML = depsHtml;
           }
         } catch (e) {
           depsHtml = '<div class="empty">Failed to load dependencies.</div>';
           depsLoaded = true;
+          setObjectPerfRow("pkg-deps-tab", {
+            label: "Pkg deps tab",
+            value: "error",
+            sub: e?.message || "Failed to load dependencies.",
+            warn: true,
+          });
         }
       })();
       return depsHtml;
@@ -8301,6 +8421,12 @@ async function renderObjectDetail(app, id) {
   }
   async function loadHistoryPage(before = null) {
     if (historyLoading) return;
+    const historyLoadStartedAt = performance.now();
+    setObjectPerfRow("obj-history-tab", {
+      label: "Obj history tab",
+      value: before ? "loading more" : "loading",
+      sub: historyRows.length ? `${fmtNumber(historyRows.length)} rows` : "",
+    });
     historyLoading = true;
     historyErr = "";
     const activeEl = document.getElementById("obj-tab-content");
@@ -8327,6 +8453,18 @@ async function renderObjectDetail(app, id) {
       historyLoaded = true;
     } finally {
       historyLoading = false;
+      setObjectPerfRow("obj-history-tab", historyErr
+        ? {
+          label: "Obj history tab",
+          value: "error",
+          sub: historyErr,
+          warn: true,
+        }
+        : {
+          label: "Obj history tab",
+          value: `${Math.round(performance.now() - historyLoadStartedAt)}ms`,
+          sub: `${fmtNumber(historyRows.length)} rows${historyHasPrev ? "+" : ""}${before ? " · paged" : ""}`,
+        });
       if (activeEl && document.querySelector(".inner-tab.active")?.textContent?.includes("History")) {
         activeEl.innerHTML = renderHistoryTable();
       }
@@ -8372,6 +8510,12 @@ async function renderObjectDetail(app, id) {
     }
     loadPackageVersionsPage = async (before = null) => {
       if (pkgVersionsLoading) return;
+      const versionsLoadStartedAt = performance.now();
+      setObjectPerfRow("pkg-versions-tab", {
+        label: "Pkg versions tab",
+        value: before ? "loading more" : "loading",
+        sub: pkgVersionRows.length ? `${fmtNumber(pkgVersionRows.length)} rows` : "",
+      });
       pkgVersionsLoading = true;
       pkgVersionsErr = "";
       const activeEl = document.getElementById("obj-tab-content");
@@ -8398,6 +8542,18 @@ async function renderObjectDetail(app, id) {
         pkgVersionsLoaded = true;
       } finally {
         pkgVersionsLoading = false;
+        setObjectPerfRow("pkg-versions-tab", pkgVersionsErr
+          ? {
+            label: "Pkg versions tab",
+            value: "error",
+            sub: pkgVersionsErr,
+            warn: true,
+          }
+          : {
+            label: "Pkg versions tab",
+            value: `${Math.round(performance.now() - versionsLoadStartedAt)}ms`,
+            sub: `${fmtNumber(pkgVersionRows.length)} rows${pkgVersionsHasPrev ? "+" : ""}${before ? " · paged" : ""}`,
+          });
         if (activeEl && document.querySelector(".inner-tab.active")?.textContent?.includes("Versions")) {
           activeEl.innerHTML = renderPackageVersionsTable();
         }
@@ -9064,6 +9220,12 @@ const QUERIES = {
 
 // ── Coin Search ─────────────────────────────────────────────────────────
 async function renderCoin(app, routeCoinType = "") {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
+  const setCoinPerfRow = (key, row) => {
+    if (!isActiveRoute()) return;
+    setPagePerfDetailRow(key, row);
+  };
   const routeParams = splitRouteAndParams(getRoute()).params;
   const requestedRaw = String(routeCoinType || routeParams.get("type") || "").trim();
   const scanMode = getCoinActivityScanMode(routeParams.get("mode"));
@@ -9187,6 +9349,7 @@ async function renderCoin(app, routeCoinType = "") {
     let estimatedSupplySource = "";
     let estimatedSupplyNote = "";
     let supplyLookupPending = false;
+    const coinSupplyPerfSub = () => canonicalSupplySource || estimatedSupplySource || (canonicalUnavailableReason ? "unavailable" : "pending");
     function applyRpcSupplyResult(rpcSupply) {
       const hasValue = rpcSupply?.value != null;
       const isEstimated = !!rpcSupply?.estimated;
@@ -9226,12 +9389,29 @@ async function renderCoin(app, routeCoinType = "") {
       estimatedSupplyRaw = null;
       estimatedSupplySource = "";
       estimatedSupplyNote = "";
+      setCoinPerfRow("coin-supply", {
+        label: "Coin supply",
+        value: "metadata",
+        sub: canonicalSupplySource,
+      });
     } else if (shouldResolveSupply) {
+      const supplyLoadStartedAt = performance.now();
+      setCoinPerfRow("coin-supply", { label: "Coin supply", value: "loading" });
       const rpcSupply = await fetchCoinTotalSupplyRpc(coinType, shortCoinType).catch(() => null);
       applyRpcSupplyResult(rpcSupply);
+      setCoinPerfRow("coin-supply", {
+        label: "Coin supply",
+        value: `${Math.round(performance.now() - supplyLoadStartedAt)}ms`,
+        sub: coinSupplyPerfSub(),
+      });
     } else {
       supplyLookupPending = true;
       canonicalUnavailableReason = "Deferred on-chain lookup.";
+      setCoinPerfRow("coin-supply", {
+        label: "Coin supply",
+        value: "deferred",
+        sub: "background lookup",
+      });
     }
 
     const typeParts = coinType.split("::");
@@ -9427,16 +9607,38 @@ async function renderCoin(app, routeCoinType = "") {
       };
       app.addEventListener("click", app._coinClickHandler);
       if (supplyLookupPending) {
+        const supplyLoadStartedAt = performance.now();
+        setCoinPerfRow("coin-supply", {
+          label: "Coin supply",
+          value: "loading",
+          sub: "background lookup",
+        });
         fetchCoinTotalSupplyRpc(coinType, shortCoinType).then((rpcSupply) => {
           applyRpcSupplyResult(rpcSupply);
           supplyLookupPending = false;
+          setCoinPerfRow("coin-supply", {
+            label: "Coin supply",
+            value: `${Math.round(performance.now() - supplyLoadStartedAt)}ms`,
+            sub: coinSupplyPerfSub(),
+          });
           applySupplySnapshotToDom();
         }).catch(() => {
           supplyLookupPending = false;
           canonicalUnavailableReason = "Supply lookup unavailable for this coin type.";
+          setCoinPerfRow("coin-supply", {
+            label: "Coin supply",
+            value: "error",
+            sub: canonicalUnavailableReason,
+            warn: true,
+          });
           applySupplySnapshotToDom();
         });
       }
+      setCoinPerfRow("coin-activity", {
+        label: "Coin activity",
+        value: "deferred",
+        sub: "Click Load Activity",
+      });
       return;
     }
 
@@ -9450,6 +9652,12 @@ async function renderCoin(app, routeCoinType = "") {
     const OBJECT_TX_LOAD_LIMIT = Number(scanProfile.objectTxLoadLimit || 48);
     const forceScanRefresh = routeParams.get("refresh") === "1";
     const scanCacheKey = `${targetKey}|mode:${scanMode}|v2`;
+    const activityScanStartedAt = performance.now();
+    setCoinPerfRow("coin-activity", {
+      label: "Coin activity",
+      value: "loading",
+      sub: `${scanProfile.label || "Fast"} mode`,
+    });
     const scanData = await coinSearchLoadActivityScanCached(scanCacheKey, { force: forceScanRefresh }, async () => {
       let scannedTx = 0;
       let scannedPages = 0;
@@ -9831,6 +10039,11 @@ async function renderCoin(app, routeCoinType = "") {
     const eventEmptyLabel = String(scanData?.eventEmptyLabel || "No recent events referencing this coin type in sampled data.");
     const activeMode = getCoinActivityScanMode(scanData?.scanMode || scanMode);
     const modeLabel = COIN_ACTIVITY_SCAN_MODE_CONFIG[activeMode]?.label || "Fast";
+    setCoinPerfRow("coin-activity", {
+      label: "Coin activity",
+      value: `${Math.round(performance.now() - activityScanStartedAt)}ms`,
+      sub: `${modeLabel} · ${fmtNumber(matchedTxCount)} matched txs`,
+    });
     const encodedCoinType = encodeURIComponent(coinType);
     const fastScanHref = `#/coin?type=${encodedCoinType}&scan=1&supply=1&mode=fast`;
     const fullScanHref = `#/coin?type=${encodedCoinType}&scan=1&supply=1&mode=full`;
@@ -10029,6 +10242,12 @@ async function renderCoin(app, routeCoinType = "") {
       </div>
     `;
   } catch (e) {
+    setCoinPerfRow("coin-activity", {
+      label: "Coin activity",
+      value: "error",
+      sub: e?.message || "Failed to load coin activity.",
+      warn: true,
+    });
     app.innerHTML = `
       <div class="page-title">Coin Search</div>
       ${renderSearchCard(coinType)}
@@ -11416,6 +11635,10 @@ function packageSourceBadge(source) {
 async function renderPackages(app) {
   const localRouteToken = routeRenderToken;
   const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
+  const setPackagesPerfRow = (key, row) => {
+    if (!isActiveRoute()) return;
+    setPagePerfDetailRow(key, row);
+  };
   const routeParams = splitRouteAndParams(getRoute()).params;
   let windowKey = normalizeDefiWindowKey(routeParams.get("w"));
   let data = await fetchPackageActivitySnapshot(windowKey);
@@ -11472,14 +11695,21 @@ async function renderPackages(app) {
       detailData = null;
       detailErr = "";
       detailLoading = false;
+      setPackagesPerfRow("packages-detail", null);
       if (rerender && isActiveRoute()) app.innerHTML = renderContent();
       return;
     }
     selectedPkg = nextPkg;
     persistPackagesState();
     const reqId = ++detailReqId;
+    const detailLoadStartedAt = performance.now();
     detailLoading = true;
     detailErr = "";
+    setPackagesPerfRow("packages-detail", {
+      label: "Packages detail",
+      value: "loading",
+      sub: force ? "refresh" : "",
+    });
     if (rerender && isActiveRoute()) app.innerHTML = renderContent();
     try {
       const d = await fetchPackageUpgradeSnapshot(nextPkg, force);
@@ -11493,6 +11723,18 @@ async function renderPackages(app) {
     } finally {
       if (reqId === detailReqId) {
         detailLoading = false;
+        setPackagesPerfRow("packages-detail", detailErr
+          ? {
+            label: "Packages detail",
+            value: "error",
+            sub: detailErr,
+            warn: true,
+          }
+          : {
+            label: "Packages detail",
+            value: `${Math.round(performance.now() - detailLoadStartedAt)}ms`,
+            sub: `${fmtNumber(detailData?.versions?.length || 0)} versions`,
+          });
         if (rerender && isActiveRoute()) app.innerHTML = renderContent();
       }
     }

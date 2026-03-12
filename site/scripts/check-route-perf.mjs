@@ -5,10 +5,6 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_TIMEOUT_MS, waitForCondition, withStaticSitePage } from "./lib/browser-smoke.mjs";
 import {
-  collectAddressDefiIssues,
-  collectAddressDefiSnapshot,
-} from "./lib/address-defi-smoke.mjs";
-import {
   collectPerfIssues,
   waitForBodyTexts,
   waitForPerfSettled,
@@ -102,16 +98,35 @@ function routeSpecs(fixtures) {
       targetUrl: (sitePort) => `http://127.0.0.1:${sitePort}/#/address/${broadAddress}`,
       fallbackContains: "/#/address/",
       async load(client, timeoutMs) {
-        const snapshot = await collectAddressDefiSnapshot(client, timeoutMs);
-        const issues = collectAddressDefiIssues(snapshot, {
-          requiredTexts: ["Wallet Holdings", "Protocol-supported only", "Aftermath Perpetuals"],
-          requireWalletSection: true,
-          requireProtocolFilter: true,
-          requireCoinLinks: true,
-          requireStats: true,
-          allowAccountingWarnings: false,
-        });
-        return { snapshot, issues };
+        await waitForCondition(
+          client,
+          `(() => {
+            const txTab = document.querySelector('[data-action="addr-switch-tab"][data-tab="txs"]');
+            const defiTab = document.querySelector('[data-action="addr-switch-tab"][data-tab="defi"]');
+            const content = document.getElementById('addr-tab-content');
+            return !!txTab && !!defiTab && !!content;
+          })()`,
+          timeoutMs,
+          "address shell tabs"
+        );
+        await waitForCondition(
+          client,
+          `(() => {
+            const text = document.body?.innerText || "";
+            return text.includes("Transactions")
+              || text.includes("Recent Activity")
+              || text.includes("Loading...");
+          })()`,
+          timeoutMs,
+          "address shell content"
+        );
+        await waitForCondition(
+          client,
+          "(() => { const text = document.body?.innerText || ''; return !text.includes('Error loading page:'); })()",
+          timeoutMs,
+          "address shell error-free"
+        );
+        return { snapshot: null, issues: [] };
       },
     },
     {

@@ -59,12 +59,29 @@ function validateAftermathPerpsAccounting(data) {
     ? []
     : ["Accounting invariant: collateral should equal idleCollateral + allocatedCollateral."];
 }
+function addressDefiCanSkipByOwnedTypes(context) {
+  return !!context?.ownedObjectTypesComplete && context?.ownedObjectTypes instanceof Set;
+}
+function addressDefiHasOwnedType(context, typeRepr) {
+  if (!addressDefiCanSkipByOwnedTypes(context)) return true;
+  return context.ownedObjectTypes.has(String(typeRepr || "").trim());
+}
+function addressDefiHasOwnedTypePrefix(context, prefix) {
+  if (!addressDefiCanSkipByOwnedTypes(context)) return true;
+  const needle = String(prefix || "").trim();
+  if (!needle) return true;
+  for (const typeRepr of context.ownedObjectTypes) {
+    if (String(typeRepr || "").startsWith(needle)) return true;
+  }
+  return false;
+}
 function buildAddressDefiAdapters(addr) {
   return [
     {
       key: "suilend",
       label: "Suilend",
       kind: "lending",
+      enabled: (context) => addressDefiHasOwnedType(context, SUILEND_CAP_TYPE),
       load: () => fetchSuilendPositions(addr),
       empty: () => [],
       validate: validateLendingProtocolAccounting,
@@ -81,6 +98,7 @@ function buildAddressDefiAdapters(addr) {
       key: "alpha",
       label: "Alpha",
       kind: "lending",
+      enabled: (context) => addressDefiHasOwnedType(context, ALPHA_CAP_TYPE),
       load: () => fetchAlphaPositions(addr),
       empty: () => [],
       validate: validateLendingProtocolAccounting,
@@ -89,6 +107,7 @@ function buildAddressDefiAdapters(addr) {
       key: "scallop",
       label: "Scallop",
       kind: "lending",
+      enabled: (context) => addressDefiHasOwnedType(context, SCALLOP_KEY_TYPE),
       load: () => fetchScallopPositions(addr),
       empty: () => [],
       validate: validateLendingProtocolAccounting,
@@ -97,6 +116,7 @@ function buildAddressDefiAdapters(addr) {
       key: "cetus",
       label: "Cetus",
       kind: "dex_lp",
+      enabled: (context) => addressDefiHasOwnedType(context, CETUS_POSITION_TYPE),
       load: () => fetchCetusPositions(addr),
       empty: () => [],
       validate: validateDexLpProtocolAccounting,
@@ -105,6 +125,7 @@ function buildAddressDefiAdapters(addr) {
       key: "turbos",
       label: "Turbos",
       kind: "dex_lp",
+      enabled: (context) => addressDefiHasOwnedType(context, TURBOS_POSITION_TYPE),
       load: () => fetchTurbosPositions(addr),
       empty: () => [],
       validate: validateDexLpProtocolAccounting,
@@ -137,6 +158,7 @@ function buildAddressDefiAdapters(addr) {
       key: "bluefinSpot",
       label: "Bluefin Spot",
       kind: "dex_lp",
+      enabled: (context) => addressDefiHasOwnedType(context, BLUEFIN_POSITION_TYPE),
       load: () => fetchBluefinSpotPositions(addr),
       empty: () => [],
       validate: validateDexLpProtocolAccounting,
@@ -153,6 +175,7 @@ function buildAddressDefiAdapters(addr) {
       key: "aftermathPerps",
       label: "Aftermath Perps",
       kind: "perps",
+      enabled: (context) => addressDefiHasOwnedTypePrefix(context, AF_ACCOUNT_CAP_TYPE),
       load: () => fetchAftermathPerpsPositions(addr),
       empty: () => ({
         accounts: [],
@@ -171,7 +194,8 @@ function buildAddressDefiAdapters(addr) {
     },
   ];
 }
-function resolveAddressDefiAdapterResult(adapter, settled) {
+function resolveAddressDefiAdapterResult(adapter, settled, options = {}) {
+  const skipped = !!options.skipped;
   const value = settled?.status === "fulfilled" && settled.value != null
     ? settled.value
     : adapter.empty();
@@ -186,19 +210,42 @@ function resolveAddressDefiAdapterResult(adapter, settled) {
   for (const warning of validationWarnings) pushUniqueDefiWarning(warnings, warning);
   return {
     ...adapter,
-    status: settled?.status || "rejected",
+    status: skipped ? "skipped" : (settled?.status || "rejected"),
     value,
-    partial: (settled?.status !== "fulfilled") || !!value?.partial,
+    partial: skipped ? false : ((settled?.status !== "fulfilled") || !!value?.partial),
     warnings,
     validationWarnings: [...new Set(validationWarnings.map((warning) => String(warning || "").trim()).filter(Boolean))],
+    skipped,
   };
 }
-async function loadAddressDefiAdapters(addr) {
+async function loadAddressDefiAdapters(addr, context = {}) {
   const defiAdapters = buildAddressDefiAdapters(addr);
-  const settled = await Promise.allSettled(defiAdapters.map((adapter) => adapter.load()));
-  return Object.fromEntries(defiAdapters.map((adapter, index) => [
+  const activeAdapters = [];
+  const resultByKey = Object.create(null);
+  for (const adapter of defiAdapters) {
+    const enabled = adapter.enabled ? adapter.enabled(context) !== false : true;
+    if (!enabled) {
+      resultByKey[adapter.key] = resolveAddressDefiAdapterResult(
+        adapter,
+        { status: "fulfilled", value: adapter.empty() },
+        { skipped: true }
+      );
+      continue;
+    }
+    activeAdapters.push(adapter);
+  }
+  const settled = await Promise.allSettled(activeAdapters.map((adapter) => adapter.load()));
+  for (let index = 0; index < activeAdapters.length; index += 1) {
+    const adapter = activeAdapters[index];
+    resultByKey[adapter.key] = resolveAddressDefiAdapterResult(adapter, settled[index]);
+  }
+  return Object.fromEntries(defiAdapters.map((adapter) => [
     adapter.key,
-    resolveAddressDefiAdapterResult(adapter, settled[index]),
+    resultByKey[adapter.key] || resolveAddressDefiAdapterResult(
+      adapter,
+      { status: "fulfilled", value: adapter.empty() },
+      { skipped: true }
+    ),
   ]));
 }
 function collectDefiAccountingWarnings(protocolResults) {
