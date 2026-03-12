@@ -325,15 +325,17 @@ async function renderDashboard(app) {
     if (tvlBox && stats) tvlBox.textContent = "$" + fmtCompact(stats.totalTvl);
     const tvlEl = document.getElementById("tvl-breakdown-card");
     if (tvlEl && stats) {
-      const otherTvl = Math.max(0, stats.totalTvl - stats.lendingTvl - stats.dexTvl - stats.lstTvl);
-      const pctL = stats.totalTvl > 0 ? (stats.lendingTvl / stats.totalTvl * 100) : 0;
-      const pctD = stats.totalTvl > 0 ? (stats.dexTvl / stats.totalTvl * 100) : 0;
-      const pctS = stats.totalTvl > 0 ? (stats.lstTvl / stats.totalTvl * 100) : 0;
-      const pctO = Math.max(0, 100 - pctL - pctD - pctS);
+      const otherTvl = Math.max(0, stats.otherProtocolTvl || 0);
+      const categoryBase = Math.max(0, stats.protocolCategoryTotal || (stats.lendingTvl + stats.dexTvl + stats.lstTvl + otherTvl));
+      const pctL = categoryBase > 0 ? (stats.lendingTvl / categoryBase * 100) : 0;
+      const pctD = categoryBase > 0 ? (stats.dexTvl / categoryBase * 100) : 0;
+      const pctS = categoryBase > 0 ? (stats.lstTvl / categoryBase * 100) : 0;
+      const pctO = categoryBase > 0 ? (otherTvl / categoryBase * 100) : 0;
       tvlEl.querySelector(".card-body").innerHTML = `
         <div style="padding:16px 16px 0">
           <div style="font-size:24px;font-weight:700">$${fmtCompact(stats.totalTvl)}</div>
-          <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Total Value Locked</div>
+          <div style="font-size:12px;color:var(--text-dim)">Total Value Locked</div>
+          <div style="font-size:12px;color:var(--text-dim);margin:4px 0 8px">Source: DeFiLlama chain TVL. Category mix below is normalized from Sui protocol rows because category sums can overlap the chain total.</div>
           <div class="tvl-bar">
             <div style="width:${pctL.toFixed(1)}%;background:var(--green)" title="Lending ${pctL.toFixed(1)}%"></div>
             <div style="width:${pctD.toFixed(1)}%;background:var(--blue)" title="DEX ${pctD.toFixed(1)}%"></div>
@@ -347,11 +349,12 @@ async function renderDashboard(app) {
           <div class="tvl-row"><span class="dot" style="background:var(--purple)"></span> Liquid Staking <span class="tvl-val u-c-purple">$${fmtCompact(stats.lstTvl)} <span style="color:var(--text-dim);font-size:11px">${pctS.toFixed(1)}%</span></span></div>
           <div class="tvl-row"><span class="dot" style="background:var(--text-dim)"></span> Other <span class="tvl-val">$${fmtCompact(otherTvl)} <span style="color:var(--text-dim);font-size:11px">${pctO.toFixed(1)}%</span></span></div>
           <div class="tvl-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px"><span class="u-c-accent">24h DEX Volume</span> <span class="tvl-val u-c-accent">$${fmtCompact(stats.dexVolume24h)}</span></div>
+          <div class="u-fs12-dim" style="padding-top:8px">DeFiLlama endpoints: <span class="u-mono-11-dim">v2/chains</span>, <span class="u-mono-11-dim">protocols</span>, <span class="u-mono-11-dim">overview/dexs/Sui</span></div>
         </div>`;
     }
     const prEl = document.getElementById("protocol-rankings");
     if (prEl && stats) {
-      prEl.querySelector(".card-body").innerHTML = `<table>
+      prEl.querySelector(".card-body").innerHTML = `<div class="u-fs12-dim" style="padding:12px 16px 0">Source: DeFiLlama protocol rows filtered to Sui chain TVL.</div><table>
         <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="u-ta-right">TVL</th><th class="u-ta-right">24h Change</th></tr></thead>
         <tbody>
           ${stats.protocols.slice(0, 10).map((p, i) => {
@@ -436,7 +439,7 @@ async function renderDashboard(app) {
         <div class="card-body"><div class="loading u-p24">Loading supply data...</div></div>
       </div>
       <div class="card" id="tvl-breakdown-card">
-        <div class="card-header">DeFi TVL Breakdown</div>
+        <div class="card-header"><span>DeFi TVL Breakdown</span><span class="u-fs12-dim">DeFiLlama</span></div>
         <div class="card-body"><div class="loading u-p24">Loading TVL data...</div></div>
       </div>
     </div>
@@ -465,7 +468,7 @@ async function renderDashboard(app) {
     </div>
 
     <div class="card" id="protocol-rankings">
-      <div class="card-header">Sui Protocol Rankings</div>
+      <div class="card-header"><span>Sui Protocol Rankings</span><span class="u-fs12-dim">DeFiLlama</span></div>
       <div class="card-body"><div class="loading" style="padding:16px">Loading protocols...</div></div>
     </div>
   `;
@@ -2958,17 +2961,32 @@ async function fetchEcosystemStats(force = false) {
         change24h: p.change_1d ?? null,
         logo: p.logo,
       }))
+      .filter(p => !["CEX", "Bridge"].includes(p.category))
       .sort((a, b) => b.tvl - a.tvl);
 
-    // Aggregate by category
+    // Aggregate protocol rows by category. These sums can overlap the
+    // deduplicated chain TVL, so the category mix is normalized separately.
     const lendingTvl = suiProtocols.filter(p => p.category === "Lending").reduce((s, p) => s + p.tvl, 0);
     const dexTvl = suiProtocols.filter(p => ["Dexes", "Dexs"].includes(p.category)).reduce((s, p) => s + p.tvl, 0);
     const lstTvl = suiProtocols.filter(p => p.category === "Liquid Staking").reduce((s, p) => s + p.tvl, 0);
+    const otherProtocolTvl = suiProtocols
+      .filter(p => !["Lending", "Dexes", "Dexs", "Liquid Staking"].includes(p.category))
+      .reduce((s, p) => s + p.tvl, 0);
+    const protocolCategoryTotal = lendingTvl + dexTvl + lstTvl + otherProtocolTvl;
 
     // DEX 24h volume
     const dexVolume24h = dexData?.total24h ?? 0;
 
-    const result = { totalTvl, lendingTvl, dexTvl, lstTvl, dexVolume24h, protocols: suiProtocols.slice(0, 15) };
+    const result = {
+      totalTvl,
+      lendingTvl,
+      dexTvl,
+      lstTvl,
+      otherProtocolTvl,
+      protocolCategoryTotal,
+      dexVolume24h,
+      protocols: suiProtocols.slice(0, 15),
+    };
     writePersistedTimedCacheRecord(PERSISTED_CACHE_KEYS.ecosystemStats, result, 40000);
     return result;
   }).catch(() => null);
@@ -2977,10 +2995,14 @@ async function fetchEcosystemStats(force = false) {
 // ── Stablecoin Supply (all via GraphQL) ──────────────────────────────
 async function fetchStablecoinSupply(force = false) {
   return withTimedCache(stablecoinCache, ECOSYSTEM_TTL, force, async () => {
-    const coins = [];
-    const pushCoin = (symbol, supply, color) => {
+    const coinRows = Object.create(null);
+    const pushCoin = (symbol, supply, color, sourceRank = 0) => {
       if (!(Number.isFinite(supply) && supply > 0)) return;
-      coins.push({ symbol, supply, color });
+      const key = stableSymbolKey(symbol);
+      if (!key) return;
+      const prev = coinRows[key];
+      if (prev && (prev.sourceRank > sourceRank || (prev.sourceRank === sourceRank && prev.supply >= supply))) return;
+      coinRows[key] = { symbol, supply, color, sourceRank };
     };
 
     const [metadataRows, wormholeRows, protocolRows] = await Promise.all([
@@ -3060,11 +3082,12 @@ async function fetchStablecoinSupply(force = false) {
     ]);
 
     for (const rows of metadataRows) {
-      for (const row of rows) pushCoin(row.symbol, row.supply, row.color);
+      for (const row of rows) pushCoin(row.symbol, row.supply, row.color, 1);
     }
-    for (const row of wormholeRows) pushCoin(row.symbol, row.supply, row.color);
-    for (const row of protocolRows) pushCoin(row.symbol, row.supply, row.color);
+    for (const row of wormholeRows) pushCoin(row.symbol, row.supply, row.color, 2);
+    for (const row of protocolRows) pushCoin(row.symbol, row.supply, row.color, 3);
 
+    const coins = Object.values(coinRows).map(({ sourceRank, ...row }) => row);
     coins.sort((a, b) => b.supply - a.supply);
     const totalSupply = coins.reduce((sum, c) => sum + c.supply, 0);
     coins.forEach(c => c.pct = totalSupply > 0 ? (c.supply / totalSupply * 100) : 0);
