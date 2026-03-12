@@ -17,6 +17,11 @@ function fmtDurationCompact(ms) {
   return `${s}s`;
 }
 
+function mobileTd(label, content, attrs = "") {
+  const extra = String(attrs || "").trim();
+  return `<td data-label="${escapeAttr(label)}"${extra ? ` ${extra}` : ""}>${content}</td>`;
+}
+
 async function fetchDashboardEpochTrends(force = false) {
   return withTimedCache(dashboardEpochsCache, DASH_EPOCHS_TTL_MS, force, async () => {
     const data = await gql(`{
@@ -170,10 +175,10 @@ async function renderDashboard(app) {
       const prevGasTotal = prevGs ? Number(prevGs.computationCost) + Number(prevGs.storageCost) - Number(prevGs.storageRebate) : 0;
       const gasUsed = prev ? gasTotal - prevGasTotal : 0;
       return `<tr>
-        <td><a class="hash-link" href="#/checkpoint/${c.sequenceNumber}">${fmtNumber(c.sequenceNumber)}</a></td>
-        <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${txCount != null ? txCount + " txns" : "—"}</td>
-        <td class="u-mono-11-dim">${gasUsed > 0 ? fmtSui(gasUsed) : "—"}</td>
-        <td>${timeTag(c.timestamp)}</td>
+        ${mobileTd("Checkpoint", `<a class="hash-link" href="#/checkpoint/${c.sequenceNumber}">${fmtNumber(c.sequenceNumber)}</a>`)}
+        ${mobileTd("Txns", `${txCount != null ? txCount + " txns" : "—"}`, 'style="font-family:var(--mono);font-size:12px;color:var(--text-dim)"')}
+        ${mobileTd("Gas", `${gasUsed > 0 ? fmtSui(gasUsed) : "—"}`, 'class="u-mono-11-dim"')}
+        ${mobileTd("Time", timeTag(c.timestamp))}
       </tr>`;
     }).slice(0, -1).join("");
   }
@@ -186,12 +191,12 @@ async function renderDashboard(app) {
       const sender = t.sender?.address;
       const intent = analyzeTxIntent(t);
       return `<tr>
-        <td>${hashLink(t.digest, "/tx/" + t.digest)}</td>
-        <td class="u-fs12">${renderIntentChip(intent)}</td>
-        <td>${sender ? hashLink(sender, "/address/" + sender) : '<span class="u-c-dim">system</span>'}</td>
-        <td>${statusBadge(t.effects?.status)}</td>
-        <td class="u-mono-11-dim">${dashGas(t)}</td>
-        <td>${timeTag(t.effects?.timestamp)}</td>
+        ${mobileTd("Digest", hashLink(t.digest, "/tx/" + t.digest))}
+        ${mobileTd("Action", renderIntentChip(intent), 'class="u-fs12"')}
+        ${mobileTd("Sender", sender ? hashLink(sender, "/address/" + sender) : '<span class="u-c-dim">system</span>')}
+        ${mobileTd("Status", statusBadge(t.effects?.status))}
+        ${mobileTd("Gas", dashGas(t), 'class="u-mono-11-dim"')}
+        ${mobileTd("Time", timeTag(t.effects?.timestamp))}
       </tr>`;
     }).join("");
   }
@@ -281,17 +286,17 @@ async function renderDashboard(app) {
           </div>
         </div>
       </div>
-      <table>
+      <table class="mobile-stack-table">
         <thead><tr><th>Epoch</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Avg TPS</th><th class="u-ta-right">Ref Gas (MIST)</th><th class="u-ta-right">Checkpoints</th><th>Duration</th><th>End</th></tr></thead>
         <tbody>
           ${rows.map((r) => `<tr>
-            <td><a class="hash-link" href="#/epoch/${r.epochId}">${fmtNumber(r.epochId)}</a>${r.isLive ? ' <span class="badge badge-success">Live</span>' : ''}</td>
-            <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
-            <td class="u-ta-right-mono">${r.avgTps.toFixed(2)}</td>
-            <td class="u-ta-right-mono">${fmtNumber(r.gasPrice)}</td>
-            <td class="u-ta-right-mono">${fmtNumber(r.checkpointCount)}</td>
-            <td>${fmtDurationCompact(r.durationMs)}</td>
-            <td>${r.isLive ? '<span class="u-c-dim">in progress</span>' : timeTag(r.endMs)}</td>
+            ${mobileTd("Epoch", `<a class="hash-link" href="#/epoch/${r.epochId}">${fmtNumber(r.epochId)}</a>${r.isLive ? ' <span class="badge badge-success">Live</span>' : ''}`)}
+            ${mobileTd("Txs", fmtNumber(r.txCount), 'class="u-ta-right-mono"')}
+            ${mobileTd("Avg TPS", r.avgTps.toFixed(2), 'class="u-ta-right-mono"')}
+            ${mobileTd("Ref Gas", fmtNumber(r.gasPrice), 'class="u-ta-right-mono"')}
+            ${mobileTd("Checkpoints", fmtNumber(r.checkpointCount), 'class="u-ta-right-mono"')}
+            ${mobileTd("Duration", fmtDurationCompact(r.durationMs))}
+            ${mobileTd("End", r.isLive ? '<span class="u-c-dim">in progress</span>' : timeTag(r.endMs))}
           </tr>`).join("")}
         </tbody>
       </table>
@@ -354,7 +359,7 @@ async function renderDashboard(app) {
     }
     const prEl = document.getElementById("protocol-rankings");
     if (prEl && stats) {
-      prEl.querySelector(".card-body").innerHTML = `<div class="u-fs12-dim" style="padding:12px 16px 0">Source: DeFiLlama protocol rows filtered to Sui chain TVL.</div><table>
+      prEl.querySelector(".card-body").innerHTML = `<div class="u-fs12-dim" style="padding:12px 16px 0">Source: DeFiLlama protocol rows filtered to Sui chain TVL.</div><table class="mobile-stack-table">
         <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th class="u-ta-right">TVL</th><th class="u-ta-right">24h Change</th></tr></thead>
         <tbody>
           ${stats.protocols.slice(0, 10).map((p, i) => {
@@ -362,11 +367,11 @@ async function renderDashboard(app) {
             const changeStr = p.change24h != null ? `${p.change24h >= 0 ? "+" : ""}${p.change24h.toFixed(2)}%` : "—";
             const changeColor = p.change24h > 0 ? "var(--green)" : p.change24h < 0 ? "var(--red)" : "var(--text-dim)";
             return `<tr>
-              <td style="color:var(--text-dim);font-size:12px">${i + 1}</td>
-              <td style="font-weight:500">${p.name}</td>
-              <td><span class="badge" style="background:${catColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${p.category}</span></td>
-              <td class="u-ta-right-mono">$${fmtCompact(p.tvl)}</td>
-              <td style="text-align:right;color:${changeColor};font-family:var(--mono)">${changeStr}</td>
+              ${mobileTd("Rank", `${i + 1}`, 'style="color:var(--text-dim);font-size:12px"')}
+              ${mobileTd("Protocol", p.name, 'style="font-weight:500"')}
+              ${mobileTd("Category", `<span class="badge" style="background:${catColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${p.category}</span>`)}
+              ${mobileTd("TVL", `$${fmtCompact(p.tvl)}`, 'class="u-ta-right-mono"')}
+              ${mobileTd("24h Change", changeStr, `style="text-align:right;color:${changeColor};font-family:var(--mono)"`)}
             </tr>`;
           }).join("")}
         </tbody>
@@ -376,7 +381,7 @@ async function renderDashboard(app) {
 
   app.innerHTML = `
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">Live dashboard snapshot · Source: Sui GraphQL Mainnet · Auto-refresh every 5s</div>
-    <div class="card u-mb16">
+    <div class="card u-mb16" id="home-start-here">
       <div class="card-header">Start Here</div>
       <div class="card-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;padding:12px 16px">
         <a href="#/txs" class="hash-link u-panel-block">
@@ -389,7 +394,7 @@ async function renderDashboard(app) {
         </a>
       </div>
     </div>
-    <div class="dash-grid-6">
+    <div class="dash-grid-6" id="home-stats-grid">
       <div class="stat-box">
         <div class="stat-label">Latest Checkpoint</div>
         <div class="stat-value" data-stat="checkpoint">${cp?.sequenceNumber ? fmtNumber(cp.sequenceNumber) : "..."}</div>
@@ -433,7 +438,7 @@ async function renderDashboard(app) {
       <div class="card-body"><div class="loading u-p24">Loading epoch trends...</div></div>
     </div>
 
-    <div class="two-col u-mb16">
+    <div class="two-col u-mb16" id="home-market-panels">
       <div class="card" id="stablecoin-card">
         <div class="card-header">Stablecoin Supply</div>
         <div class="card-body"><div class="loading u-p24">Loading supply data...</div></div>
@@ -444,11 +449,11 @@ async function renderDashboard(app) {
       </div>
     </div>
 
-    <div class="two-col u-mb16">
+    <div class="two-col u-mb16" id="home-activity-panels">
       <div class="card">
         <div class="card-header">Latest Checkpoints</div>
         <div class="card-body">
-          <table>
+          <table class="mobile-stack-table">
             <thead><tr><th>Checkpoint</th><th>Txns</th><th>Gas</th><th>Time</th></tr></thead>
             <tbody id="dash-cp-tbody">${renderCpRows(cachedActivity.cpRows || [])}</tbody>
           </table>
@@ -458,7 +463,7 @@ async function renderDashboard(app) {
       <div class="card">
         <div class="card-header">Recent Transactions</div>
         <div class="card-body">
-          <table>
+          <table class="mobile-stack-table">
             <thead><tr><th>Digest</th><th>Action</th><th>Sender</th><th>Status</th><th>Gas</th><th>Time</th></tr></thead>
             <tbody id="dash-tx-tbody">${renderTxRows(cachedActivity.txRows || [])}</tbody>
           </table>
@@ -472,6 +477,24 @@ async function renderDashboard(app) {
       <div class="card-body"><div class="loading" style="padding:16px">Loading protocols...</div></div>
     </div>
   `;
+
+  if (uiViewMode !== "advanced") {
+    const homeStats = document.getElementById("home-stats-grid");
+    const activityPanels = document.getElementById("home-activity-panels");
+    const marketPanels = document.getElementById("home-market-panels");
+    const protocolRankings = document.getElementById("protocol-rankings");
+    const epochTrends = document.getElementById("epoch-trends-card");
+    const startHere = document.getElementById("home-start-here");
+    if (homeStats && activityPanels) homeStats.insertAdjacentElement("afterend", activityPanels);
+    if (activityPanels && marketPanels) activityPanels.insertAdjacentElement("afterend", marketPanels);
+    if (marketPanels && protocolRankings) marketPanels.insertAdjacentElement("afterend", protocolRankings);
+    if ((protocolRankings || marketPanels) && epochTrends) {
+      (protocolRankings || marketPanels).insertAdjacentElement("afterend", epochTrends);
+    }
+    if ((epochTrends || protocolRankings || marketPanels) && startHere) {
+      (epochTrends || protocolRankings || marketPanels).insertAdjacentElement("afterend", startHere);
+    }
+  }
 
   if (dashHead?.checkpoint || dashHead?.epoch) applyDashboardHead(dashHead);
   if (cachedEpochTrends) applyDashboardEpochTrends(cachedEpochTrends);
@@ -584,7 +607,7 @@ async function renderCheckpoints(app, after = null) {
     <div class="page-title">Checkpoints</div>
     <div class="card">
       <div class="card-body">
-        <table>
+        <table class="mobile-stack-table">
           <thead><tr>
             <th>Checkpoint</th><th>Digest</th><th>Timestamp</th><th>Gas (Per Checkpoint)</th>
           </tr></thead>
@@ -597,10 +620,10 @@ async function renderCheckpoints(app, after = null) {
               const prevGasTotal = prevGs ? Number(prevGs.computationCost) + Number(prevGs.storageCost) - Number(prevGs.storageRebate) : 0;
               const gasUsed = prev ? gasTotal - prevGasTotal : 0;
               return `<tr>
-              <td><a class="hash-link" href="#/checkpoint/${c.sequenceNumber}">${fmtNumber(c.sequenceNumber)}</a></td>
-              <td>${hashLink(c.digest, '/checkpoint/' + c.sequenceNumber)}</td>
-              <td>${fmtTime(c.timestamp)}</td>
-              <td>${gasUsed > 0 ? fmtSui(gasUsed) : '—'}</td>
+              ${mobileTd("Checkpoint", `<a class="hash-link" href="#/checkpoint/${c.sequenceNumber}">${fmtNumber(c.sequenceNumber)}</a>`)}
+              ${mobileTd("Digest", hashLink(c.digest, '/checkpoint/' + c.sequenceNumber))}
+              ${mobileTd("Timestamp", fmtTime(c.timestamp))}
+              ${mobileTd("Gas", gasUsed > 0 ? fmtSui(gasUsed) : '—')}
             </tr>`;
             }).slice(0, -1).join("")}
           </tbody>
@@ -748,19 +771,19 @@ async function renderCheckpointDetail(app, seqNum) {
             : 'Effects mode: <span class="u-c-text">checkpoint.transactions.effects</span>'}
           ${rootEffectsError ? ` · <span class="u-c-yellow">Root query failed (${escapeHtml(rootEffectsError)}), fallback used.</span>` : ""}
         </div>
-        <table>
+        <table class="mobile-stack-table">
           <thead><tr><th>Digest</th><th>Sender</th><th>Status</th><th>Gas Used</th><th>Time</th><th class="u-ta-right">Effects</th></tr></thead>
           <tbody>
             ${txRows.map(({ tx: t, eff, source }) => {
               const gs = eff?.gasEffects?.gasSummary;
               const gasUsed = gs ? Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate) : 0;
               return `<tr>
-                <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
-                <td>${t.sender ? hashLink(t.sender.address, '/address/' + t.sender.address) : "—"}</td>
-                <td>${statusBadge(eff?.status)}</td>
-                <td>${fmtSui(gasUsed)}</td>
-                <td>${timeTag(eff?.timestamp || t.effects?.timestamp)}</td>
-                <td class="u-ta-right">${source === "root" ? '<span class="badge badge-success">root</span>' : '<span class="u-fs11-dim">embedded</span>'}</td>
+                ${mobileTd("Digest", hashLink(t.digest, '/tx/' + t.digest))}
+                ${mobileTd("Sender", t.sender ? hashLink(t.sender.address, '/address/' + t.sender.address) : "—")}
+                ${mobileTd("Status", statusBadge(eff?.status))}
+                ${mobileTd("Gas Used", fmtSui(gasUsed))}
+                ${mobileTd("Time", timeTag(eff?.timestamp || t.effects?.timestamp))}
+                ${mobileTd("Effects", source === "root" ? '<span class="badge badge-success">root</span>' : '<span class="u-fs11-dim">embedded</span>', 'class="u-ta-right"')}
               </tr>`;
             }).join("")}
           </tbody>
@@ -1335,24 +1358,21 @@ async function renderTransactions(app, before = null, dateState = null) {
     ? renderEmpty(`Failed to load transactions: ${escapeHtml(txLoadError)}`)
     : (!txRows.length
       ? renderEmpty(emptyMsg)
-      : `<table>
-          <thead><tr>
-            <th>Digest</th><th>Summary</th><th>Sender</th><th>Checkpoint</th><th>Status</th><th>Time</th>
-          </tr></thead>
-          <tbody>
-            ${txRows.map((row) => `<tr>
-              <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
-              <td class="tx-flow-cell">
-                <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
-                <div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>
-              </td>
-              <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
-              <td><a class="hash-link" href="#/checkpoint/${row.tx.effects?.checkpoint?.sequenceNumber}">${fmtNumber(row.tx.effects?.checkpoint?.sequenceNumber)}</a></td>
-              <td>${statusBadge(row.tx.effects?.status)}</td>
-              <td>${timeTag(row.tx.effects?.timestamp)}</td>
-            </tr>`).join("")}
-          </tbody>
-        </table>`);
+            : `<table class="mobile-stack-table">
+              <thead><tr>
+                <th>Digest</th><th>Summary</th><th>Sender</th><th>Checkpoint</th><th>Status</th><th>Time</th>
+              </tr></thead>
+              <tbody>
+                ${txRows.map((row) => `<tr>
+                  ${mobileTd("Digest", hashLink(row.tx.digest, '/tx/' + row.tx.digest))}
+                  ${mobileTd("Summary", `<div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div><div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>`, 'class="tx-flow-cell"')}
+                  ${mobileTd("Sender", row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—")}
+                  ${mobileTd("Checkpoint", `<a class="hash-link" href="#/checkpoint/${row.tx.effects?.checkpoint?.sequenceNumber}">${fmtNumber(row.tx.effects?.checkpoint?.sequenceNumber)}</a>`)}
+                  ${mobileTd("Status", statusBadge(row.tx.effects?.status))}
+                  ${mobileTd("Time", timeTag(row.tx.effects?.timestamp))}
+                </tr>`).join("")}
+              </tbody>
+            </table>`);
 
   app.innerHTML = `
     <div class="page-title">Transactions</div>
@@ -2051,15 +2071,15 @@ async function renderTxDetail(app, digest) {
             ${moveTargetRows.length ? `<details class="tx-overview-detail" id="tx-ov-move-targets">
               <summary>Move Target Breakdown <span class="tx-section-count">${fmtNumber(moveTargetRows.length)} targets</span></summary>
               <div class="tx-overview-detail-body">
-                <table>
+                <table class="mobile-stack-table">
                   <thead><tr><th>Move Target</th><th>Package</th><th class="tx-cell-mono-right">Calls</th></tr></thead>
                   <tbody>
                     ${moveTargetRows.slice(0, 10).map((r) => {
                       const pkgName = mvrNameCache[r.pkg] ? '@' + mvrNameCache[r.pkg] : "";
                       return `<tr>
-                        <td class="tx-cell-mono-left-small">${escapeHtml(r.mod)}::${escapeHtml(r.fn)}</td>
-                        <td>${pkgName ? `<span class="tx-pkg-name">${escapeHtml(pkgName)}</span> ` : ""}${r.pkg ? hashLink(r.pkg, '/object/' + r.pkg) : '<span class="tx-label-dim">—</span>'}</td>
-                        <td class="tx-cell-mono-right">${fmtNumber(r.count)}</td>
+                        ${mobileTd("Move Target", `${escapeHtml(r.mod)}::${escapeHtml(r.fn)}`, 'class="tx-cell-mono-left-small"')}
+                        ${mobileTd("Package", `${pkgName ? `<span class="tx-pkg-name">${escapeHtml(pkgName)}</span> ` : ""}${r.pkg ? hashLink(r.pkg, '/object/' + r.pkg) : '<span class="tx-label-dim">—</span>'}`)}
+                        ${mobileTd("Calls", fmtNumber(r.count), 'class="tx-cell-mono-right"')}
                       </tr>`;
                     }).join("")}
                   </tbody>
@@ -2081,7 +2101,7 @@ async function renderTxDetail(app, digest) {
               Decimal normalization: ${fmtNumber(flowMetaCoverage.coinMetadata || 0)}/${fmtNumber(flowMetaCoverage.total || 0)} coin types from on-chain metadata, ${fmtNumber(flowMetaCoverage.knownRegistry || 0)} known mappings, ${fmtNumber(flowMetaCoverage.fallbackGuess || 0)} fallback guesses.
               ${gasAdjApplied ? ` SUI transfer columns exclude gas burn (${fmtSui(gasUsed)}) for payer ${ownerLinkOrText(gasPayerAddr)}.` : ""}
             </div>
-            ${balanceFlowRows.length ? `<table>
+            ${balanceFlowRows.length ? `<table class="mobile-stack-table">
               <thead><tr><th>Coin</th><th class="tx-cell-mono-right">Decimals</th><th class="tx-cell-mono-right">Outflow (Transfer)</th><th class="tx-cell-mono-right">Inflow</th><th class="tx-cell-mono-right">Net (Transfer)</th><th class="tx-cell-mono-right">Net (Raw)</th><th>Top Senders (Transfer)</th><th>Top Receivers</th></tr></thead>
               <tbody>
                 ${balanceFlowRows.map((r) => {
@@ -2090,14 +2110,14 @@ async function renderTxDetail(app, digest) {
                   const transferNetColor = adj.netTransferRaw > 0 ? "var(--green)" : (adj.netTransferRaw < 0 ? "var(--red)" : "var(--text)");
                   const rawNetColor = adj.netRaw > 0 ? "var(--green)" : (adj.netRaw < 0 ? "var(--red)" : "var(--text)");
                   return `<tr>
-                    <td><span class="u-fw-600">${escapeHtml(resolved.symbol)}</span></td>
-                    <td class="tx-cell-mono-right">${fmtNumber(resolved.decimals)}<div class="tx-cell-mono-dim">${decimalsSourceLabel(resolved.source)}</div></td>
-                    <td class="tx-cell-mono-right">${fmtRawCoinValue(adj.outTransferRaw, r.coinType)}</td>
-                    <td class="tx-cell-mono-right">${fmtRawCoinValue(adj.inRaw, r.coinType)}</td>
-                    <td class="tx-cell-mono-right" style="color:${transferNetColor}">${fmtRawCoinValue(adj.netTransferRaw, r.coinType, { signed: true })}</td>
-                    <td class="tx-cell-mono-right" style="color:${rawNetColor}">${fmtRawCoinValue(adj.netRaw, r.coinType, { signed: true })}</td>
-                    <td>${topOwnerFlowTags(adj.fromOwnersTransfer, r.coinType)}</td>
-                    <td>${topOwnerFlowTags(adj.toOwnersTransfer, r.coinType)}</td>
+                    ${mobileTd("Coin", `<span class="u-fw-600">${escapeHtml(resolved.symbol)}</span>`)}
+                    ${mobileTd("Decimals", `${fmtNumber(resolved.decimals)}<div class="tx-cell-mono-dim">${decimalsSourceLabel(resolved.source)}</div>`, 'class="tx-cell-mono-right"')}
+                    ${mobileTd("Outflow", fmtRawCoinValue(adj.outTransferRaw, r.coinType), 'class="tx-cell-mono-right"')}
+                    ${mobileTd("Inflow", fmtRawCoinValue(adj.inRaw, r.coinType), 'class="tx-cell-mono-right"')}
+                    ${mobileTd("Net (Transfer)", fmtRawCoinValue(adj.netTransferRaw, r.coinType, { signed: true }), `class="tx-cell-mono-right" style="color:${transferNetColor}"`)}
+                    ${mobileTd("Net (Raw)", fmtRawCoinValue(adj.netRaw, r.coinType, { signed: true }), `class="tx-cell-mono-right" style="color:${rawNetColor}"`)}
+                    ${mobileTd("Top Senders", topOwnerFlowTags(adj.fromOwnersTransfer, r.coinType))}
+                    ${mobileTd("Top Receivers", topOwnerFlowTags(adj.toOwnersTransfer, r.coinType))}
                   </tr>`;
                 }).join("")}
               </tbody>
@@ -2113,7 +2133,7 @@ async function renderTxDetail(app, digest) {
         <div class="card tx-card">
           <div class="card-header">Object Lifecycle <span class="type-tag">Version + Owner</span></div>
           <div class="card-body">
-            ${objectLifecycleRows.length ? `<table>
+            ${objectLifecycleRows.length ? `<table class="mobile-stack-table">
               <thead><tr><th>Object</th><th>Change</th><th>Type</th><th>Version</th><th>Owner After</th></tr></thead>
               <tbody>
                 ${objectLifecycleRows.slice(0, 80).map((r) => {
@@ -2123,11 +2143,11 @@ async function renderTxDetail(app, digest) {
                     ? `v${r.versionIn ?? "?"} -> v${r.versionOut ?? "?"}`
                     : "—";
                   return `<tr>
-                    <td>${r.address ? hashLink(r.address, '/object/' + r.address) : '<span class="tx-label-dim">—</span>'}</td>
-                    <td>${badge}</td>
-                    <td class="tx-cell-type-dim">${escapeHtml(shortType(r.typeRepr || "")) || "—"}</td>
-                    <td class="tx-cell-mono-left-small">${ver}</td>
-                    <td>${ownerStateLabel(r.ownerAfter)}</td>
+                    ${mobileTd("Object", r.address ? hashLink(r.address, '/object/' + r.address) : '<span class="tx-label-dim">—</span>')}
+                    ${mobileTd("Change", badge)}
+                    ${mobileTd("Type", escapeHtml(shortType(r.typeRepr || "")) || "—", 'class="tx-cell-type-dim"')}
+                    ${mobileTd("Version", ver, 'class="tx-cell-mono-left-small"')}
+                    ${mobileTd("Owner After", ownerStateLabel(r.ownerAfter))}
                   </tr>`;
                 }).join("")}
               </tbody>
@@ -2143,17 +2163,17 @@ async function renderTxDetail(app, digest) {
         <div class="card tx-card">
           <div class="card-header">Event Outcomes <span class="type-tag">Grouped</span></div>
           <div class="card-body">
-            ${eventSummaryRows.length ? `<table>
+            ${eventSummaryRows.length ? `<table class="mobile-stack-table">
               <thead><tr><th>Event Type</th><th>Module</th><th class="tx-cell-mono-right">Count</th><th>Top JSON Keys</th></tr></thead>
               <tbody>
                 ${eventSummaryRows.slice(0, 50).map((r) => {
                   const modPkgName = r.modPkg && mvrNameCache[r.modPkg] ? '@' + mvrNameCache[r.modPkg] : "";
                   const modLabel = r.modName ? `${modPkgName ? modPkgName + "::" : ""}${r.modName}` : (modPkgName || "—");
                   return `<tr>
-                    <td class="tx-cell-type-dim">${escapeHtml(shortType(r.typeRepr || "") || r.typeRepr || "—")}</td>
-                    <td>${r.modPkg ? `${r.modPkg ? hashLink(r.modPkg, '/object/' + r.modPkg) : ""}<div class="tx-cell-mono-dim">${escapeHtml(modLabel)}</div>` : `<span class="tx-label-dim">${escapeHtml(modLabel)}</span>`}</td>
-                    <td class="tx-cell-mono-right">${fmtNumber(r.count)}</td>
-                    <td class="tx-cell-mono-dim">${r.keyFields.length ? escapeHtml(r.keyFields.join(", ")) : "—"}</td>
+                    ${mobileTd("Event Type", escapeHtml(shortType(r.typeRepr || "") || r.typeRepr || "—"), 'class="tx-cell-type-dim"')}
+                    ${mobileTd("Module", r.modPkg ? `${r.modPkg ? hashLink(r.modPkg, '/object/' + r.modPkg) : ""}<div class="tx-cell-mono-dim">${escapeHtml(modLabel)}</div>` : `<span class="tx-label-dim">${escapeHtml(modLabel)}</span>`)}
+                    ${mobileTd("Count", fmtNumber(r.count), 'class="tx-cell-mono-right"')}
+                    ${mobileTd("Top JSON Keys", r.keyFields.length ? escapeHtml(r.keyFields.join(", ")) : "—", 'class="tx-cell-mono-dim"')}
                   </tr>`;
                 }).join("")}
               </tbody>
@@ -5754,8 +5774,16 @@ function afIsEconomicRole(role) {
 function afMarketAccountKey(chId, accountId) {
   return `${chId}::${accountId}`;
 }
+function afMarketFeedLabel(symbol, fallback = "") {
+  const raw = String(symbol || "").trim().toUpperCase();
+  if (!raw) return fallback || "";
+  if (raw.endsWith("USD") && raw.length > 3) return `${raw.slice(0, -3)}/USD`;
+  return raw;
+}
 function afMarketLabel(chId) {
-  return AF_CLEARING_HOUSES[chId] || `Market ${truncHash(chId, 6)}`;
+  const id = normalizeSuiAddress(chId) || String(chId || "");
+  const cached = (afClearingHouseDiscoveryCache.rows || []).find((row) => row?.id === id)?.label;
+  return cached || AF_CLEARING_HOUSES[id] || `Market ${truncHash(id, 6)}`;
 }
 function afAccountCollateralCoinType(typeRepr) {
   const raw = String(typeRepr || "").trim();
@@ -5917,7 +5945,7 @@ async function fetchAftermathClearingHouses(force = false) {
   const byId = {};
   for (const [id, label] of Object.entries(AF_CLEARING_HOUSES)) {
     const norm = normalizeSuiAddress(id) || id;
-    byId[norm] = { id: norm, label, known: true };
+    byId[norm] = { id: norm, label, known: true, basePfsId: "" };
   }
   let partial = false;
   const warnings = [];
@@ -5926,7 +5954,12 @@ async function fetchAftermathClearingHouses(force = false) {
     const data = await gql(`query($type: String!, $after: String, $first: Int!) {
       objects(filter: { type: $type }, first: $first, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { address }
+        nodes {
+          address
+          asMoveObject {
+            contents { json }
+          }
+        }
       }
     }`, {
       type: AF_CLEARING_HOUSE_TYPE,
@@ -5937,7 +5970,12 @@ async function fetchAftermathClearingHouses(force = false) {
     for (const row of (conn?.nodes || [])) {
       const id = normalizeSuiAddress(row?.address || "");
       if (!id) continue;
-      if (!byId[id]) byId[id] = { id, label: afMarketLabel(id), known: false };
+      const basePfsId = normalizeSuiAddress(row?.asMoveObject?.contents?.json?.market_params?.core_params?.base_pfs_id || "");
+      if (!byId[id]) {
+        byId[id] = { id, label: afMarketLabel(id), known: false, basePfsId };
+      } else if (basePfsId && !byId[id].basePfsId) {
+        byId[id].basePfsId = basePfsId;
+      }
     }
     if (!conn?.pageInfo?.hasNextPage) {
       after = null;
@@ -5948,6 +5986,17 @@ async function fetchAftermathClearingHouses(force = false) {
     if (page === AF_CLEARING_HOUSE_DISCOVERY_MAX_PAGES - 1) {
       partial = true;
       warnings.push("Aftermath market discovery reached pagination cap; discovered market list may be partial.");
+    }
+  }
+  const basePfsIds = uniqueNormalizedAddresses(Object.values(byId).map((row) => row.basePfsId));
+  if (basePfsIds.length) {
+    const basePfsById = await multiGetObjectsTypeJsonByAddress(basePfsIds);
+    for (const row of Object.values(byId)) {
+      const symbol = row.basePfsId
+        ? basePfsById[row.basePfsId]?.asMoveObject?.contents?.json?.symbol
+        : "";
+      const derivedLabel = afMarketFeedLabel(symbol, "");
+      if (derivedLabel) row.label = derivedLabel;
     }
   }
   const rows = Object.values(byId).sort((a, b) => {
@@ -6598,17 +6647,14 @@ async function renderAddress(app, addr) {
             ? renderEmpty(txFilterState.preset === "all"
               ? "No transactions found."
               : "No transactions matched this timestamp range.")
-            : `<table>
+            : `<table class="mobile-stack-table">
               <thead><tr><th>Digest</th><th>Summary</th><th>Sender</th><th>Status</th><th>Time</th></tr></thead>
               <tbody>${txRows.map((row) => `<tr>
-                <td>${hashLink(row.tx.digest, '/tx/' + row.tx.digest)}</td>
-                <td class="tx-flow-cell">
-                  <div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div>
-                  <div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>
-                </td>
-                <td>${row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—"}</td>
-                <td>${statusBadge(row.tx.effects?.status)}</td>
-                <td>${timeTag(row.tx.effects?.timestamp)}</td>
+                ${mobileTd("Digest", hashLink(row.tx.digest, '/tx/' + row.tx.digest))}
+                ${mobileTd("Summary", `<div class="tx-flow-main${row.flow.hasFlows ? "" : " tx-flow-empty"}">${escapeHtml(row.summary)}</div><div class="u-fs11-dim">${renderIntentChip(row.intent)}${row.flow.partial ? ' <span class="tx-flow-partial">partial</span>' : ''}</div>`, 'class="tx-flow-cell"')}
+                ${mobileTd("Sender", row.tx.sender ? hashLink(row.tx.sender.address, '/address/' + row.tx.sender.address) : "—")}
+                ${mobileTd("Status", statusBadge(row.tx.effects?.status))}
+                ${mobileTd("Time", timeTag(row.tx.effects?.timestamp))}
               </tr>`).join("")}</tbody>
             </table>`));
       return `
@@ -6639,12 +6685,12 @@ async function renderAddress(app, addr) {
     },
     objects: () => {
       if (!allObjects.length) return renderEmpty("No owned objects.");
-      return `<table>
+      return `<table class="mobile-stack-table">
         <thead><tr><th>Object ID</th><th>Type</th><th>Version</th></tr></thead>
         <tbody>${allObjects.map(o => `<tr>
-          <td>${hashLink(o.address, '/object/' + o.address)}</td>
-          <td class="u-fs12-dim">${shortType(o.contents?.type?.repr)}</td>
-          <td class="u-mono-12">${o.version ?? "—"}</td>
+          ${mobileTd("Object ID", hashLink(o.address, '/object/' + o.address))}
+          ${mobileTd("Type", shortType(o.contents?.type?.repr), 'class="u-fs12-dim"')}
+          ${mobileTd("Version", `${o.version ?? "—"}`, 'class="u-mono-12"')}
         </tr>`).join("")}</tbody>
       </table>
       ${objPageInfo.hasNextPage ? `<div class="pagination"><button id="load-more-objs">Load more objects</button></div>` : ""}`;
@@ -6867,7 +6913,7 @@ async function renderAddress(app, addr) {
         <div class="u-fs11-dim">${escapeHtml(protocolFilterSummary)}${protocolFilterNote}${protocolFilterAvailable && hiddenByProtocolFilter > 0 ? ` · hiding ${hiddenByProtocolFilter}` : ""}</div>
       </div>`;
       walletHtml += `<div class="u-fs12-dim u-mb12">Click a coin type to inspect supply and recent activity. USD values are only shown for trusted tracked coin types; lookalike symbols from other packages stay unpriced. Scallop receipt tokens are grouped under Lending. Ember receipt tokens are grouped under Ember Vaults.${escapeHtml(walletScanNote)}</div>`;
-      walletHtml += `<table><thead><tr><th>Token</th><th>Amount</th><th>USD Value</th><th class="u-c-dim">Total Supply</th></tr></thead><tbody>`;
+      walletHtml += `<table class="mobile-stack-table"><thead><tr><th>Token</th><th>Amount</th><th>USD Value</th><th class="u-c-dim">Total Supply</th></tr></thead><tbody>`;
       if (!visibleRegularBals.length) {
         walletHtml += `<tr><td colspan="4" style="color:var(--text-dim);font-size:12px">No wallet holdings match the protocol-supported coin type filter.</td></tr>`;
       }
@@ -6882,11 +6928,26 @@ async function renderAddress(app, addr) {
         const tokenCell = `<div class="u-mono-12">${escapeHtml(b.symbol)}</div>
           <div class="u-mono-11-dim">${coinTypeLink(b.coinType)} ${copyBtn(b.coinType)}</div>
           ${rowNotes.length ? `<div class="u-fs10-dim">${escapeHtml(rowNotes.join(" · "))}</div>` : ""}`;
-        walletHtml += `<tr><td>${tokenCell}</td><td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td><td style="font-family:var(--mono);font-size:12px;color:${b.usdValue > 0 ? 'var(--green)' : 'var(--text-dim)'}">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}</td><td class="u-mono-11-dim">${supplyFmt}</td></tr>`;
+        walletHtml += `<tr>${mobileTd("Token", tokenCell)}${mobileTd("Amount", `${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}`, 'class="u-mono-12"')}${mobileTd("USD Value", `${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}`, `style="font-family:var(--mono);font-size:12px;color:${b.usdValue > 0 ? 'var(--green)' : 'var(--text-dim)'}"`) }${mobileTd("Total Supply", supplyFmt, 'class="u-mono-11-dim"')}</tr>`;
       }
       if (visibleRegularBals.length > 15) walletHtml += `<tr><td colspan="4" style="color:var(--text-dim);font-size:12px">... and ${visibleRegularBals.length - 15} more tokens</td></tr>`;
       walletHtml += `</tbody></table>`;
       return walletHtml;
+    };
+    const renderAddressSecondarySection = (title, body, meta = "") => {
+      if (!body) return "";
+      if (uiViewMode === "advanced") return `<h3 class="u-section-h3">${escapeHtml(title)}</h3>${body}`;
+      return `
+        <details class="card u-mb16 coverage-panel">
+          <summary class="card-header coverage-panel-summary">
+            <div class="coverage-panel-summary-title">${escapeHtml(title)}</div>
+            <div class="coverage-panel-summary-meta">
+              <span class="u-fs12-dim">${escapeHtml(meta || "Tap to expand")}</span>
+            </div>
+          </summary>
+          <div class="card-body">${body}</div>
+        </details>
+      `;
     };
     defiWalletSectionRenderer = renderWalletHoldingsSection;
 
@@ -6969,26 +7030,25 @@ async function renderAddress(app, addr) {
     // ─── Liquid Staking Tokens ──────────────
     if (lstBals.length) {
       html += `<h3 class="u-section-h3">Liquid Staking</h3>`;
-      html += `<table><thead><tr><th>Token</th><th>Protocol</th><th>Amount</th><th>SUI Equivalent</th><th>USD Value</th></tr></thead><tbody>`;
+      html += `<table class="mobile-stack-table"><thead><tr><th>Token</th><th>Protocol</th><th>Amount</th><th>SUI Equivalent</th><th>USD Value</th></tr></thead><tbody>`;
       for (const b of lstBals) {
         const lstInfo = LST_TYPES[b.coinType] || {};
         const rate = lstExchangeRates[b.symbol] || 1;
         const rateLabel = rate > 1 ? ` (1=${rate.toFixed(4)} SUI)` : "";
         html += `<tr>
-          <td class="u-mono-12">${b.symbol}</td>
-          <td class="u-fs12-dim">${lstInfo.protocol || "—"}</td>
-          <td class="u-mono-12">${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}</td>
-          <td style="font-family:var(--mono);font-size:12px;color:var(--text-dim)">${b.suiEquiv > 0 ? (b.suiEquiv >= 1000 ? fmtCompact(b.suiEquiv) : b.suiEquiv >= 1 ? b.suiEquiv.toFixed(1) : b.suiEquiv.toLocaleString(undefined, {maximumFractionDigits:4})) + " SUI" : '<span class="trunc-note">inc_data</span>'}<span class="u-fs10-dim">${rateLabel}</span></td>
-          <td style="font-family:var(--mono);font-size:12px;color:var(--accent)">${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}</td>
+          ${mobileTd("Token", b.symbol, 'class="u-mono-12"')}
+          ${mobileTd("Protocol", lstInfo.protocol || "—", 'class="u-fs12-dim"')}
+          ${mobileTd("Amount", `${b.amount >= 1000 ? fmtCompact(b.amount) : b.amount >= 1 ? b.amount.toFixed(1) : b.amount >= 0.01 ? b.amount.toLocaleString(undefined, {maximumFractionDigits:4}) : b.amount.toFixed(8)}`, 'class="u-mono-12"')}
+          ${mobileTd("SUI Equivalent", `${b.suiEquiv > 0 ? (b.suiEquiv >= 1000 ? fmtCompact(b.suiEquiv) : b.suiEquiv >= 1 ? b.suiEquiv.toFixed(1) : b.suiEquiv.toLocaleString(undefined, {maximumFractionDigits:4})) + " SUI" : '<span class="trunc-note">inc_data</span>'}<span class="u-fs10-dim">${rateLabel}</span>`, 'style="font-family:var(--mono);font-size:12px;color:var(--text-dim)"')}
+          ${mobileTd("USD Value", `${b.usdValue > 0 ? fmtUsdFromFloat(b.usdValue) : '<span class="trunc-note">inc_data</span>'}`, 'style="font-family:var(--mono);font-size:12px;color:var(--accent)"')}
         </tr>`;
       }
       html += `</tbody></table>`;
     }
 
     if (emberPos.length) {
-      html += `<h3 class="u-section-h3">Ember Vaults</h3>`;
-      html += `<div class="u-fs12-dim u-mb12">Receipt-token balances are grouped here to avoid double counting in Wallet Holdings.${emberData.partial ? " Balance scan partial; some Ember receipt tokens may be omitted." : ""}</div>`;
-      html += `<table><thead><tr><th>Vault</th><th>Balance</th><th>APY</th><th>USD Value</th></tr></thead><tbody>`;
+      let emberHtml = `<div class="u-fs12-dim u-mb12">Receipt-token balances are grouped here to avoid double counting in Wallet Holdings.${emberData.partial ? " Balance scan partial; some Ember receipt tokens may be omitted." : ""}</div>`;
+      emberHtml += `<table class="mobile-stack-table"><thead><tr><th>Vault</th><th>Balance</th><th>APY</th><th>USD Value</th></tr></thead><tbody>`;
       for (const pos of emberPos) {
         const shareText = pos.shareAmount >= 1000
           ? fmtCompact(pos.shareAmount)
@@ -7011,21 +7071,15 @@ async function renderAddress(app, addr) {
           : '<span class="u-c-dim">—</span>';
         const statusNote = pos.status && pos.status !== "SYNC" ? ` · ${escapeHtml(pos.status)}` : "";
         const yieldNote = pos.yieldUsd > 0 ? ` · ${fmtUsdFromFloat(pos.yieldUsd)} yield` : "";
-        html += `<tr>
-          <td>
-            <div class="u-fw-600">${escapeHtml(pos.displayName)}</div>
-            <div class="u-fs11-dim">${escapeHtml(pos.managerLabel || "Ember")}${statusNote}${yieldNote}</div>
-            <div class="u-mono-11-dim">${coinTypeLink(pos.receiptCoinType)} ${copyBtn(pos.receiptCoinType)}</div>
-          </td>
-          <td>
-            <div class="u-mono-12">${shareText} ${escapeHtml(pos.receiptSymbol)}</div>
-            <div class="u-fs11-dim">${underlyingText ? `≈ ${escapeHtml(underlyingText)} ${escapeHtml(pos.symbol)}` : "—"}</div>
-          </td>
-          <td class="u-mono-12">${apyText}</td>
-          <td class="u-c-green" style="font-family:var(--mono);font-size:12px">${pos.amountUsd > 0 ? fmtUsdFromFloat(pos.amountUsd) : '<span class="trunc-note">inc_data</span>'}</td>
+        emberHtml += `<tr>
+          ${mobileTd("Vault", `<div class="u-fw-600">${escapeHtml(pos.displayName)}</div><div class="u-fs11-dim">${escapeHtml(pos.managerLabel || "Ember")}${statusNote}${yieldNote}</div><div class="u-mono-11-dim">${coinTypeLink(pos.receiptCoinType)} ${copyBtn(pos.receiptCoinType)}</div>`)}
+          ${mobileTd("Balance", `<div class="u-mono-12">${shareText} ${escapeHtml(pos.receiptSymbol)}</div><div class="u-fs11-dim">${underlyingText ? `≈ ${escapeHtml(underlyingText)} ${escapeHtml(pos.symbol)}` : "—"}</div>`)}
+          ${mobileTd("APY", apyText, 'class="u-mono-12"')}
+          ${mobileTd("USD Value", `${pos.amountUsd > 0 ? fmtUsdFromFloat(pos.amountUsd) : '<span class="trunc-note">inc_data</span>'}`, 'class="u-c-green" style="font-family:var(--mono);font-size:12px"')}
         </tr>`;
       }
-      html += `</tbody></table>`;
+      emberHtml += `</tbody></table>`;
+      html += renderAddressSecondarySection("Ember Vaults", emberHtml, `${emberPos.length} vault${emberPos.length === 1 ? "" : "s"}`);
     }
 
     // ─── Lending Positions ──────────────────
@@ -7065,19 +7119,20 @@ async function renderAddress(app, addr) {
 
     // ─── DEX LP Positions ───────────────────
     if (allDexLp.length) {
-      html += `<h3 class="u-section-h3">DEX Liquidity</h3>`;
+      let dexLpHtml = "";
       for (const pos of allDexLp) {
-        html += `<div class="u-bg-panel-12">`;
-        html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span class="u-fw-600">${pos.pair}</span><div style="display:flex;gap:6px;align-items:center"><span class="badge" style="background:var(--accent)20;color:var(--accent)">${pos.protocol}</span><span class="badge ${pos.inRange ? 'badge-success' : 'badge-fail'}">${pos.inRange ? "In Range" : "Out of Range"}</span></div></div>`;
-        html += `<div style="display:flex;gap:20px;font-size:13px"><span>${pos.amountA >= 1000 ? fmtCompact(pos.amountA) : pos.amountA >= 1 ? pos.amountA.toFixed(1) : pos.amountA.toFixed(4)} ${pos.symbolA} <span class="u-c-dim">${pos.usdA > 0 ? fmtUsdFromFloat(pos.usdA) : '<span class="trunc-note">inc_data</span>'}</span></span><span>${pos.amountB >= 1000 ? fmtCompact(pos.amountB) : pos.amountB >= 1 ? pos.amountB.toFixed(1) : pos.amountB.toFixed(4)} ${pos.symbolB} <span class="u-c-dim">${pos.usdB > 0 ? fmtUsdFromFloat(pos.usdB) : '<span class="trunc-note">inc_data</span>'}</span></span></div>`;
-        html += `<div style="font-size:12px;margin-top:4px;color:var(--text-dim)">Total: <span style="color:var(--text);font-weight:600">${fmtUsdFromFloat(pos.totalUsd)}</span> ${hashLink(pos.posId, '/object/' + pos.posId)}</div>`;
-        html += `</div>`;
+        dexLpHtml += `<div class="u-bg-panel-12">`;
+        dexLpHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span class="u-fw-600">${pos.pair}</span><div style="display:flex;gap:6px;align-items:center"><span class="badge" style="background:var(--accent)20;color:var(--accent)">${pos.protocol}</span><span class="badge ${pos.inRange ? 'badge-success' : 'badge-fail'}">${pos.inRange ? "In Range" : "Out of Range"}</span></div></div>`;
+        dexLpHtml += `<div style="display:flex;gap:20px;font-size:13px"><span>${pos.amountA >= 1000 ? fmtCompact(pos.amountA) : pos.amountA >= 1 ? pos.amountA.toFixed(1) : pos.amountA.toFixed(4)} ${pos.symbolA} <span class="u-c-dim">${pos.usdA > 0 ? fmtUsdFromFloat(pos.usdA) : '<span class="trunc-note">inc_data</span>'}</span></span><span>${pos.amountB >= 1000 ? fmtCompact(pos.amountB) : pos.amountB >= 1 ? pos.amountB.toFixed(1) : pos.amountB.toFixed(4)} ${pos.symbolB} <span class="u-c-dim">${pos.usdB > 0 ? fmtUsdFromFloat(pos.usdB) : '<span class="trunc-note">inc_data</span>'}</span></span></div>`;
+        dexLpHtml += `<div style="font-size:12px;margin-top:4px;color:var(--text-dim)">Total: <span style="color:var(--text);font-weight:600">${fmtUsdFromFloat(pos.totalUsd)}</span> ${hashLink(pos.posId, '/object/' + pos.posId)}</div>`;
+        dexLpHtml += `</div>`;
       }
+      html += renderAddressSecondarySection("DEX Liquidity", dexLpHtml, `${allDexLp.length} position${allDexLp.length === 1 ? "" : "s"}`);
     }
 
     // ─── DeepBook Margin ────────────────────
     if (db.positions.length) {
-      html += `<h3 class="u-section-h3">DeepBook Margin</h3>`;
+      let deepbookHtml = "";
       for (const pos of db.positions) {
         const mgr = pos.mgr;
         const typeRepr = mgr.type_repr;
@@ -7101,19 +7156,19 @@ async function renderAddress(app, addr) {
           }
         }
         let totalCollUsd = 0;
-        html += `<div class="u-bg-panel-12">`;
-        html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span class="u-fw-600">${pair}</span><span class="u-fs12-dim">${hashLink(mgr.id, '/object/' + mgr.id)}</span></div>`;
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Collateral</div>`;
+        deepbookHtml += `<div class="u-bg-panel-12">`;
+        deepbookHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span class="u-fw-600">${pair}</span><span class="u-fs12-dim">${hashLink(mgr.id, '/object/' + mgr.id)}</span></div>`;
+        deepbookHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Collateral</div>`;
         for (const c of pos.collateral) {
           const dec = c.decimals || getDecimals(c.symbol);
           const human = c.amount / Math.pow(10, dec);
           const usd = priceAmountUsd(human, c.symbol, c.coinType);
           totalCollUsd += usd;
-          html += `<div class="u-row-between-sm"><span>${c.symbol}</span><span class="u-c-green">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
+          deepbookHtml += `<div class="u-row-between-sm"><span>${c.symbol}</span><span class="u-c-green">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
         }
         let totalDebtUsd = 0;
         if (baseBorrowed > 0 || quoteBorrowed > 0) {
-          html += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Debt</div>`;
+          deepbookHtml += `<div style="font-size:12px;color:var(--text-dim);margin:6px 0 4px">Debt</div>`;
           const pairTypes = inner.split(",").map(s => s.trim());
           if (baseBorrowed > 0) {
             const sym = pairParts[0] || "BASE";
@@ -7121,7 +7176,7 @@ async function renderAddress(app, addr) {
             const human = baseDebt / Math.pow(10, dec);
             const usd = priceAmountUsd(human, sym, pairTypes[0] || "");
             totalDebtUsd += usd;
-            html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
+            deepbookHtml += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
           }
           if (quoteBorrowed > 0) {
             const sym = pairParts[1] || "QUOTE";
@@ -7129,85 +7184,85 @@ async function renderAddress(app, addr) {
             const human = quoteDebt / Math.pow(10, dec);
             const usd = priceAmountUsd(human, sym, pairTypes[1] || "");
             totalDebtUsd += usd;
-            html += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
+            deepbookHtml += `<div class="u-row-between-sm"><span>${sym}</span><span class="u-c-red">${human.toLocaleString(undefined, {maximumFractionDigits:4})} ${usd > 0 ? fmtUsdFromFloat(usd) : '<span class="trunc-note">inc_data</span>'}</span></div>`;
           }
         }
         const netUsd = totalCollUsd - totalDebtUsd;
         if (totalCollUsd > 0 && totalDebtUsd <= 0) {
-          html += `<div style="font-size:12px;color:var(--text-dim);margin-top:6px">Idle collateral only. No active margin debt.</div>`;
+          deepbookHtml += `<div style="font-size:12px;color:var(--text-dim);margin-top:6px">Idle collateral only. No active margin debt.</div>`;
         } else if (totalCollUsd <= 0 && totalDebtUsd <= 0) {
-          html += `<div style="font-size:12px;color:var(--text-dim);margin-top:6px">Manager discovered, but no active collateral or debt is currently visible.</div>`;
+          deepbookHtml += `<div style="font-size:12px;color:var(--text-dim);margin-top:6px">Manager discovered, but no active collateral or debt is currently visible.</div>`;
         }
         if (riskConfig && totalDebtUsd > 0) {
           const liqRatio = Number(riskConfig.risk_ratios.liquidation_risk_ratio) / SCALE;
           const healthRatio = totalCollUsd / (totalDebtUsd * liqRatio);
           const healthColor = healthRatio > 2 ? "var(--green)" : healthRatio > 1.2 ? "var(--yellow)" : "var(--red)";
           const healthLabel = healthRatio > 2 ? "Healthy" : healthRatio > 1.2 ? "Caution" : healthRatio > 1 ? "At Risk" : "Liquidatable";
-          html += `<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:6px;display:flex;justify-content:space-between;font-size:13px"><span class="u-c-dim">Health</span><span style="color:${healthColor}">${healthRatio.toFixed(3)} (${healthLabel})</span></div>`;
+          deepbookHtml += `<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:6px;display:flex;justify-content:space-between;font-size:13px"><span class="u-c-dim">Health</span><span style="color:${healthColor}">${healthRatio.toFixed(3)} (${healthLabel})</span></div>`;
         }
-        html += `<div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600;margin-top:4px"><span>Net Equity</span><span style="color:${netUsd >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsdFromFloat(Math.abs(netUsd))}</span></div>`;
+        deepbookHtml += `<div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600;margin-top:4px"><span>Net Equity</span><span style="color:${netUsd >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsdFromFloat(Math.abs(netUsd))}</span></div>`;
         const tpslCount = (mgr.tpsl?.trigger_below?.length || 0) + (mgr.tpsl?.trigger_above?.length || 0);
-        if (tpslCount > 0) html += `<div style="font-size:12px;color:var(--text-dim);margin-top:4px">${tpslCount} TP/SL orders active</div>`;
-        html += `</div>`;
+        if (tpslCount > 0) deepbookHtml += `<div style="font-size:12px;color:var(--text-dim);margin-top:4px">${tpslCount} TP/SL orders active</div>`;
+        deepbookHtml += `</div>`;
       }
+      html += renderAddressSecondarySection("DeepBook Margin", deepbookHtml, `${db.positions.length} manager${db.positions.length === 1 ? "" : "s"}`);
     }
 
     // ─── Bluefin Perps ─────────────────────
     if (bluefinProData.positions.length || bluefinCollateralUsd > 0) {
-      html += `<h3 class="u-section-h3">Bluefin Perpetuals</h3>`;
-      html += `<div class="u-bg-panel-12">`;
+      let bluefinHtml = `<div class="u-bg-panel-12">`;
       if (bluefinCollateralUsd > 0) {
-        html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(bluefinCollateralUsd)}</span></div>`;
+        bluefinHtml += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px;margin-bottom:8px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(bluefinCollateralUsd)}</span></div>`;
       }
       if (bluefinProData.positions.length) {
-        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Mode</th></tr></thead><tbody>`;
+        bluefinHtml += `<table class="mobile-stack-table"><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Mode</th></tr></thead><tbody>`;
         for (const p of bluefinProData.positions) {
           const sideColor = p.isLong ? "var(--green)" : "var(--red)";
           const sideLabel = p.isLong ? "LONG" : "SHORT";
-          html += `<tr>
-            <td style="font-weight:500">${p.symbol}</td>
-            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
-            <td class="u-mono">${p.size.toLocaleString(undefined, {maximumFractionDigits:4})}</td>
-            <td class="u-mono">$${p.entryPrice.toLocaleString(undefined, {maximumFractionDigits:2})}</td>
-            <td class="u-ta-right-mono">${fmtUsdFromFloat(p.notional)}</td>
-            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.isCross ? "Cross" : p.leverage > 0 ? p.leverage.toFixed(0) + "x Isolated" : "Isolated"}</td>
+          bluefinHtml += `<tr>
+            ${mobileTd("Market", p.symbol, 'style="font-weight:500"')}
+            ${mobileTd("Side", `<span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span>`)}
+            ${mobileTd("Size", p.size.toLocaleString(undefined, {maximumFractionDigits:4}), 'class="u-mono"')}
+            ${mobileTd("Entry Price", `$${p.entryPrice.toLocaleString(undefined, {maximumFractionDigits:2})}`, 'class="u-mono"')}
+            ${mobileTd("Notional", fmtUsdFromFloat(p.notional), 'class="u-ta-right-mono"')}
+            ${mobileTd("Mode", p.isCross ? "Cross" : p.leverage > 0 ? p.leverage.toFixed(0) + "x Isolated" : "Isolated", 'style="text-align:right;font-size:11px;color:var(--text-dim)"')}
           </tr>`;
         }
-        html += `</tbody></table>`;
+        bluefinHtml += `</tbody></table>`;
       } else {
-        html += `<div style="font-size:12px;color:var(--text-dim)">No open Bluefin perps positions. Collateral is still reserved in the Bluefin account.</div>`;
+        bluefinHtml += `<div style="font-size:12px;color:var(--text-dim)">No open Bluefin perps positions. Collateral is still reserved in the Bluefin account.</div>`;
       }
-      html += `</div>`;
+      bluefinHtml += `</div>`;
+      html += renderAddressSecondarySection("Bluefin Perpetuals", bluefinHtml, bluefinProData.positions.length ? `${bluefinProData.positions.length} position${bluefinProData.positions.length === 1 ? "" : "s"}` : "Collateral only");
     }
 
     // ─── Aftermath Perps ─────────────────────
     if (afPerpsData.accounts.length || afPerpsData.positions.length || afPerpsData.orders.length || afPerpsData.collateral > 0 || afPerpsData.warnings?.length) {
-      html += `<h3 class="u-section-h3">Aftermath Perpetuals</h3>`;
-      html += `<div class="u-bg-panel-12">`;
+      let aftermathHtml = `<div class="u-bg-panel-12">`;
       if (afPerpsData.collateral > 0) {
-        html += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
+        aftermathHtml += `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:13px"><span class="u-c-dim">USDC Collateral</span><span class="u-c-green">${fmtUsdFromFloat(afPerpsData.collateral)}</span></div>`;
         if (afPerpsData.idleCollateral > AF_PERPS_COLLATERAL_DUST) {
-          html += `<div style="display:flex;justify-content:space-between;padding:2px 0 2px 12px;font-size:12px"><span class="u-c-dim">Idle / Account</span><span class="u-c-text">${fmtUsdFromFloat(afPerpsData.idleCollateral)}</span></div>`;
+          aftermathHtml += `<div style="display:flex;justify-content:space-between;padding:2px 0 2px 12px;font-size:12px"><span class="u-c-dim">Idle / Account</span><span class="u-c-text">${fmtUsdFromFloat(afPerpsData.idleCollateral)}</span></div>`;
         }
         if (afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST) {
-          html += `<div style="display:flex;justify-content:space-between;padding:2px 0 2px 12px;font-size:12px;margin-bottom:8px"><span class="u-c-dim">Allocated / Markets</span><span class="u-c-text">${fmtUsdFromFloat(afPerpsData.allocatedCollateral)}</span></div>`;
+          aftermathHtml += `<div style="display:flex;justify-content:space-between;padding:2px 0 2px 12px;font-size:12px;margin-bottom:8px"><span class="u-c-dim">Allocated / Markets</span><span class="u-c-text">${fmtUsdFromFloat(afPerpsData.allocatedCollateral)}</span></div>`;
         } else {
-          html += `<div style="margin-bottom:8px"></div>`;
+          aftermathHtml += `<div style="margin-bottom:8px"></div>`;
         }
       }
       if ((afPerpsData.accounts.length || 0) > (afPerpsData.economicAccounts?.length || 0)) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Delegated assistant accounts are shown for inspection but excluded from collateral, position, and order totals.</div>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Delegated assistant accounts are shown for inspection but excluded from collateral, position, and order totals.</div>`;
       }
       if (aftermathIdleOnly) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Idle collateral only. No allocated market collateral, open positions, or open orders are currently active.</div>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Idle collateral only. No allocated market collateral, open positions, or open orders are currently active.</div>`;
       } else if (aftermathCollateralOnly) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No open positions or orders are currently active, but some collateral is still parked in Aftermath${afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST ? " and remains allocated to one or more markets." : "."}</div>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No open positions or orders are currently active, but some collateral is still parked in Aftermath${afPerpsData.allocatedCollateral > AF_PERPS_COLLATERAL_DUST ? " and remains allocated to one or more markets." : "."}</div>`;
       } else if (aftermathAccountsOnly) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Accounts found for inspection, but no economic collateral, positions, or open orders were detected.</div>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Accounts found for inspection, but no economic collateral, positions, or open orders were detected.</div>`;
       }
       if (afPerpsData.accounts.length) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Perps Accounts</div>`;
-        html += `<table><thead><tr><th>Account ID</th><th>Role</th><th class="u-ta-right">Idle Collateral</th><th>Caps (owned)</th><th class="u-ta-right">Account Object</th></tr></thead><tbody>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Perps Accounts</div>`;
+        aftermathHtml += `<table class="mobile-stack-table"><thead><tr><th>Account ID</th><th>Role</th><th class="u-ta-right">Idle Collateral</th><th>Caps (owned)</th><th class="u-ta-right">Account Object</th></tr></thead><tbody>`;
         for (const aRow of afPerpsData.accounts) {
           const roleBadgeColor = aRow.role === "admin"
             ? "var(--accent)"
@@ -7222,27 +7277,27 @@ async function renderAddress(app, addr) {
           const idleCollateralText = Number.isFinite(aRow.accountCollateral) && aRow.accountCollateral > AF_PERPS_COLLATERAL_DUST
             ? fmtUsdFromFloat(aRow.accountCollateral)
             : "—";
-          html += `<tr>
-            <td class="u-mono">${escapeHtml(String(aRow.accountId || "—"))}</td>
-            <td><span class="badge" style="background:${roleBadgeColor}22;color:${roleBadgeColor}">${escapeHtml(roleText)}</span></td>
-            <td class="u-ta-right-mono">${idleCollateralText}</td>
-            <td>${capLinks}</td>
-            <td class="u-ta-right">${accountObject}</td>
+          aftermathHtml += `<tr>
+            ${mobileTd("Account ID", escapeHtml(String(aRow.accountId || "—")), 'class="u-mono"')}
+            ${mobileTd("Role", `<span class="badge" style="background:${roleBadgeColor}22;color:${roleBadgeColor}">${escapeHtml(roleText)}</span>`)}
+            ${mobileTd("Idle Collateral", idleCollateralText, 'class="u-ta-right-mono"')}
+            ${mobileTd("Caps", capLinks)}
+            ${mobileTd("Account Object", accountObject, 'class="u-ta-right"')}
           </tr>`;
         }
-        html += `</tbody></table>`;
+        aftermathHtml += `</tbody></table>`;
       }
       if (afPerpsData.partial || afPerpsData.warnings?.length) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.accounts.length ? "8px" : "0"} 0 8px 0;padding:6px 8px;background:var(--panel);border:1px dashed var(--border);border-radius:8px">`;
-        if (afPerpsData.partial) html += `<div>Open-order coverage is partial; incomplete rows are explicitly tagged.</div>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.accounts.length ? "8px" : "0"} 0 8px 0;padding:6px 8px;background:var(--panel);border:1px dashed var(--border);border-radius:8px">`;
+        if (afPerpsData.partial) aftermathHtml += `<div>Open-order coverage is partial; incomplete rows are explicitly tagged.</div>`;
         const warnRows = (afPerpsData.warnings || []).slice(0, 4);
-        for (const w of warnRows) html += `<div>${escapeHtml(w)}</div>`;
-        if ((afPerpsData.warnings || []).length > warnRows.length) html += `<div>+${(afPerpsData.warnings || []).length - warnRows.length} more note(s)</div>`;
-        html += `</div>`;
+        for (const w of warnRows) aftermathHtml += `<div>${escapeHtml(w)}</div>`;
+        if ((afPerpsData.warnings || []).length > warnRows.length) aftermathHtml += `<div>+${(afPerpsData.warnings || []).length - warnRows.length} more note(s)</div>`;
+        aftermathHtml += `</div>`;
       }
       if (afPerpsData.positions.length) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Open Positions</div>`;
-        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Orders</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Open Positions</div>`;
+        aftermathHtml += `<table class="mobile-stack-table"><thead><tr><th>Market</th><th>Side</th><th>Size</th><th>Entry Price</th><th class="u-ta-right">Notional</th><th class="u-ta-right">Orders</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
         for (const p of afPerpsData.positions) {
           const sideLabel = p.side === "long" ? "LONG" : p.side === "short" ? "SHORT" : "FLAT";
           const sideColor = p.side === "long" ? "var(--green)" : p.side === "short" ? "var(--red)" : "var(--text-dim)";
@@ -7252,23 +7307,23 @@ async function renderAddress(app, addr) {
           const notionalText = Number.isFinite(p.notional) && p.notional > 0
             ? fmtUsdFromFloat(p.notional)
             : "—";
-          html += `<tr>
-            <td style="font-weight:500">${escapeHtml(p.market || "Unknown")}</td>
-            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
-            <td class="u-mono">${Number.isFinite(p.size) ? p.size.toLocaleString(undefined, {maximumFractionDigits:6}) : "—"}</td>
-            <td class="u-mono">${entryText}</td>
-            <td class="u-ta-right-mono">${notionalText}</td>
-            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${p.pendingOrders || "—"}</td>
-            <td class="u-ta-right-mono">${escapeHtml(String(p.accountId || "—"))}</td>
+          aftermathHtml += `<tr>
+            ${mobileTd("Market", escapeHtml(p.market || "Unknown"), 'style="font-weight:500"')}
+            ${mobileTd("Side", `<span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span>`)}
+            ${mobileTd("Size", Number.isFinite(p.size) ? p.size.toLocaleString(undefined, {maximumFractionDigits:6}) : "—", 'class="u-mono"')}
+            ${mobileTd("Entry Price", entryText, 'class="u-mono"')}
+            ${mobileTd("Notional", notionalText, 'class="u-ta-right-mono"')}
+            ${mobileTd("Orders", `${p.pendingOrders || "—"}`, 'style="text-align:right;font-size:11px;color:var(--text-dim)"')}
+            ${mobileTd("Account", escapeHtml(String(p.accountId || "—")), 'class="u-ta-right-mono"')}
           </tr>`;
         }
-        html += `</tbody></table>`;
+        aftermathHtml += `</tbody></table>`;
       } else if (afPerpsData.orders.length) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No open positions; showing live resting orders.</div>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No open positions; showing live resting orders.</div>`;
       }
       if (afPerpsData.orders.length) {
-        html += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.positions.length ? "8px" : "0"} 0 6px">Open Orders (Resting/Maker)</div>`;
-        html += `<table><thead><tr><th>Market</th><th>Side</th><th>Size</th><th class="u-ta-right">Limit Price</th><th>Type</th><th class="u-ta-right">Reduce Only</th><th class="u-ta-right">Expires</th><th class="u-ta-right">Last Activity</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
+        aftermathHtml += `<div style="font-size:12px;color:var(--text-dim);margin:${afPerpsData.positions.length ? "8px" : "0"} 0 6px">Open Orders (Resting/Maker)</div>`;
+        aftermathHtml += `<table class="mobile-stack-table"><thead><tr><th>Market</th><th>Side</th><th>Size</th><th class="u-ta-right">Limit Price</th><th>Type</th><th class="u-ta-right">Reduce Only</th><th class="u-ta-right">Expires</th><th class="u-ta-right">Last Activity</th><th class="u-ta-right">Account</th></tr></thead><tbody>`;
         for (const o of afPerpsData.orders) {
           const sideLabel = o.side === "long" ? "BID" : o.side === "short" ? "ASK" : "FLAT";
           const sideColor = o.side === "long" ? "var(--green)" : o.side === "short" ? "var(--red)" : "var(--text-dim)";
@@ -7286,21 +7341,25 @@ async function renderAddress(app, addr) {
           const priceText = Number.isFinite(o.price) && o.price > 0
             ? `$${o.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`
             : '<span class="u-c-dim">—</span>';
-          html += `<tr>
-            <td style="font-weight:500">${escapeHtml(o.market || "Unknown")}</td>
-            <td><span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span></td>
-            <td class="u-mono">${sizeText}</td>
-            <td class="u-ta-right-mono">${priceText}</td>
-            <td>${kindLabel}</td>
-            <td style="text-align:right;font-size:11px;color:var(--text-dim)">${o.reduceOnly ? "Yes" : "No"}</td>
-            <td style="text-align:right">${expText}</td>
-            <td style="text-align:right">${activityText}</td>
-            <td class="u-ta-right-mono">${escapeHtml(String(o.accountId || "—"))}</td>
+          aftermathHtml += `<tr>
+            ${mobileTd("Market", escapeHtml(o.market || "Unknown"), 'style="font-weight:500"')}
+            ${mobileTd("Side", `<span class="badge" style="background:${sideColor};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">${sideLabel}</span>`)}
+            ${mobileTd("Size", sizeText, 'class="u-mono"')}
+            ${mobileTd("Limit Price", priceText, 'class="u-ta-right-mono"')}
+            ${mobileTd("Type", kindLabel)}
+            ${mobileTd("Reduce Only", o.reduceOnly ? "Yes" : "No", 'style="text-align:right;font-size:11px;color:var(--text-dim)"')}
+            ${mobileTd("Expires", expText, 'style="text-align:right"')}
+            ${mobileTd("Last Activity", activityText, 'style="text-align:right"')}
+            ${mobileTd("Account", escapeHtml(String(o.accountId || "—")), 'class="u-ta-right-mono"')}
           </tr>`;
         }
-        html += `</tbody></table>`;
+        aftermathHtml += `</tbody></table>`;
       }
-      html += `</div>`;
+      aftermathHtml += `</div>`;
+      const aftermathMeta = aftermathIdleOnly
+        ? "Idle collateral only"
+        : `${afEconomicExposureCount} live exposure${afEconomicExposureCount === 1 ? "" : "s"}`;
+      html += renderAddressSecondarySection("Aftermath Perpetuals", aftermathHtml, aftermathMeta);
     }
 
     if (defiAccountingWarnings.length) {
@@ -7710,7 +7769,7 @@ async function renderDeletedObjectDetail(app, id) {
     if (historyErr) return renderEmpty(escapeHtml(historyErr));
     if (!historyRows.length) return renderEmpty("No version history available.");
 
-    let html = `<table>
+    let html = `<table class="mobile-stack-table">
       <thead><tr><th>Version</th><th>Change</th><th>Digest</th><th>Transaction</th><th>Checkpoint</th><th>Time</th><th>Type</th></tr></thead>
       <tbody>`;
     for (const v of historyRows) {
@@ -7718,13 +7777,13 @@ async function renderDeletedObjectDetail(app, id) {
       const meta = digest ? txMetaByDigest[digest] : null;
       const lifecycle = rowLifecycle(v);
       html += `<tr>
-        <td class="u-mono-12">${fmtNumber(v?.version)}</td>
-        <td>${lifecycleBadge(lifecycle)}</td>
-        <td class="u-mono-11-dim">${v?.digest ? truncHash(v.digest) : "—"}</td>
-        <td>${digest ? hashLink(digest, '/tx/' + digest) : "—"}</td>
-        <td class="u-mono-12">${Number.isFinite(meta?.checkpoint) ? fmtNumber(meta.checkpoint) : "—"}</td>
-        <td>${meta?.timestamp ? timeTag(meta.timestamp) : '<span class="u-c-dim">—</span>'}</td>
-        <td class="u-mono-11-dim">${escapeHtml(shortType(v?.asMoveObject?.contents?.type?.repr || "")) || "—"}</td>
+        ${mobileTd("Version", `${fmtNumber(v?.version)}`, 'class="u-mono-12"')}
+        ${mobileTd("Change", lifecycleBadge(lifecycle))}
+        ${mobileTd("Digest", `${v?.digest ? truncHash(v.digest) : "—"}`, 'class="u-mono-11-dim"')}
+        ${mobileTd("Transaction", digest ? hashLink(digest, '/tx/' + digest) : "—")}
+        ${mobileTd("Checkpoint", `${Number.isFinite(meta?.checkpoint) ? fmtNumber(meta.checkpoint) : "—"}`, 'class="u-mono-12"')}
+        ${mobileTd("Time", meta?.timestamp ? timeTag(meta.timestamp) : '<span class="u-c-dim">—</span>')}
+        ${mobileTd("Type", escapeHtml(shortType(v?.asMoveObject?.contents?.type?.repr || "")) || "—", 'class="u-mono-11-dim"')}
       </tr>`;
     }
     html += `</tbody></table>`;
@@ -8124,17 +8183,17 @@ async function renderObjectDetail(app, id) {
       }
       if (dynFieldsLoading && !dynFieldsLoaded) return `<div style="padding:12px 0">${renderLoading()}</div>`;
       if (!dynFields.length) return renderEmpty("No dynamic fields.");
-      return `<table>
+      return `<table class="mobile-stack-table">
         <thead><tr><th>Name</th><th>Type</th><th>Value</th></tr></thead>
         <tbody>${dynFields.map(df => {
           const valAddr = df.value?.address;
           const valJson = df.value?.json;
           return `<tr>
-            <td class="u-mono-12">${renderJson(df.name?.json, {depth: 0, maxDepth: 1})}</td>
-            <td class="u-fs12-dim">${shortType(df.value?.type?.repr || df.name?.type?.repr)}</td>
-            <td class="u-mono-12">${valAddr
+            ${mobileTd("Name", renderJson(df.name?.json, {depth: 0, maxDepth: 1}), 'class="u-mono-12"')}
+            ${mobileTd("Type", shortType(df.value?.type?.repr || df.name?.type?.repr) || "—", 'class="u-fs12-dim"')}
+            ${mobileTd("Value", valAddr
               ? hashLink(valAddr, '/object/' + valAddr)
-              : (valJson ? renderJson(valJson, {depth: 0, maxDepth: 1}) : "—")}</td>
+              : (valJson ? renderJson(valJson, {depth: 0, maxDepth: 1}) : "—"), 'class="u-mono-12"')}
           </tr>`;
         }).join("")}</tbody>
       </table>
@@ -8373,14 +8432,14 @@ async function renderObjectDetail(app, id) {
           let html = "";
           if (linkage.length) {
             html += `<h4 style="font-size:13px;margin:0 0 8px;color:var(--text-dim)">Package Dependencies (${linkage.length})</h4>`;
-            html += `<table><thead><tr><th>Package</th><th>Name</th><th class="u-ta-right">Linked Version</th></tr></thead><tbody>`;
+            html += `<table class="mobile-stack-table"><thead><tr><th>Package</th><th>Name</th><th class="u-ta-right">Linked Version</th></tr></thead><tbody>`;
             for (const l of linkage) {
               const name = mvrNameCache[l.originalId];
               const upgraded = l.originalId !== l.upgradedId;
               html += `<tr>
-                <td>${hashLink(l.originalId, '/object/' + l.originalId)}</td>
-                <td>${name ? `<span class="u-c-accent">@${name}</span>` : '<span class="u-c-dim">—</span>'}</td>
-                <td class="u-ta-right-mono">v${l.version}${upgraded ? ` <span style="color:var(--yellow);font-size:11px">(upgraded to ${truncHash(l.upgradedId)})</span>` : ""}</td>
+                ${mobileTd("Package", hashLink(l.originalId, '/object/' + l.originalId))}
+                ${mobileTd("Name", name ? `<span class="u-c-accent">@${name}</span>` : '<span class="u-c-dim">—</span>')}
+                ${mobileTd("Linked Version", `v${l.version}${upgraded ? ` <span style="color:var(--yellow);font-size:11px">(upgraded to ${truncHash(l.upgradedId)})</span>` : ""}`, 'class="u-ta-right-mono"')}
               </tr>`;
             }
             html += `</tbody></table>`;
@@ -8439,14 +8498,14 @@ async function renderObjectDetail(app, id) {
     if (historyLoading && !historyRows.length) return '<div class="loading u-p24">Loading version history...</div>';
     if (historyErr) return renderEmpty(escapeHtml(historyErr));
     if (!historyRows.length) return renderEmpty("No version history available.");
-    let html = `<table><thead><tr><th>Version</th><th>Digest</th><th>Modifying Transaction</th><th>Type</th></tr></thead><tbody>`;
+    let html = `<table class="mobile-stack-table"><thead><tr><th>Version</th><th>Digest</th><th>Modifying Transaction</th><th>Type</th></tr></thead><tbody>`;
     for (const v of historyRows) {
       const isCurrent = v.version == obj.version;
       html += `<tr${isCurrent ? ' style="background:var(--bg-light)"' : ''}>
-        <td style="font-family:var(--mono);font-size:12px;font-weight:${isCurrent ? '600' : '400'}">${v.version}${isCurrent ? ' <span style="color:var(--accent);font-size:10px">current</span>' : ''}</td>
-        <td class="u-mono-11-dim">${v.digest ? truncHash(v.digest) : "—"}</td>
-        <td>${v.previousTransaction?.digest ? hashLink(v.previousTransaction.digest, '/tx/' + v.previousTransaction.digest) : "—"}</td>
-        <td class="u-mono-11-dim">${shortType(v.asMoveObject?.contents?.type?.repr || "")}</td>
+        ${mobileTd("Version", `${v.version}${isCurrent ? ' <span style="color:var(--accent);font-size:10px">current</span>' : ''}`, `style="font-family:var(--mono);font-size:12px;font-weight:${isCurrent ? '600' : '400'}"`)}
+        ${mobileTd("Digest", `${v.digest ? truncHash(v.digest) : "—"}`, 'class="u-mono-11-dim"')}
+        ${mobileTd("Transaction", v.previousTransaction?.digest ? hashLink(v.previousTransaction.digest, '/tx/' + v.previousTransaction.digest) : "—")}
+        ${mobileTd("Type", shortType(v.asMoveObject?.contents?.type?.repr || "") || "—", 'class="u-mono-11-dim"')}
       </tr>`;
     }
     html += `</tbody></table>`;
@@ -8529,13 +8588,13 @@ async function renderObjectDetail(app, id) {
       if (pkgVersionsErr) return renderEmpty(escapeHtml(pkgVersionsErr));
       if (!pkgVersionRows.length) return renderEmpty("No package version history.");
       let html = `<div style="padding:12px 16px;font-size:13px;color:var(--text-dim)">${pkgVersionRows.length} version${pkgVersionRows.length > 1 ? 's' : ''} loaded</div>`;
-      html += `<table><thead><tr><th>Version</th><th>Package Address</th><th>Publishing Transaction</th></tr></thead><tbody>`;
+      html += `<table class="mobile-stack-table"><thead><tr><th>Version</th><th>Package Address</th><th>Publishing Transaction</th></tr></thead><tbody>`;
       for (const pv of pkgVersionRows) {
         const isCurrent = pv.address === idNorm;
         html += `<tr${isCurrent ? ' style="background:var(--bg-light)"' : ''}>
-          <td style="font-family:var(--mono);font-size:12px;font-weight:${isCurrent ? '600' : '400'}">${pv.version}${isCurrent ? ' <span style="color:var(--accent);font-size:10px">current</span>' : ''}</td>
-          <td>${isCurrent ? truncHash(pv.address) + ' ' + copyBtn(pv.address) : hashLink(pv.address, '/object/' + pv.address)}</td>
-          <td>${pv.previousTransaction?.digest ? hashLink(pv.previousTransaction.digest, '/tx/' + pv.previousTransaction.digest) : "—"}</td>
+          ${mobileTd("Version", `${pv.version}${isCurrent ? ' <span style="color:var(--accent);font-size:10px">current</span>' : ''}`, `style="font-family:var(--mono);font-size:12px;font-weight:${isCurrent ? '600' : '400'}"`)}
+          ${mobileTd("Package Address", isCurrent ? truncHash(pv.address) + ' ' + copyBtn(pv.address) : hashLink(pv.address, '/object/' + pv.address))}
+          ${mobileTd("Publishing Transaction", pv.previousTransaction?.digest ? hashLink(pv.previousTransaction.digest, '/tx/' + pv.previousTransaction.digest) : "—")}
         </tr>`;
       }
       html += `</tbody></table>`;
@@ -8905,14 +8964,14 @@ async function renderObjectDetail(app, id) {
             </div>`;
           return `
             <tr style="border-bottom:1px solid var(--border)">
-              <td class="u-mono-12">${fullHashLink(t.digest, '/tx/' + t.digest)}</td>
-              <td class="u-mono-12">${t.sender ? hashLink(t.sender, '/address/' + t.sender) : "—"}</td>
-              <td style="text-align:right;vertical-align:top">${gasCell}</td>
-              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--purple)">${t.txEvents.length || "—"}</td>
-              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--blue)">${t.txObjTypes.length || "—"}</td>
-              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--green)">${t.txCreated.length || "—"}</td>
-              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--accent)">${t.txMutated.length || "—"}</td>
-              <td style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--red)">${t.txDeleted.length || "—"}</td>
+              ${mobileTd("Digest", fullHashLink(t.digest, '/tx/' + t.digest), 'class="u-mono-12"')}
+              ${mobileTd("Sender", t.sender ? hashLink(t.sender, '/address/' + t.sender) : "—", 'class="u-mono-12"')}
+              ${mobileTd("Gas Used", gasCell, 'style="text-align:right;vertical-align:top"')}
+              ${mobileTd("Events", `${t.txEvents.length || "—"}`, 'style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--purple)"')}
+              ${mobileTd("Obj Types", `${t.txObjTypes.length || "—"}`, 'style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--blue)"')}
+              ${mobileTd("Created", `${t.txCreated.length || "—"}`, 'style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--green)"')}
+              ${mobileTd("Mutated", `${t.txMutated.length || "—"}`, 'style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--accent)"')}
+              ${mobileTd("Deleted", `${t.txDeleted.length || "—"}`, 'style="text-align:center;font-family:var(--mono);font-size:12px;color:var(--red)"')}
             </tr>${changeDetail}`;
         }).join("");
 
@@ -8938,7 +8997,7 @@ async function renderObjectDetail(app, id) {
               <span style="font-size:10px">▶</span> Show transactions
             </summary>
             <div style="overflow-x:auto">
-              <table style="margin:0">
+              <table class="mobile-stack-table" style="margin:0">
                 <thead><tr>
                   <th>Digest</th>
                   <th>Sender</th>
@@ -10187,19 +10246,19 @@ async function renderCoin(app, routeCoinType = "") {
         <div class="card">
           <div class="card-header">Most Recent Transfers</div>
           <div class="card-body">
-            ${transfers.length ? `<table>
+            ${transfers.length ? `<table class="mobile-stack-table">
               <thead><tr><th>Kind</th><th>Action</th><th class="u-ta-right">Amount</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
               <tbody>
                 ${transfers.map((row) => {
                   const kindMeta = getCoinTransferKindMeta(row.kind, row);
                   return `<tr>
-                    <td><span class="coin-transfer-kind coin-transfer-kind-${kindMeta.kindClass}">${kindMeta.kindLabel}</span></td>
-                    <td>${row.actionLabel ? `<span class="badge badge-success">${escapeHtml(row.actionLabel)}</span>` : '<span class="u-c-dim">—</span>'}</td>
-                    <td class="u-ta-right-mono">${row.amountRaw == null ? '<span class="u-c-dim">Unknown</span>' : fmtCoinAbs(row.amountRaw, decimals)}</td>
-                    <td>${renderAddressList(row.fromRows, kindMeta.fromFallback)}</td>
-                    <td>${renderAddressList(row.toRows, kindMeta.toFallback)}</td>
-                    <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
-                    <td>${timeTag(row.timestamp)}</td>
+                    ${mobileTd("Kind", `<span class="coin-transfer-kind coin-transfer-kind-${kindMeta.kindClass}">${kindMeta.kindLabel}</span>`)}
+                    ${mobileTd("Action", row.actionLabel ? `<span class="badge badge-success">${escapeHtml(row.actionLabel)}</span>` : '<span class="u-c-dim">—</span>')}
+                    ${mobileTd("Amount", row.amountRaw == null ? '<span class="u-c-dim">Unknown</span>' : fmtCoinAbs(row.amountRaw, decimals), 'class="u-ta-right-mono"')}
+                    ${mobileTd("From", renderAddressList(row.fromRows, kindMeta.fromFallback))}
+                    ${mobileTd("To", renderAddressList(row.toRows, kindMeta.toFallback))}
+                    ${mobileTd("Tx", row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>')}
+                    ${mobileTd("Time", timeTag(row.timestamp))}
                   </tr>`;
                 }).join("")}
               </tbody>
@@ -10210,7 +10269,7 @@ async function renderCoin(app, routeCoinType = "") {
         <div class="card">
           <div class="card-header">Most Recent Events</div>
           <div class="card-body">
-            ${events.length ? `<table>
+            ${events.length ? `<table class="mobile-stack-table">
               <thead><tr><th>Match</th><th>Event Type</th><th>Sender</th><th>Module</th><th>Tx</th><th>Time</th><th>Payload</th></tr></thead>
               <tbody>
                 ${events.map((row) => {
@@ -10219,13 +10278,13 @@ async function renderCoin(app, routeCoinType = "") {
                     ? `${hashLink(row.modulePackage, "/object/" + row.modulePackage)}::${escapeHtml(row.moduleName || "—")}`
                     : escapeHtml(row.moduleName || "—");
                   return `<tr>
-                    <td><span class="badge ${row.matchSource === "direct" ? "badge-success" : ""}">${row.matchSource === "direct" ? "direct" : "context"}</span></td>
-                    <td class="coin-type-cell" title="${escapeAttr(row.typeRepr || "")}">${escapeHtml(typeLabel)}</td>
-                    <td>${row.sender ? hashLink(row.sender, "/address/" + row.sender) : '<span class="u-c-dim">—</span>'}</td>
-                    <td>${moduleLabel}</td>
-                    <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
-                    <td>${timeTag(row.timestamp)}</td>
-                    <td class="coin-json-preview">${row.jsonPreview ? escapeHtml(row.jsonPreview) : '<span class="u-c-dim">—</span>'}</td>
+                    ${mobileTd("Match", `<span class="badge ${row.matchSource === "direct" ? "badge-success" : ""}">${row.matchSource === "direct" ? "direct" : "context"}</span>`)}
+                    ${mobileTd("Event Type", escapeHtml(typeLabel), `class="coin-type-cell" title="${escapeAttr(row.typeRepr || "")}"`)}
+                    ${mobileTd("Sender", row.sender ? hashLink(row.sender, "/address/" + row.sender) : '<span class="u-c-dim">—</span>')}
+                    ${mobileTd("Module", moduleLabel)}
+                    ${mobileTd("Tx", row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>')}
+                    ${mobileTd("Time", timeTag(row.timestamp))}
+                    ${mobileTd("Payload", row.jsonPreview ? escapeHtml(row.jsonPreview) : '<span class="u-c-dim">—</span>', 'class="coin-json-preview"')}
                   </tr>`;
                 }).join("")}
               </tbody>
@@ -10236,7 +10295,7 @@ async function renderCoin(app, routeCoinType = "") {
         <div class="card">
           <div class="card-header">Most Recent Object Changes</div>
           <div class="card-body">
-            ${objects.length ? `<table>
+            ${objects.length ? `<table class="mobile-stack-table">
               <thead><tr><th>Object</th><th>Change</th><th>Type</th><th>Owner</th><th>Tx</th><th>Time</th></tr></thead>
               <tbody>
                 ${objects.map((row) => {
@@ -10249,12 +10308,12 @@ async function renderCoin(app, routeCoinType = "") {
                     ? "badge-success"
                     : (row.changeKind === "Deleted" ? "badge-fail" : "");
                   return `<tr>
-                    <td>${row.objectId ? hashLink(row.objectId, "/object/" + row.objectId) : '<span class="u-c-dim">—</span>'}</td>
-                    <td><span class="badge ${changeClass}">${escapeHtml(row.changeKind)}</span></td>
-                    <td class="coin-type-cell" title="${escapeAttr(row.typeRepr || "")}">${escapeHtml(shortType(row.typeRepr) || row.typeRepr || "—")}</td>
-                    <td>${ownerLabel}</td>
-                    <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
-                    <td>${timeTag(row.timestamp)}</td>
+                    ${mobileTd("Object", row.objectId ? hashLink(row.objectId, "/object/" + row.objectId) : '<span class="u-c-dim">—</span>')}
+                    ${mobileTd("Change", `<span class="badge ${changeClass}">${escapeHtml(row.changeKind)}</span>`)}
+                    ${mobileTd("Type", escapeHtml(shortType(row.typeRepr) || row.typeRepr || "—"), `class="coin-type-cell" title="${escapeAttr(row.typeRepr || "")}"`)}
+                    ${mobileTd("Owner", ownerLabel)}
+                    ${mobileTd("Tx", row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>')}
+                    ${mobileTd("Time", timeTag(row.timestamp))}
                   </tr>`;
                 }).join("")}
               </tbody>
@@ -10265,15 +10324,15 @@ async function renderCoin(app, routeCoinType = "") {
         <div class="card">
           <div class="card-header">Recent Matched Transactions</div>
           <div class="card-body">
-            ${matchedActivity.length ? `<table>
+            ${matchedActivity.length ? `<table class="mobile-stack-table">
               <thead><tr><th>Tx</th><th>Sender</th><th>Signals</th><th>Status</th><th>Time</th></tr></thead>
               <tbody>
                 ${matchedActivity.map((row) => `<tr>
-                  <td>${row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>'}</td>
-                  <td>${row.sender ? hashLink(row.sender, "/address/" + row.sender) : '<span class="u-c-dim">—</span>'}</td>
-                  <td>${row.signals ? escapeHtml(row.signals) : '<span class="u-c-dim">—</span>'}</td>
-                  <td>${statusBadge(row.status)}</td>
-                  <td>${timeTag(row.timestamp)}</td>
+                  ${mobileTd("Tx", row.digest ? hashLink(row.digest, "/tx/" + row.digest) : '<span class="u-c-dim">—</span>')}
+                  ${mobileTd("Sender", row.sender ? hashLink(row.sender, "/address/" + row.sender) : '<span class="u-c-dim">—</span>')}
+                  ${mobileTd("Signals", row.signals ? escapeHtml(row.signals) : '<span class="u-c-dim">—</span>')}
+                  ${mobileTd("Status", statusBadge(row.status))}
+                  ${mobileTd("Time", timeTag(row.timestamp))}
                 </tr>`).join("")}
               </tbody>
             </table>` : renderEmpty("No matched transactions found for this coin type in sampled data.")}
@@ -10427,7 +10486,7 @@ async function renderTransfers(app) {
       <div class="card">
         <div class="card-header">Transfers by USD Value</div>
         <div class="card-body">
-          ${transfers.length ? `<table>
+          ${transfers.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Token</th><th class="u-ta-right">Amount</th><th class="u-ta-right">USD Value</th><th>From</th><th>To</th><th>Tx</th><th>Time</th></tr></thead>
             <tbody>
               ${transfers.slice(0, 100).map(t => {
@@ -10438,13 +10497,13 @@ async function renderTransfers(app) {
                   ? `$${t.usdValue < 0.01 ? t.usdValue.toFixed(4) : fmtCompact(t.usdValue)}`
                   : (pricingPending ? '<span class="u-c-dim">Loading...</span>' : '<span class="u-c-dim">—</span>');
                 return `<tr>
-                  <td class="u-fw-600">${t.symbol}</td>
-                  <td class="u-ta-right-mono">${amtFmt}</td>
-                  <td style="text-align:right;font-family:var(--mono);color:var(--green)">${usdLabel}</td>
-                  <td>${fromLabel}</td>
-                  <td>${toLabel}</td>
-                  <td>${hashLink(t.digest, '/tx/' + t.digest)}</td>
-                  <td>${timeTag(t.timestamp)}</td>
+                  ${mobileTd("Token", t.symbol, 'class="u-fw-600"')}
+                  ${mobileTd("Amount", amtFmt, 'class="u-ta-right-mono"')}
+                  ${mobileTd("USD Value", usdLabel, 'style="text-align:right;font-family:var(--mono);color:var(--green)"')}
+                  ${mobileTd("From", fromLabel)}
+                  ${mobileTd("To", toLabel)}
+                  ${mobileTd("Tx", hashLink(t.digest, '/tx/' + t.digest))}
+                  ${mobileTd("Time", timeTag(t.timestamp))}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -10557,24 +10616,16 @@ async function renderValidators(app, opts = {}) {
         <div class="card-header">Validator Set (Progressive Load)</div>
         <div class="card-body">
           <div class="u-fs12-dim u-mb12">Rendering first validator page immediately. Full analytics and remaining validators are loading in background.</div>
-          <table>
+          <table class="mobile-stack-table">
             <thead><tr><th>#</th><th>Validator</th><th class="u-ta-right">Stake (SUI)</th><th class="u-ta-right">Voting %</th><th class="u-ta-right">Commission</th><th class="u-ta-right">Gas Price</th></tr></thead>
             <tbody>
               ${quickValidators.map((v, i) => `<tr>
-                <td class="u-c-dim">${i + 1}</td>
-                <td>
-                  <div style="display:flex;align-items:center;gap:8px">
-                    ${v.imageUrl ? `<img src="${v.imageUrl}" data-hide-on-error="1" style="width:20px;height:20px;border-radius:50%;object-fit:cover">` : ""}
-                    <div>
-                      <div style="font-weight:500">${v.name}</div>
-                      <div class="u-fs11-dim">${truncHash(v.address)}</div>
-                    </div>
-                  </div>
-                </td>
-                <td class="u-ta-right-mono">${fmtCompact(v.stake / 1e9)}</td>
-                <td class="u-ta-right-mono">${(v.votingPower / 100).toFixed(2)}%</td>
-                <td class="u-ta-right-mono">${(v.commission / 100).toFixed(1)}%</td>
-                <td class="u-ta-right-mono">${fmtNumber(v.gasPrice)}</td>
+                ${mobileTd("Rank", `${i + 1}`, 'class="u-c-dim"')}
+                ${mobileTd("Validator", `<div style="display:flex;align-items:center;gap:8px">${v.imageUrl ? `<img src="${v.imageUrl}" data-hide-on-error="1" style="width:20px;height:20px;border-radius:50%;object-fit:cover">` : ""}<div><div style="font-weight:500">${v.name}</div><div class="u-fs11-dim">${truncHash(v.address)}</div></div></div>`)}
+                ${mobileTd("Stake", fmtCompact(v.stake / 1e9), 'class="u-ta-right-mono"')}
+                ${mobileTd("Voting %", `${(v.votingPower / 100).toFixed(2)}%`, 'class="u-ta-right-mono"')}
+                ${mobileTd("Commission", `${(v.commission / 100).toFixed(1)}%`, 'class="u-ta-right-mono"')}
+                ${mobileTd("Gas Price", fmtNumber(v.gasPrice), 'class="u-ta-right-mono"')}
               </tr>`).join("")}
             </tbody>
           </table>
@@ -10830,7 +10881,7 @@ async function renderValidators(app, opts = {}) {
     <div class="card">
       <div class="card-header">Validator Set <span class="type-tag">${validators.length} active</span></div>
       <div class="card-body">
-        <table>
+        <table class="mobile-stack-table">
           <thead><tr>
             <th>#</th><th>Validator</th><th class="u-ta-right">Stake (SUI)</th>
             <th class="u-ta-right">Rewards Pool</th>
@@ -10851,23 +10902,15 @@ async function renderValidators(app, opts = {}) {
               if (v.nextCommission !== v.commission) nextChanges.push(`comm: ${(v.nextCommission / 100).toFixed(1)}%`);
               const pendingNet = v.pendingStake - v.pendingWithdraw;
               return `<tr style="cursor:pointer" data-action="validator-open-detail" data-idx="${i}">
-                <td class="u-c-dim">${i + 1}</td>
-                <td>
-                  <div style="display:flex;align-items:center;gap:8px">
-                    ${v.imageUrl ? `<img src="${v.imageUrl}" data-hide-on-error="1" style="width:20px;height:20px;border-radius:50%;object-fit:cover">` : ""}
-                    <div>
-                      <div style="font-weight:500">${v.name}</div>
-                      <div class="u-fs11-dim">${truncHash(v.address)}${nextChanges.length ? ` <span class="u-c-yellow" title="Next epoch changes">&Delta;</span>` : ""}</div>
-                    </div>
-                  </div>
-                </td>
-                <td class="u-ta-right-mono" data-sort-value="${stakeSui}">${fmtCompact(stakeSui)}${pendingNet !== 0 ? `<div style="font-size:10px;color:${pendingNet > 0 ? 'var(--green)' : 'var(--red)'}">${pendingNet > 0 ? '+' : ''}${fmtCompact(pendingNet / 1e9)}</div>` : ""}</td>
-                <td style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--text-dim)" data-sort-value="${rewardsSui}">${fmtCompact(rewardsSui)}</td>
-                <td class="u-ta-right-mono" data-sort-value="${v.votingPower}">${votingPct}%</td>
-                <td class="u-ta-right-mono" data-sort-value="${v.commission}">${(v.commission / 100).toFixed(1)}%</td>
-                <td style="text-align:right;font-family:var(--mono);color:var(--green)" data-sort-value="${estApy}">${estApy.toFixed(2)}%</td>
-                <td class="u-ta-right-mono" data-sort-value="${v.gasPrice}">${fmtNumber(v.gasPrice)}</td>
-                <td style="text-align:right;color:${statusColor};font-size:12px">${statusLabel}</td>
+                ${mobileTd("Rank", `${i + 1}`, 'class="u-c-dim"')}
+                ${mobileTd("Validator", `<div style="display:flex;align-items:center;gap:8px">${v.imageUrl ? `<img src="${v.imageUrl}" data-hide-on-error="1" style="width:20px;height:20px;border-radius:50%;object-fit:cover">` : ""}<div><div style="font-weight:500">${v.name}</div><div class="u-fs11-dim">${truncHash(v.address)}${nextChanges.length ? ` <span class="u-c-yellow" title="Next epoch changes">&Delta;</span>` : ""}</div></div></div>`)}
+                ${mobileTd("Stake", `${fmtCompact(stakeSui)}${pendingNet !== 0 ? `<div style="font-size:10px;color:${pendingNet > 0 ? 'var(--green)' : 'var(--red)'}">${pendingNet > 0 ? '+' : ''}${fmtCompact(pendingNet / 1e9)}</div>` : ""}`, `class="u-ta-right-mono" data-sort-value="${stakeSui}"`)}
+                ${mobileTd("Rewards Pool", fmtCompact(rewardsSui), `style="text-align:right;font-family:var(--mono);font-size:12px;color:var(--text-dim)" data-sort-value="${rewardsSui}"`)}
+                ${mobileTd("Voting %", `${votingPct}%`, `class="u-ta-right-mono" data-sort-value="${v.votingPower}"`)}
+                ${mobileTd("Commission", `${(v.commission / 100).toFixed(1)}%`, `class="u-ta-right-mono" data-sort-value="${v.commission}"`)}
+                ${mobileTd("Est. APY", `${estApy.toFixed(2)}%`, `style="text-align:right;font-family:var(--mono);color:var(--green)" data-sort-value="${estApy}"`)}
+                ${mobileTd("Gas Price", fmtNumber(v.gasPrice), `class="u-ta-right-mono" data-sort-value="${v.gasPrice}"`)}
+                ${mobileTd("Status", statusLabel, `style="text-align:right;color:${statusColor};font-size:12px"`)}
               </tr>`;
             }).join("")}
           </tbody>
@@ -10875,8 +10918,8 @@ async function renderValidators(app, opts = {}) {
       </div>
     </div>
 
-    <div id="validator-detail-modal" data-action="validator-close-overlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center">
-      <div id="validator-detail-content" style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto;padding:24px"></div>
+    <div id="validator-detail-modal" class="validator-detail-modal" data-action="validator-close-overlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center">
+      <div id="validator-detail-content" class="validator-detail-content" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto;padding:24px"></div>
     </div>
   `;
 
@@ -10894,48 +10937,48 @@ async function renderValidators(app, opts = {}) {
     if (v.nextCommission !== v.commission) nextChanges.push(`Commission: ${(v.commission / 100).toFixed(1)}% → ${(v.nextCommission / 100).toFixed(1)}%`);
 
     document.getElementById("validator-detail-content").innerHTML = `
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <div class="validator-detail-header">
         ${v.imageUrl ? `<img src="${v.imageUrl}" data-hide-on-error="1" style="width:40px;height:40px;border-radius:50%;object-fit:cover">` : ""}
-        <div>
+        <div class="validator-detail-heading">
           <div style="font-size:18px;font-weight:600">${v.name}</div>
-          <div style="font-size:12px;color:var(--text-dim);font-family:var(--mono)">${v.address}</div>
-          ${v.projectUrl ? `<a href="${v.projectUrl}" target="_blank" style="font-size:11px;color:var(--accent)">${v.projectUrl}</a>` : ""}
+          <div style="font-size:12px;color:var(--text-dim);font-family:var(--mono);overflow-wrap:anywhere">${v.address}</div>
+          ${v.projectUrl ? `<a href="${v.projectUrl}" target="_blank" style="font-size:11px;color:var(--accent);overflow-wrap:anywhere">${v.projectUrl}</a>` : ""}
         </div>
-        <button data-action="validator-close" style="margin-left:auto;background:none;border:none;color:var(--text-dim);font-size:20px;cursor:pointer">&times;</button>
+        <button data-action="validator-close" class="validator-detail-close">&times;</button>
       </div>
-      ${v.description ? `<div style="font-size:13px;color:var(--text-dim);margin-bottom:16px;line-height:1.4">${v.description}</div>` : ""}
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
-        <div style="padding:12px;background:var(--bg);border-radius:6px">
+      ${v.description ? `<div class="validator-detail-description">${v.description}</div>` : ""}
+      <div class="validator-detail-metrics">
+        <div class="validator-detail-stat">
           <div class="u-fs11-dim">Stake</div>
           <div style="font-family:var(--mono);font-size:16px;font-weight:600">${fmtCompact(stakeSui)} SUI</div>
           <div class="u-fs11-dim">Voting Power: ${(v.votingPower / 100).toFixed(2)}%</div>
         </div>
-        <div style="padding:12px;background:var(--bg);border-radius:6px">
+        <div class="validator-detail-stat">
           <div class="u-fs11-dim">Est. APY</div>
           <div style="font-family:var(--mono);font-size:16px;font-weight:600;color:var(--green)">${estApy.toFixed(2)}%</div>
           <div class="u-fs11-dim">Commission: ${(v.commission / 100).toFixed(1)}%</div>
         </div>
-        <div style="padding:12px;background:var(--bg);border-radius:6px">
+        <div class="validator-detail-stat">
           <div class="u-fs11-dim">Rewards Pool</div>
           <div style="font-family:var(--mono);font-size:16px;font-weight:600">${fmtCompact(rewardsSui)} SUI</div>
           <div class="u-fs11-dim">Exchange Rate: ${v.exchangeRate.toFixed(4)}</div>
         </div>
-        <div style="padding:12px;background:var(--bg);border-radius:6px">
+        <div class="validator-detail-stat">
           <div class="u-fs11-dim">Gas Price</div>
           <div style="font-family:var(--mono);font-size:16px;font-weight:600">${fmtNumber(v.gasPrice)} MIST</div>
           <div class="u-fs11-dim">Since epoch ${v.activationEpoch}</div>
         </div>
       </div>
-      <div style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px">
-        <div style="font-size:13px;font-weight:600;margin-bottom:8px">Pending Changes</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
+      <div class="validator-detail-section">
+        <div class="validator-detail-section-title">Pending Changes</div>
+        <div class="validator-detail-grid">
           <div><span class="u-c-dim">Pending Stake:</span> <span style="color:var(--green);font-family:var(--mono)">+${fmtCompact(pendingStakeSui)} SUI</span></div>
           <div><span class="u-c-dim">Pending Withdraw:</span> <span style="color:var(--red);font-family:var(--mono)">-${fmtCompact(pendingWithdrawSui)} SUI</span></div>
           <div><span class="u-c-dim">Next Epoch Stake:</span> <span class="u-mono">${fmtCompact(nextStakeSui)} SUI</span></div>
         </div>
       </div>
-      ${nextChanges.length ? `<div style="border-top:1px solid var(--border);padding-top:12px">
-        <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--yellow)">Next Epoch Changes</div>
+      ${nextChanges.length ? `<div class="validator-detail-section validator-detail-section--warning">
+        <div class="validator-detail-section-title validator-detail-section-title--warning">Next Epoch Changes</div>
         ${nextChanges.map(c => `<div style="font-size:13px;font-family:var(--mono);padding:2px 0">${c}</div>`).join("")}
       </div>` : ""}
     `;
@@ -11093,13 +11136,13 @@ async function renderCongestion(app) {
     <div class="card u-mb16">
       <div class="card-header">Checkpoint Breakdown</div>
       <div class="card-body">
-        <table>
+        <table class="mobile-stack-table">
           <thead><tr><th>Checkpoint</th><th class="u-ta-right">Transactions</th><th>Time</th></tr></thead>
           <tbody>
             ${cpDigests.reverse().map(c => `<tr>
-              <td><a class="hash-link" href="#/checkpoint/${c.seq}">${fmtNumber(c.seq)}</a></td>
-              <td class="u-ta-right-mono">${c.count}</td>
-              <td>${timeTag(c.ts)}</td>
+              ${mobileTd("Checkpoint", `<a class="hash-link" href="#/checkpoint/${c.seq}">${fmtNumber(c.seq)}</a>`)}
+              ${mobileTd("Transactions", `${c.count}`, 'class="u-ta-right-mono"')}
+              ${mobileTd("Time", timeTag(c.ts))}
             </tr>`).join("")}
           </tbody>
         </table>
@@ -11109,7 +11152,7 @@ async function renderCongestion(app) {
     ${hotShared.length ? `<div class="card u-mb16">
       <div class="card-header">Hot Shared Objects <span class="type-tag">${hotShared.length} contested</span></div>
       <div class="card-body">
-        <table>
+        <table class="mobile-stack-table">
           <thead><tr><th>Object ID</th><th>Type</th><th class="u-ta-right">Unique Txs</th><th class="u-ta-right">Total Touches</th><th class="u-ta-right">% of All Txs</th></tr></thead>
           <tbody>
             ${hotShared.slice(0, 20).map(o => {
@@ -11122,11 +11165,11 @@ async function renderCongestion(app) {
               const pct = totalTxs > 0 ? ((o.uniqueTxs / totalTxs) * 100).toFixed(1) : "0";
               const pctColor = pct >= 20 ? "var(--red)" : pct >= 5 ? "var(--yellow)" : "var(--text-dim)";
               return `<tr>
-                <td>${hashLink(o.addr, '/object/' + o.addr)}</td>
-                <td class="u-fs12">${typeLabel}</td>
-                <td style="text-align:right;font-family:var(--mono);font-weight:600">${o.uniqueTxs}</td>
-                <td class="u-ta-right-mono">${o.count}</td>
-                <td style="text-align:right;font-family:var(--mono);color:${pctColor}">${pct}%</td>
+                ${mobileTd("Object ID", hashLink(o.addr, '/object/' + o.addr))}
+                ${mobileTd("Type", typeLabel, 'class="u-fs12"')}
+                ${mobileTd("Unique Txs", `${o.uniqueTxs}`, 'style="text-align:right;font-family:var(--mono);font-weight:600"')}
+                ${mobileTd("Total Touches", `${o.count}`, 'class="u-ta-right-mono"')}
+                ${mobileTd("% of All Txs", `${pct}%`, `style="text-align:right;font-family:var(--mono);color:${pctColor}"`)}
               </tr>`;
             }).join("")}
           </tbody>
@@ -11137,7 +11180,7 @@ async function renderCongestion(app) {
     <div class="card">
       <div class="card-header">All Objects by Touch Count</div>
       <div class="card-body">
-        ${sorted.length ? `<table>
+        ${sorted.length ? `<table class="mobile-stack-table">
           <thead><tr><th>Object ID</th><th>Type</th><th>Owner</th><th class="u-ta-right">Touches</th><th class="u-ta-right">Txs</th><th>Transactions</th></tr></thead>
           <tbody>
             ${sorted.slice(0, 50).map(o => {
@@ -11151,12 +11194,12 @@ async function renderCongestion(app) {
               const txLinks = o.digests.slice(0, 3).map(d => hashLink(d, '/tx/' + d)).join(" ");
               const more = o.digests.length > 3 ? ` <span style="color:var(--text-dim);font-size:11px">+${o.digests.length - 3}</span>` : "";
               return `<tr>
-                <td>${hashLink(o.addr, '/object/' + o.addr)}</td>
-                <td class="u-fs12">${typeLabel}</td>
-                <td style="color:${ownerColor};font-size:12px">${o.ownerStr}</td>
-                <td style="text-align:right;font-family:var(--mono);font-weight:600">${o.count}</td>
-                <td class="u-ta-right-mono">${o.uniqueTxs}</td>
-                <td>${txLinks}${more}</td>
+                ${mobileTd("Object ID", hashLink(o.addr, '/object/' + o.addr))}
+                ${mobileTd("Type", typeLabel, 'class="u-fs12"')}
+                ${mobileTd("Owner", o.ownerStr, `style="color:${ownerColor};font-size:12px"`)}
+                ${mobileTd("Touches", `${o.count}`, 'style="text-align:right;font-family:var(--mono);font-weight:600"')}
+                ${mobileTd("Txs", `${o.uniqueTxs}`, 'class="u-ta-right-mono"')}
+                ${mobileTd("Transactions", `${txLinks}${more}`)}
               </tr>`;
             }).join("")}
           </tbody>
@@ -11331,7 +11374,7 @@ async function renderEvents(app) {
             </div>
           </div>
           <div class="card-body" id="${groupId}" style="padding:0">
-            <table style="margin:0"><thead><tr><th>Event Type</th><th>Module</th><th>Data</th></tr></thead><tbody>`;
+            <table class="mobile-stack-table" style="margin:0"><thead><tr><th>Event Type</th><th>Module</th><th>Data</th></tr></thead><tbody>`;
         for (let groupEventIdx = 0; groupEventIdx < group.events.length; groupEventIdx += 1) {
           const ev = group.events[groupEventIdx];
           const typeRepr = ev.contents?.type?.repr || "—";
@@ -11350,9 +11393,9 @@ async function renderEvents(app) {
             ? (payload ? "View JSON" : "No JSON")
             : "Load JSON";
           html += `<tr>
-            <td style="font-family:var(--mono);font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${typeRepr}">${typeDisplay}</td>
-            <td class="u-fs12-dim">${modName}</td>
-            <td><button data-action="events-toggle-json" data-row-id="${rowId}" data-tx-digest="${escapeAttr(group.digest)}" data-event-idx="${groupEventIdx}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">${dataBtnLabel}</button></td>
+            ${mobileTd("Event Type", typeDisplay, `style="font-family:var(--mono);font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${typeRepr}"`)}
+            ${mobileTd("Module", modName, 'class="u-fs12-dim"')}
+            ${mobileTd("Data", `<button data-action="events-toggle-json" data-row-id="${rowId}" data-tx-digest="${escapeAttr(group.digest)}" data-event-idx="${groupEventIdx}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">${dataBtnLabel}</button>`)}
           </tr>`;
           const payloadHtml = !payloadKnown
             ? `<div class="u-fs12-dim">JSON payload not loaded.</div>`
@@ -11470,36 +11513,64 @@ function defiConfidenceBadge(level) {
 
 function renderDefiScopeBar({ sampleLabel = "Snapshot", fetchedAt = "", ttlMs = 0, refreshAction = "", leftControls = "", sourceLabel = "Sui GraphQL Mainnet" } = {}) {
   const ttlSec = ttlMs > 0 ? Math.round(ttlMs / 1000) : 0;
+  const hasControls = !!String(leftControls || "").trim();
   const refreshButton = refreshAction
     ? `<button data-action="${escapeAttr(refreshAction)}" class="btn-accent-sm">Refresh</button>`
     : "";
   return `
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="badge" style="background:var(--surface2);color:var(--text)">${escapeHtml(sampleLabel)}</span>
-        ${ttlSec ? `<span class="badge" style="background:var(--surface2);color:var(--text-dim)">TTL ${ttlSec}s</span>` : ""}
-        ${sourceLabel ? `<span class="badge" style="background:var(--surface2);color:var(--text-dim)">${escapeHtml(sourceLabel)}</span>` : ""}
-        ${leftControls || ""}
+    <div class="scope-bar">
+      <div class="scope-bar-main">
+        <div class="scope-bar-badges">
+          <span class="badge" style="background:var(--surface2);color:var(--text)">${escapeHtml(sampleLabel)}</span>
+          ${ttlSec ? `<span class="badge" style="background:var(--surface2);color:var(--text-dim)">TTL ${ttlSec}s</span>` : ""}
+          ${sourceLabel ? `<span class="badge" style="background:var(--surface2);color:var(--text-dim)">${escapeHtml(sourceLabel)}</span>` : ""}
+        </div>
+        ${hasControls ? `<div class="scope-bar-controls">${leftControls}</div>` : ""}
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <div class="scope-bar-meta">
         <span class="u-fs12-dim">Updated ${fetchedAt ? timeAgo(fetchedAt) : "—"}${fetchedAt ? ` · ${fmtTime(fetchedAt)}` : ""}</span>
         ${refreshButton}
       </div>
     </div>
+    ${hasControls ? `
+      <details class="scope-mobile-filters">
+        <summary class="scope-mobile-filters-summary">
+          <div class="scope-mobile-filters-title">Filters</div>
+          <span class="u-fs12-dim">Route controls</span>
+        </summary>
+        <div class="scope-mobile-filters-body">${leftControls}</div>
+      </details>
+    ` : ""}
   `;
 }
 
 function renderDefiSignalsCard(signals = [], title = "Top 3 Signals Now") {
   const rows = (signals || []).filter(Boolean).slice(0, 3);
+  const body = `
+    <div class="card-body" style="padding:8px 16px">
+      ${rows.length ? rows.map((s, i) => `
+        <div style="padding:8px 0;${i < rows.length - 1 ? "border-bottom:1px solid var(--border);" : ""}">
+          <span style="font-family:var(--mono);color:var(--accent);margin-right:6px">${i + 1}.</span>${escapeHtml(s)}
+        </div>`).join("") : `<div class="empty" style="margin:6px 0">No live signals available.</div>`}
+    </div>
+  `;
+  if (uiViewMode !== "advanced") {
+    return `
+      <details class="card u-mb16 coverage-panel">
+        <summary class="card-header coverage-panel-summary">
+          <div class="coverage-panel-summary-title">${escapeHtml(title)}</div>
+          <div class="coverage-panel-summary-meta">
+            <span class="u-fs12-dim">${rows.length ? `${rows.length} current signal${rows.length === 1 ? "" : "s"}` : "No live signals"}</span>
+          </div>
+        </summary>
+        ${body}
+      </details>
+    `;
+  }
   return `
     <div class="card u-mb16">
       <div class="card-header">${title}</div>
-      <div class="card-body" style="padding:8px 16px">
-        ${rows.length ? rows.map((s, i) => `
-          <div style="padding:8px 0;${i < rows.length - 1 ? "border-bottom:1px solid var(--border);" : ""}">
-            <span style="font-family:var(--mono);color:var(--accent);margin-right:6px">${i + 1}.</span>${escapeHtml(s)}
-          </div>`).join("") : `<div class="empty" style="margin:6px 0">No live signals available.</div>`}
-      </div>
+      ${body}
     </div>
   `;
 }
@@ -11817,15 +11888,15 @@ async function renderPackages(app) {
       <div class="card u-mb12">
         <div class="card-header">${title}</div>
         <div class="card-body">
-          ${items.length ? `<table>
+          ${items.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Value</th><th class="u-ta-right">Count</th></tr></thead>
             <tbody>
               ${items.slice(0, 8).map(r => {
                 const v = String(r.value || "");
                 const label = (kind === "object" && v.startsWith("0x")) ? hashLink(v, "/object/" + v) : `<span class="u-mono-12">${escapeHtml(v)}</span>`;
                 return `<tr>
-                  <td>${label}</td>
-                  <td class="u-ta-right-mono">${fmtNumber(r.count)}</td>
+                  ${mobileTd("Value", label)}
+                  ${mobileTd("Count", fmtNumber(r.count), 'class="u-ta-right-mono"')}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -11849,13 +11920,13 @@ async function renderPackages(app) {
             <div class="u-fs12-dim">${fmtNumber(versions.length)} version${versions.length === 1 ? "" : "s"} found</div>
             <button data-action="packages-refresh-detail" class="btn-surface-sm">Refresh Versions</button>
           </div>
-          ${versions.length ? `<table style="margin-bottom:10px">
+          ${versions.length ? `<table class="mobile-stack-table" style="margin-bottom:10px">
             <thead><tr><th>Version</th><th>Address</th><th>Publish Tx</th></tr></thead>
             <tbody>
               ${versions.slice().reverse().slice(0, 10).map(v => `<tr>
-                <td class="u-mono">${fmtNumber(v.version)}</td>
-                <td>${hashLink(v.address, "/object/" + v.address)}</td>
-                <td>${v.txDigest ? hashLink(v.txDigest, "/tx/" + v.txDigest) : '<span class="u-c-dim">—</span>'}</td>
+                ${mobileTd("Version", fmtNumber(v.version), 'class="u-mono"')}
+                ${mobileTd("Address", hashLink(v.address, "/object/" + v.address))}
+                ${mobileTd("Publish Tx", v.txDigest ? hashLink(v.txDigest, "/tx/" + v.txDigest) : '<span class="u-c-dim">—</span>')}
               </tr>`).join("")}
             </tbody>
           </table>` : renderEmpty("No package versions returned.")}
@@ -11963,7 +12034,7 @@ async function renderPackages(app) {
       <div class="card u-mb16">
         <div class="card-header">Package Activity Overview</div>
         <div class="card-body">
-          ${rows.length ? `<table>
+          ${rows.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Package</th><th>Source</th><th>Category</th><th>Conf.</th><th class="u-ta-right">Txs</th><th class="u-ta-right">Calls</th><th class="u-ta-right">Success</th><th class="u-ta-right">Senders</th><th class="u-ta-right">Events</th><th class="u-ta-right">Obj Types</th><th>Latest</th></tr></thead>
             <tbody>
               ${rows.map(r => {
@@ -11971,20 +12042,17 @@ async function renderPackages(app) {
                 const succ = (r.successRate || 0) * 100;
                 const catColor = defiCategoryColor(r.category);
                 return `<tr${isSel ? ` style="background:var(--bg-light)"` : ""}>
-                  <td>
-                    <button data-action="packages-select" data-package="${escapeAttr(r.package)}" style="background:none;border:none;padding:0;margin:0;color:var(--accent);cursor:pointer;font-weight:600">${escapeHtml(r.display || truncHash(r.package, 6))}</button>
-                    <div style="font-size:11px;color:var(--text-dim);font-family:var(--mono)">${r.package}</div>
-                  </td>
-                  <td>${packageSourceBadge(r.source)}</td>
-                  <td><span class="badge" style="color:${catColor};background:${catColor}22">${escapeHtml(r.category || "other")}</span></td>
-                  <td>${defiConfidenceBadge(r.confidence)}</td>
-                  <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
-                  <td class="u-ta-right-mono">${fmtNumber(r.callCount)}</td>
-                  <td class="u-ta-right-mono">${succ.toFixed(1)}%</td>
-                  <td class="u-ta-right-mono">${fmtNumber(r.uniqueSenders)}</td>
-                  <td class="u-ta-right-mono">${fmtNumber((r.topEventTypes || []).reduce((s, e) => s + e.count, 0))}</td>
-                  <td class="u-ta-right-mono">${fmtNumber((r.topObjectTypes || []).length)}</td>
-                  <td>${timeTag(r.latestTs)}</td>
+                  ${mobileTd("Package", `<button data-action="packages-select" data-package="${escapeAttr(r.package)}" style="background:none;border:none;padding:0;margin:0;color:var(--accent);cursor:pointer;font-weight:600">${escapeHtml(r.display || truncHash(r.package, 6))}</button><div style="font-size:11px;color:var(--text-dim);font-family:var(--mono)">${r.package}</div>`)}
+                  ${mobileTd("Source", packageSourceBadge(r.source))}
+                  ${mobileTd("Category", `<span class="badge" style="color:${catColor};background:${catColor}22">${escapeHtml(r.category || "other")}</span>`)}
+                  ${mobileTd("Confidence", defiConfidenceBadge(r.confidence))}
+                  ${mobileTd("Txs", fmtNumber(r.txCount), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Calls", fmtNumber(r.callCount), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Success", `${succ.toFixed(1)}%`, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Senders", fmtNumber(r.uniqueSenders), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Events", fmtNumber((r.topEventTypes || []).reduce((s, e) => s + e.count, 0)), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Obj Types", fmtNumber((r.topObjectTypes || []).length), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Latest", timeTag(r.latestTs))}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -12028,16 +12096,16 @@ async function renderPackages(app) {
             <div class="card" style="margin-top:12px">
               <div class="card-header">Recent Transactions</div>
               <div class="card-body">
-                ${(selected.recentTxs || []).length ? `<table>
+                ${(selected.recentTxs || []).length ? `<table class="mobile-stack-table">
                   <thead><tr><th>Digest</th><th>Status</th><th>Sender</th><th class="u-ta-right">Calls</th><th>Modules</th><th>Time</th></tr></thead>
                   <tbody>
                     ${(selected.recentTxs || []).map(tx => `<tr>
-                      <td>${hashLink(tx.digest, "/tx/" + tx.digest)}</td>
-                      <td>${statusBadge(tx.status)}</td>
-                      <td>${tx.sender ? hashLink(tx.sender, "/address/" + tx.sender) : '<span class="u-c-dim">—</span>'}</td>
-                      <td class="u-ta-right-mono">${fmtNumber(tx.callCount)}</td>
-                      <td class="u-fs12-dim">${escapeHtml((tx.modules || []).slice(0, 4).join(", ") || "—")}</td>
-                      <td>${timeTag(tx.timestamp)}</td>
+                      ${mobileTd("Digest", hashLink(tx.digest, "/tx/" + tx.digest))}
+                      ${mobileTd("Status", statusBadge(tx.status))}
+                      ${mobileTd("Sender", tx.sender ? hashLink(tx.sender, "/address/" + tx.sender) : '<span class="u-c-dim">—</span>')}
+                      ${mobileTd("Calls", fmtNumber(tx.callCount), 'class="u-ta-right-mono"')}
+                      ${mobileTd("Modules", escapeHtml((tx.modules || []).slice(0, 4).join(", ") || "—"), 'class="u-fs12-dim"')}
+                      ${mobileTd("Time", timeTag(tx.timestamp))}
                     </tr>`).join("")}
                   </tbody>
                 </table>` : renderEmpty("No recent package transactions.")}
@@ -12051,13 +12119,13 @@ async function renderPackages(app) {
       <div class="card">
         <div class="card-header">Unresolved Package Queue <span class="type-tag">Top Unknowns</span></div>
         <div class="card-body">
-          ${unresolvedRows.length ? `<table>
+          ${unresolvedRows.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Package</th><th class="u-ta-right">Tx Count</th><th class="u-ta-right">Call Count</th></tr></thead>
             <tbody>
               ${unresolvedRows.map(r => `<tr>
-                <td>${hashLink(r.package, "/object/" + r.package)}</td>
-                <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
-                <td class="u-ta-right-mono">${fmtNumber(r.callCount)}</td>
+                ${mobileTd("Package", hashLink(r.package, "/object/" + r.package))}
+                ${mobileTd("Tx Count", fmtNumber(r.txCount), 'class="u-ta-right-mono"')}
+                ${mobileTd("Call Count", fmtNumber(r.callCount), 'class="u-ta-right-mono"')}
               </tr>`).join("")}
             </tbody>
           </table>` : renderEmpty("No unresolved packages in current sample.")}
@@ -12474,21 +12542,21 @@ async function renderDefiOverview(app) {
       <div class="card u-mb16">
         <div class="card-header">Top Protocol Activity <span class="type-tag">Selected Window</span></div>
         <div class="card-body">
-          ${top.length ? `<table>
+          ${top.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Protocol</th><th>Category</th><th>Confidence</th><th class="u-ta-right">Tx Count</th><th class="u-ta-right">Success</th><th>Package</th><th>Latest Tx</th><th>Time</th></tr></thead>
             <tbody>
               ${top.map(p => {
                 const succ = p.txCount ? (p.successCount / p.txCount * 100) : 0;
                 const color = defiCategoryColor(p.category);
                 return `<tr>
-                  <td class="u-fw-600">${escapeHtml(p.display)}</td>
-                  <td><span class="badge" style="color:${color};background:${color}22">${escapeHtml(p.category)}</span></td>
-                  <td>${defiConfidenceBadge(p.confidence)}</td>
-                  <td class="u-ta-right-mono">${fmtNumber(p.txCount)}</td>
-                  <td class="u-ta-right-mono">${succ.toFixed(1)}%</td>
-                  <td>${p.package ? hashLink(p.package, '/object/' + p.package) : '<span class="u-c-dim">—</span>'}</td>
-                  <td>${p.latestTx ? hashLink(p.latestTx, '/tx/' + p.latestTx) : '<span class="u-c-dim">—</span>'}</td>
-                  <td>${timeTag(p.latestTs)}</td>
+                  ${mobileTd("Protocol", escapeHtml(p.display), 'class="u-fw-600"')}
+                  ${mobileTd("Category", `<span class="badge" style="color:${color};background:${color}22">${escapeHtml(p.category)}</span>`)}
+                  ${mobileTd("Confidence", defiConfidenceBadge(p.confidence))}
+                  ${mobileTd("Tx Count", fmtNumber(p.txCount), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Success", `${succ.toFixed(1)}%`, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Package", p.package ? hashLink(p.package, '/object/' + p.package) : '<span class="u-c-dim">—</span>')}
+                  ${mobileTd("Latest Tx", p.latestTx ? hashLink(p.latestTx, '/tx/' + p.latestTx) : '<span class="u-c-dim">—</span>')}
+                  ${mobileTd("Time", timeTag(p.latestTs))}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -12499,16 +12567,16 @@ async function renderDefiOverview(app) {
       <div class="card u-mb16">
         <div class="card-header">Category Breakdown</div>
         <div class="card-body">
-          ${cats.length ? `<table>
+          ${cats.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Category</th><th class="u-ta-right">Tx Count</th><th class="u-ta-right">Share</th></tr></thead>
             <tbody>
               ${cats.map(c => {
                 const share = c.txCount / totalCategoryTx * 100;
                 const color = defiCategoryColor(c.category);
                 return `<tr>
-                  <td><span class="badge" style="color:${color};background:${color}22">${escapeHtml(c.category)}</span></td>
-                  <td class="u-ta-right-mono">${fmtNumber(c.txCount)}</td>
-                  <td class="u-ta-right-mono">${share.toFixed(1)}%</td>
+                  ${mobileTd("Category", `<span class="badge" style="color:${color};background:${color}22">${escapeHtml(c.category)}</span>`)}
+                  ${mobileTd("Tx Count", fmtNumber(c.txCount), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Share", `${share.toFixed(1)}%`, 'class="u-ta-right-mono"')}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -12868,19 +12936,19 @@ async function renderDefiDex(app) {
       <div class="card u-mb16">
         <div class="card-header">DEX Protocol Rankings</div>
         <div class="card-body">
-          ${top.length ? `<table>
+          ${top.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Protocol</th><th>Confidence</th><th class="u-ta-right">Tx Count</th><th class="u-ta-right">Success</th><th>Package</th><th>Latest Tx</th><th>Time</th></tr></thead>
             <tbody>
               ${top.map(p => {
                 const succ = p.txCount ? (p.successCount / p.txCount * 100) : 0;
                 return `<tr>
-                  <td class="u-fw-600">${escapeHtml(p.display)}</td>
-                  <td>${defiConfidenceBadge(p.confidence)}</td>
-                  <td class="u-ta-right-mono">${fmtNumber(p.txCount)}</td>
-                  <td class="u-ta-right-mono">${succ.toFixed(1)}%</td>
-                  <td>${p.package ? hashLink(p.package, '/object/' + p.package) : "—"}</td>
-                  <td>${p.latestTx ? hashLink(p.latestTx, '/tx/' + p.latestTx) : "—"}</td>
-                  <td>${timeTag(p.latestTs)}</td>
+                  ${mobileTd("Protocol", escapeHtml(p.display), 'class="u-fw-600"')}
+                  ${mobileTd("Confidence", defiConfidenceBadge(p.confidence))}
+                  ${mobileTd("Tx Count", fmtNumber(p.txCount), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Success", `${succ.toFixed(1)}%`, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Package", p.package ? hashLink(p.package, '/object/' + p.package) : "—")}
+                  ${mobileTd("Latest Tx", p.latestTx ? hashLink(p.latestTx, '/tx/' + p.latestTx) : "—")}
+                  ${mobileTd("Time", timeTag(p.latestTs))}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -12893,13 +12961,13 @@ async function renderDefiDex(app) {
         <div class="card-header">Active Unclassified Packages <span class="type-tag">Fallback</span></div>
         <div class="card-body">
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">No DEX-tagged protocols were resolved. Showing high-activity unresolved packages from the same sampling window.</div>
-          ${fallbackRows.length ? `<table>
+          ${fallbackRows.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Package</th><th class="u-ta-right">Tx Count</th><th class="u-ta-right">Call Count</th></tr></thead>
             <tbody>
               ${fallbackRows.map(r => `<tr>
-                <td>${hashLink(r.package, '/object/' + r.package)}</td>
-                <td class="u-ta-right-mono">${fmtNumber(r.txCount)}</td>
-                <td class="u-ta-right-mono">${fmtNumber(r.callCount)}</td>
+                ${mobileTd("Package", hashLink(r.package, '/object/' + r.package))}
+                ${mobileTd("Tx Count", fmtNumber(r.txCount), 'class="u-ta-right-mono"')}
+                ${mobileTd("Call Count", fmtNumber(r.callCount), 'class="u-ta-right-mono"')}
               </tr>`).join("")}
             </tbody>
           </table>` : `<div style="padding:8px 0">${renderLoading()}</div>`}
@@ -12909,18 +12977,18 @@ async function renderDefiDex(app) {
       <div class="card">
         <div class="card-header">Recent DEX Transactions</div>
         <div class="card-body">
-          ${recent.length ? `<table>
+          ${recent.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Tx</th><th>Protocols</th><th>Sender</th><th>Status</th><th>Time</th></tr></thead>
             <tbody>
               ${recent.slice(0, 60).map(tx => {
                 const labels = tx.protocols.filter(p => p.category === "dex").map(p => p.display);
                 const shown = labels.length ? labels.join(", ") : tx.protocols.map(p => p.display).join(", ");
                 return `<tr>
-                  <td>${hashLink(tx.digest, '/tx/' + tx.digest)}</td>
-                  <td class="u-fs12">${escapeHtml(shown)}</td>
-                  <td>${tx.sender ? hashLink(tx.sender, '/address/' + tx.sender) : "—"}</td>
-                  <td>${statusBadge(tx.status)}</td>
-                  <td>${timeTag(tx.timestamp)}</td>
+                  ${mobileTd("Tx", hashLink(tx.digest, '/tx/' + tx.digest))}
+                  ${mobileTd("Protocols", escapeHtml(shown), 'class="u-fs12"')}
+                  ${mobileTd("Sender", tx.sender ? hashLink(tx.sender, '/address/' + tx.sender) : "—")}
+                  ${mobileTd("Status", statusBadge(tx.status))}
+                  ${mobileTd("Time", timeTag(tx.timestamp))}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -13147,15 +13215,15 @@ async function renderDefiStablecoins(app) {
       <div class="card u-mb16">
         <div class="card-header">Supply + Flow Table</div>
         <div class="card-body">
-          ${coins.length ? `<table>
+          ${coins.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Symbol</th><th class="u-ta-right">Supply (USD)</th><th class="u-ta-right">Share</th><th class="u-ta-right">Recent Flow (USD)</th><th class="u-ta-right">Changes</th></tr></thead>
             <tbody>
               ${coins.map(c => `<tr>
-                <td class="u-fw-600">${c.symbol}</td>
-                <td class="u-ta-right-mono">$${fmtCompact(c.supply)}</td>
-                <td class="u-ta-right-mono">${c.pct.toFixed(2)}%</td>
-                <td class="u-ta-right-mono">$${fmtCompact(c.recentFlowUsd || 0)}</td>
-                <td class="u-ta-right-mono">${fmtNumber(c.recentChanges || 0)}</td>
+                ${mobileTd("Symbol", c.symbol, 'class="u-fw-600"')}
+                ${mobileTd("Supply", `$${fmtCompact(c.supply)}`, 'class="u-ta-right-mono"')}
+                ${mobileTd("Share", `${c.pct.toFixed(2)}%`, 'class="u-ta-right-mono"')}
+                ${mobileTd("Recent Flow", `$${fmtCompact(c.recentFlowUsd || 0)}`, 'class="u-ta-right-mono"')}
+                ${mobileTd("Changes", fmtNumber(c.recentChanges || 0), 'class="u-ta-right-mono"')}
               </tr>`).join("")}
             </tbody>
           </table>` : renderEmpty("No stablecoin table data found.")}
@@ -13165,18 +13233,18 @@ async function renderDefiStablecoins(app) {
       <div class="card">
         <div class="card-header">Recent Large Stablecoin Flows</div>
         <div class="card-body">
-          ${flows.length ? `<table>
+          ${flows.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Token</th><th class="u-ta-right">Amount</th><th class="u-ta-right">USD</th><th>Protocol</th><th>Conf.</th><th>Owner</th><th>Tx</th><th>Time</th></tr></thead>
             <tbody>
               ${flows.slice(0, 60).map(f => `<tr>
-                <td class="u-fw-600">${f.symbol}</td>
-                <td class="u-ta-right-mono">${f.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-                <td class="u-ta-right-mono">$${fmtCompact(f.usdValue)}</td>
-                <td class="u-fs12">${escapeHtml(f.protocol)}</td>
-                <td>${defiConfidenceBadge(f.protocolConfidence)}</td>
-                <td>${f.owner ? hashLink(f.owner, '/address/' + f.owner) : "—"}</td>
-                <td>${hashLink(f.digest, '/tx/' + f.digest)}</td>
-                <td>${timeTag(f.timestamp)}</td>
+                ${mobileTd("Token", f.symbol, 'class="u-fw-600"')}
+                ${mobileTd("Amount", f.amount.toLocaleString(undefined, { maximumFractionDigits: 2 }), 'class="u-ta-right-mono"')}
+                ${mobileTd("USD", `$${fmtCompact(f.usdValue)}`, 'class="u-ta-right-mono"')}
+                ${mobileTd("Protocol", escapeHtml(f.protocol), 'class="u-fs12"')}
+                ${mobileTd("Confidence", defiConfidenceBadge(f.protocolConfidence))}
+                ${mobileTd("Owner", f.owner ? hashLink(f.owner, '/address/' + f.owner) : "—")}
+                ${mobileTd("Tx", hashLink(f.digest, '/tx/' + f.digest))}
+                ${mobileTd("Time", timeTag(f.timestamp))}
               </tr>`).join("")}
             </tbody>
           </table>` : renderEmpty("No sampled stablecoin flow data for current filters.")}
@@ -13329,23 +13397,23 @@ async function renderDefiLst(app) {
       <div class="card">
         <div class="card-header">LST Details</div>
         <div class="card-body">
-          ${rows.length ? `<table>
+          ${rows.length ? `<table class="mobile-stack-table">
             <thead><tr><th>LST</th><th>Protocol</th><th>Confidence</th><th class="u-ta-right">Rate (SUI)</th><th class="u-ta-right">Premium</th><th class="u-ta-right">Implied Price</th><th class="u-ta-right">Supply</th><th class="u-ta-right">Market Cap</th><th>Rate Source</th><th>Supply Source</th><th>Object</th></tr></thead>
             <tbody>
               ${rows.map(r => {
                 const premColor = r.premiumPct > 0.5 ? "var(--green)" : r.premiumPct < -0.5 ? "var(--red)" : "var(--text)";
                 return `<tr>
-                  <td class="u-fw-600">${r.symbol}</td>
-                  <td>${escapeHtml(r.protocol)}</td>
-                  <td>${defiConfidenceBadge(r.confidence)}</td>
-                  <td class="u-ta-right-mono">${r.exchangeRate.toFixed(6)}x</td>
-                  <td style="text-align:right;font-family:var(--mono);color:${premColor}">${r.premiumPct >= 0 ? "+" : ""}${r.premiumPct.toFixed(2)}%</td>
-                  <td class="u-ta-right-mono">$${r.impliedPrice.toFixed(4)}</td>
-                  <td class="u-ta-right-mono">${fmtCompact(r.supply)}</td>
-                  <td class="u-ta-right-mono">$${fmtCompact(r.marketCap)}</td>
-                  <td class="u-fs12-dim">${escapeHtml(r.rateSource || "—")}</td>
-                  <td class="u-fs12-dim">${escapeHtml(r.supplySource || "—")}</td>
-                  <td>${r.sourceObj ? hashLink(r.sourceObj, '/object/' + r.sourceObj) : '<span class="u-c-dim">derived</span>'}</td>
+                  ${mobileTd("LST", r.symbol, 'class="u-fw-600"')}
+                  ${mobileTd("Protocol", escapeHtml(r.protocol))}
+                  ${mobileTd("Confidence", defiConfidenceBadge(r.confidence))}
+                  ${mobileTd("Rate", `${r.exchangeRate.toFixed(6)}x`, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Premium", `${r.premiumPct >= 0 ? "+" : ""}${r.premiumPct.toFixed(2)}%`, `style="text-align:right;font-family:var(--mono);color:${premColor}"`)}
+                  ${mobileTd("Implied Price", `$${r.impliedPrice.toFixed(4)}`, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Supply", fmtCompact(r.supply), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Market Cap", `$${fmtCompact(r.marketCap)}`, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Rate Source", escapeHtml(r.rateSource || "—"), 'class="u-fs12-dim"')}
+                  ${mobileTd("Supply Source", escapeHtml(r.supplySource || "—"), 'class="u-fs12-dim"')}
+                  ${mobileTd("Object", r.sourceObj ? hashLink(r.sourceObj, '/object/' + r.sourceObj) : '<span class="u-c-dim">derived</span>')}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -13499,22 +13567,22 @@ async function renderDefiFlows(app) {
       <div class="card">
         <div class="card-header">Top Flows by USD</div>
         <div class="card-body">
-          ${rows.length ? `<table>
+          ${rows.length ? `<table class="mobile-stack-table">
             <thead><tr><th>Protocol</th><th>Token</th><th>Conf.</th><th class="u-ta-right">Amount</th><th class="u-ta-right">USD</th><th>From</th><th>To</th><th>Tx</th><th>Status</th><th>Time</th></tr></thead>
             <tbody>
               ${rows.slice(0, 100).map(r => {
                 const catColor = defiCategoryColor(r.category);
                 return `<tr>
-                  <td><span class="badge" style="color:${catColor};background:${catColor}22">${escapeHtml(r.protocol)}</span></td>
-                  <td class="u-fw-600">${r.symbol}</td>
-                  <td>${defiConfidenceBadge(r.protocolConfidence)}</td>
-                  <td class="u-ta-right-mono">${r.amount.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
-                  <td class="u-ta-right-mono">$${fmtCompact(r.usdValue)}</td>
-                  <td>${r.from ? hashLink(r.from, '/address/' + r.from) : "—"}</td>
-                  <td>${r.to ? hashLink(r.to, '/address/' + r.to) : '<span class="u-c-dim">contract</span>'}</td>
-                  <td>${hashLink(r.digest, '/tx/' + r.digest)}</td>
-                  <td>${statusBadge(r.status)}</td>
-                  <td>${timeTag(r.timestamp)}</td>
+                  ${mobileTd("Protocol", `<span class="badge" style="color:${catColor};background:${catColor}22">${escapeHtml(r.protocol)}</span>`)}
+                  ${mobileTd("Token", r.symbol, 'class="u-fw-600"')}
+                  ${mobileTd("Confidence", defiConfidenceBadge(r.protocolConfidence))}
+                  ${mobileTd("Amount", r.amount.toLocaleString(undefined, { maximumFractionDigits: 4 }), 'class="u-ta-right-mono"')}
+                  ${mobileTd("USD", `$${fmtCompact(r.usdValue)}`, 'class="u-ta-right-mono"')}
+                  ${mobileTd("From", r.from ? hashLink(r.from, '/address/' + r.from) : "—")}
+                  ${mobileTd("To", r.to ? hashLink(r.to, '/address/' + r.to) : '<span class="u-c-dim">contract</span>')}
+                  ${mobileTd("Tx", hashLink(r.digest, '/tx/' + r.digest))}
+                  ${mobileTd("Status", statusBadge(r.status))}
+                  ${mobileTd("Time", timeTag(r.timestamp))}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -13806,7 +13874,7 @@ async function renderDefiRates(app) {
       <div class="card">
         <div class="card-header">Cross-Protocol Lending Snapshot</div>
         <div class="card-body">
-          <table>
+          <table class="mobile-stack-table">
             <thead><tr><th>Protocol</th><th>Conf.</th><th class="u-ta-right">Supply APR</th><th class="u-ta-right">Borrow APR</th><th class="u-ta-right">Utilization</th><th class="u-ta-right">Total Supply</th><th class="u-ta-right">Total Borrow</th><th class="u-ta-right">Spread</th><th>Source</th><th>Status</th></tr></thead>
             <tbody>
               ${rows.map(r => {
@@ -13826,16 +13894,16 @@ async function renderDefiRates(app) {
                 const fmtSupplyUsd = r.error || !supplyUsd ? "—" : fmtUsdFromFloat(supplyUsd);
                 const fmtBorrowUsd = r.error || !borrowUsd ? "—" : fmtUsdFromFloat(borrowUsd);
                 return `<tr>
-                  <td class="u-fw-600">${escapeHtml(r.protocol)}</td>
-                  <td>${defiConfidenceBadge(r.error ? "low" : "high")}</td>
-                  <td style="text-align:right;font-family:var(--mono);color:var(--green)">${fmtApr(r.supplyBps)}</td>
-                  <td style="text-align:right;font-family:var(--mono);color:var(--yellow)">${fmtApr(r.borrowBps)}</td>
-                  <td style="text-align:right;font-family:var(--mono);color:${utilColor}">${fmtUtil(r.utilization)}</td>
-                  <td class="u-ta-right-mono">${fmtSupplyUsd}</td>
-                  <td class="u-ta-right-mono">${fmtBorrowUsd}</td>
-                  <td class="u-ta-right-mono">${fmtApr(spreadBps)}</td>
-                  <td>${source}</td>
-                  <td>${status}</td>
+                  ${mobileTd("Protocol", escapeHtml(r.protocol), 'class="u-fw-600"')}
+                  ${mobileTd("Confidence", defiConfidenceBadge(r.error ? "low" : "high"))}
+                  ${mobileTd("Supply APR", fmtApr(r.supplyBps), 'style="text-align:right;font-family:var(--mono);color:var(--green)"')}
+                  ${mobileTd("Borrow APR", fmtApr(r.borrowBps), 'style="text-align:right;font-family:var(--mono);color:var(--yellow)"')}
+                  ${mobileTd("Utilization", fmtUtil(r.utilization), `style="text-align:right;font-family:var(--mono);color:${utilColor}"`)}
+                  ${mobileTd("Total Supply", fmtSupplyUsd, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Total Borrow", fmtBorrowUsd, 'class="u-ta-right-mono"')}
+                  ${mobileTd("Spread", fmtApr(spreadBps), 'class="u-ta-right-mono"')}
+                  ${mobileTd("Source", source)}
+                  ${mobileTd("Status", status)}
                 </tr>`;
               }).join("")}
             </tbody>
@@ -13946,6 +14014,10 @@ async function renderProtocolConfig(app) {
       sampleLabel: `${fmtNumber(configs.length)} config entries + ${fmtNumber(flags.length)} flags`,
       fetchedAt,
       sourceLabel: "Sui GraphQL Mainnet · chainIdentifier + serviceConfig + protocolConfigs",
+      leftControls: `
+        <span class="u-fs12-dim">Search</span>
+        <input type="text" data-action="proto-filter" value="${escapeAttr(configFilter)}" placeholder="Search configs and flags..." class="ui-control" style="min-width:220px" />
+      `,
     });
     html += `<div class="stats-grid u-mb16">
       <div class="stat-box"><div class="stat-label">Protocol Version</div><div class="stat-value">${pc.protocolVersion}</div></div>
@@ -13955,32 +14027,27 @@ async function renderProtocolConfig(app) {
       <div class="stat-box"><div class="stat-label">Query Timeout</div><div class="stat-value">${fmtNumber(Number(serviceConfig.queryTimeoutMs || 0))}ms</div><div class="stat-sub">maxDepth ${fmtNumber(Number(serviceConfig.maxQueryDepth || 0))}</div></div>
     </div>`;
 
-    // Filter
-    html += `<div class="u-mb12">
-      <input id="proto-filter" type="text" placeholder="Search configs and flags..." value="${configFilter}" style="width:100%;max-width:400px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px" />
-    </div>`;
-
     // Two-column layout
-    html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">`;
+    html += `<div class="protocol-config-grid">`;
 
     // Config Parameters
-    html += `<div class="card" style="overflow:auto;max-height:70vh">
-      <h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0;position:sticky;top:0;background:var(--card);z-index:1">Parameters (${filteredConfigs.length})</h3>
-      <table class="u-m0"><tbody>`;
+    html += `<div class="card protocol-config-pane">
+      <h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0;position:sticky;top:0;background:var(--surface);z-index:1">Parameters (${filteredConfigs.length})</h3>
+      <table class="mobile-stack-table u-m0"><tbody>`;
     for (const c of filteredConfigs) {
       const isNum = c.value && /^\d+$/.test(c.value);
-      html += `<tr><td style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:4px 8px">${c.key}</td><td style="font-family:var(--mono);font-size:11px;padding:4px 8px;color:${isNum ? 'var(--accent)' : 'var(--text)'}">${c.value ?? "null"}</td></tr>`;
+      html += `<tr>${mobileTd("Key", c.key, 'style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:4px 8px"')}${mobileTd("Value", `${c.value ?? "null"}`, `style="font-family:var(--mono);font-size:11px;padding:4px 8px;color:${isNum ? 'var(--accent)' : 'var(--text)'}"`)}</tr>`;
     }
     html += `</tbody></table></div>`;
 
     // Feature Flags
-    html += `<div class="card" style="overflow:auto;max-height:70vh">
-      <h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0;position:sticky;top:0;background:var(--card);z-index:1">Feature Flags (${filteredFlags.length})</h3>
-      <table class="u-m0"><tbody>`;
+    html += `<div class="card protocol-config-pane">
+      <h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0;position:sticky;top:0;background:var(--surface);z-index:1">Feature Flags (${filteredFlags.length})</h3>
+      <table class="mobile-stack-table u-m0"><tbody>`;
     for (const f of filteredFlags) {
       const color = f.value ? "var(--green)" : "var(--red)";
       const label = f.value ? "enabled" : "disabled";
-      html += `<tr><td style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:4px 8px">${f.key}</td><td style="padding:4px 8px"><span class="badge" style="color:${color};background:${color}20;font-size:10px">${label}</span></td></tr>`;
+      html += `<tr>${mobileTd("Flag", f.key, 'style="font-family:var(--mono);font-size:11px;color:var(--text-dim);padding:4px 8px"')}${mobileTd("State", `<span class="badge" style="color:${color};background:${color}20;font-size:10px">${label}</span>`, 'style="padding:4px 8px"')}</tr>`;
     }
     html += `</tbody></table></div>`;
 
@@ -13997,7 +14064,7 @@ async function renderProtocolConfig(app) {
   app._protoInputHandler = (ev) => {
     const target = ev.target;
     if (!(target instanceof Element)) return;
-    if (target.id !== "proto-filter") return;
+    if (target.getAttribute("data-action") !== "proto-filter") return;
     _debouncedProtoFilter(target.value || "");
   };
   app.addEventListener("input", app._protoInputHandler);
@@ -14041,14 +14108,14 @@ async function renderDocs(app) {
     <div class="card u-mb16">
       <div class="card-header">Data Sources & Refresh</div>
       <div class="card-body">
-        <table>
+        <table class="mobile-stack-table">
           <thead><tr><th>Dataset</th><th>Primary Source</th><th>Refresh Pattern</th><th>Notes</th></tr></thead>
           <tbody>
-            <tr><td>Core chain (tx/checkpoint/object)</td><td>Sui GraphQL</td><td>On page load; some pages auto-refresh</td><td>Canonical chain-state data.</td></tr>
-            <tr><td>Overview top metrics</td><td>Sui GraphQL</td><td>Auto-refresh ~5s</td><td>For fast network pulse.</td></tr>
-            <tr><td>Overview epoch trends</td><td>Sui GraphQL <code>epochs</code> root</td><td>TTL-cached (~60s)</td><td>Historical epoch throughput and gas trend.</td></tr>
-            <tr><td>DeFi metrics</td><td>Sui GraphQL + on-chain objects</td><td>TTL-cached per page (shown in scope bar)</td><td>Explicit update time shown on each page.</td></tr>
-            <tr><td>SUI spot context</td><td>DeepBook SUI/USDC path</td><td>Short TTL</td><td>Used for derived USD lenses.</td></tr>
+            <tr>${mobileTd("Dataset", "Core chain (tx/checkpoint/object)")}${mobileTd("Primary Source", "Sui GraphQL")}${mobileTd("Refresh Pattern", "On page load; some pages auto-refresh")}${mobileTd("Notes", "Canonical chain-state data.")}</tr>
+            <tr>${mobileTd("Dataset", "Overview top metrics")}${mobileTd("Primary Source", "Sui GraphQL")}${mobileTd("Refresh Pattern", "Auto-refresh ~5s")}${mobileTd("Notes", "For fast network pulse.")}</tr>
+            <tr>${mobileTd("Dataset", "Overview epoch trends")}${mobileTd("Primary Source", 'Sui GraphQL <code>epochs</code> root')}${mobileTd("Refresh Pattern", "TTL-cached (~60s)")}${mobileTd("Notes", "Historical epoch throughput and gas trend.")}</tr>
+            <tr>${mobileTd("Dataset", "DeFi metrics")}${mobileTd("Primary Source", "Sui GraphQL + on-chain objects")}${mobileTd("Refresh Pattern", "TTL-cached per page (shown in scope bar)")}${mobileTd("Notes", "Explicit update time shown on each page.")}</tr>
+            <tr>${mobileTd("Dataset", "SUI spot context")}${mobileTd("Primary Source", "DeepBook SUI/USDC path")}${mobileTd("Refresh Pattern", "Short TTL")}${mobileTd("Notes", "Used for derived USD lenses.")}</tr>
           </tbody>
         </table>
       </div>
@@ -14130,35 +14197,35 @@ async function renderSimulator(app) {
 
       // Balance Changes
       if (balances.length) {
-        html += `<div class="card u-mb12"><h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0">Balance Changes</h3><table class="u-m0"><thead><tr><th>Coin</th><th>Amount</th><th>Owner</th></tr></thead><tbody>`;
+        html += `<div class="card u-mb12"><h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0">Balance Changes</h3><table class="mobile-stack-table u-m0"><thead><tr><th>Coin</th><th>Amount</th><th>Owner</th></tr></thead><tbody>`;
         for (const b of balances) {
           const c = fmtCoinWithMeta(b.amount, b.coinType?.repr);
           const color = c.raw >= 0 ? "var(--green)" : "var(--red)";
-          html += `<tr><td class="u-mono-12">${c.name}</td><td style="font-family:var(--mono);font-size:12px;color:${color}">${c.sign}${c.abs}</td><td>${b.owner?.address ? hashLink(b.owner.address, '/address/' + b.owner.address) : "—"}</td></tr>`;
+          html += `<tr>${mobileTd("Coin", c.name, 'class="u-mono-12"')}${mobileTd("Amount", `${c.sign}${c.abs}`, `style="font-family:var(--mono);font-size:12px;color:${color}"`)}${mobileTd("Owner", b.owner?.address ? hashLink(b.owner.address, '/address/' + b.owner.address) : "—")}</tr>`;
         }
         html += `</tbody></table></div>`;
       }
 
       // Object Changes
       if (objChanges.length) {
-        html += `<div class="card u-mb12"><h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0">Object Changes</h3><table class="u-m0"><thead><tr><th>Object</th><th>Change</th><th>Type</th></tr></thead><tbody>`;
+        html += `<div class="card u-mb12"><h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0">Object Changes</h3><table class="mobile-stack-table u-m0"><thead><tr><th>Object</th><th>Change</th><th>Type</th></tr></thead><tbody>`;
         for (const o of objChanges) {
           const change = o.idCreated ? '<span class="badge badge-success">Created</span>' : o.idDeleted ? '<span class="badge badge-fail">Deleted</span>' : '<span class="badge">Mutated</span>';
           const typeRepr = o.outputState?.asMoveObject?.contents?.type?.repr || o.inputState?.asMoveObject?.contents?.type?.repr || "";
-          html += `<tr><td>${hashLink(o.address, '/object/' + o.address)}</td><td>${change}</td><td class="u-mono-11-dim">${shortType(typeRepr)}</td></tr>`;
+          html += `<tr>${mobileTd("Object", hashLink(o.address, '/object/' + o.address))}${mobileTd("Change", change)}${mobileTd("Type", shortType(typeRepr), 'class="u-mono-11-dim"')}</tr>`;
         }
         html += `</tbody></table></div>`;
       }
 
       // Events
       if (events.length) {
-        html += `<div class="card u-mb12"><h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0">Events (${events.length})</h3><table class="u-m0"><thead><tr><th>Type</th><th>Data</th></tr></thead><tbody>`;
+        html += `<div class="card u-mb12"><h3 style="font-size:14px;padding:12px 16px;border-bottom:1px solid var(--border);margin:0">Events (${events.length})</h3><table class="mobile-stack-table u-m0"><thead><tr><th>Type</th><th>Data</th></tr></thead><tbody>`;
         events.forEach((ev, idx) => {
           const typeRepr = ev.contents?.type?.repr || "—";
           const hasJson = ev.contents?.json && Object.keys(ev.contents.json).length > 0;
           const keyCount = hasJson ? Object.keys(ev.contents.json).length : 0;
           const simRowId = `sim-evt-${idx}`;
-          html += `<tr><td style="font-family:var(--mono);font-size:11px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${shortType(typeRepr)}</td><td>${hasJson ? `<button data-action="sim-toggle-event-row" data-row-id="${simRowId}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">{${keyCount}} fields</button>` : '<span class="u-c-dim">—</span>'}</td></tr>`;
+          html += `<tr>${mobileTd("Type", shortType(typeRepr), 'style="font-family:var(--mono);font-size:11px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"')}${mobileTd("Data", hasJson ? `<button data-action="sim-toggle-event-row" data-row-id="${simRowId}" aria-expanded="false" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--accent);font-size:11px;padding:2px 10px;cursor:pointer;font-family:var(--mono)">{${keyCount}} fields</button>` : '<span class="u-c-dim">—</span>')}</tr>`;
           if (hasJson) {
             html += `<tr id="${simRowId}" style="display:none"><td colspan="2" style="padding:0 8px 8px">${jsonTreeBlock(ev.contents.json, 280)}</td></tr>`;
           }

@@ -62,6 +62,20 @@ if (!/fetchAftermathPositionStates\(economicAccounts,\s*marketRows\)/.test(after
 if (!/allAccountIds\s*=\s*new Set\(economicAccounts\.map/.test(aftermathSource)) {
   issues.push("fetchAftermathPerpsPositions: order enrichment must use economic accounts only");
 }
+const aftermathMarketLabelSource = extractFunctionSource("afMarketLabel");
+if (!/afClearingHouseDiscoveryCache\.rows/.test(aftermathMarketLabelSource)) {
+  issues.push("afMarketLabel: must prefer discovered clearing house labels before static fallbacks");
+}
+const aftermathDiscoverySource = extractFunctionSource("fetchAftermathClearingHouses");
+if (!/base_pfs_id/.test(aftermathDiscoverySource)) {
+  issues.push("fetchAftermathClearingHouses: missing base_pfs_id market discovery");
+}
+if (!/multiGetObjectsTypeJsonByAddress\(basePfsIds\)/.test(aftermathDiscoverySource)) {
+  issues.push("fetchAftermathClearingHouses: missing batched PriceFeedStorage lookup");
+}
+if (!/\.json\?\.symbol/.test(aftermathDiscoverySource) || !/afMarketFeedLabel\(symbol/.test(aftermathDiscoverySource)) {
+  issues.push("fetchAftermathClearingHouses: missing symbol-derived market labels");
+}
 
 if (!/function buildAddressDefiAdapters\(/.test(js)) {
   issues.push("missing buildAddressDefiAdapters helper");

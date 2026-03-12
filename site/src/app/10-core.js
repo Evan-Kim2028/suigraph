@@ -1053,20 +1053,37 @@ function renderDefiCoveragePanel(coverage, title = "Sampling Coverage") {
   const c = coverage || {};
   const status = c.completeWindow ? "Complete" : (c.budgetLimited ? "Budget-Limited" : "Partial");
   const statusColor = c.completeWindow ? "var(--green)" : (c.budgetLimited ? "var(--yellow)" : "var(--text-dim)");
+  const body = `
+    <div class="card-body u-p12-16">
+      <div class="stats-grid" style="margin-bottom:0">
+        <div class="stat-box"><div class="stat-label">Window</div><div class="stat-value">${escapeHtml(c.windowLabel || "—")}</div><div class="stat-sub">${fmtNumber(c.windowHours || 0)}h target</div></div>
+        <div class="stat-box"><div class="stat-label">Status</div><div class="stat-value" style="color:${statusColor}">${status}</div><div class="stat-sub">${c.budgetReason ? escapeHtml(c.budgetReason) : "within budget"}</div></div>
+        <div class="stat-box"><div class="stat-label">Tx In Window</div><div class="stat-value">${fmtNumber(c.txInWindow || 0)}</div><div class="stat-sub">${fmtNumber(c.txFetched || 0)} scanned</div></div>
+        <div class="stat-box"><div class="stat-label">Checkpoints Scanned</div><div class="stat-value">${fmtNumber(c.checkpointsScanned || 0)}</div><div class="stat-sub">latest ${Number.isFinite(c.latestCheckpointSeen) ? fmtNumber(c.latestCheckpointSeen) : "—"}</div></div>
+        <div class="stat-box"><div class="stat-label">Package Resolution</div><div class="stat-value">${fmtNumber(c.resolvedPackages || 0)}</div><div class="stat-sub">${fmtNumber(c.unresolvedPackages || 0)} unresolved</div></div>
+        <div class="stat-box"><div class="stat-label">Budget Use</div><div class="stat-value">${fmtNumber(c.callsUsed || 0)}/${fmtNumber(c.maxCalls || 0)} calls</div><div class="stat-sub">${Math.round(c.elapsedMs || 0)}ms / ${fmtNumber(c.maxMs || 0)}ms</div></div>
+        <div class="stat-box"><div class="stat-label">Last Checkpoint Included</div><div class="stat-value">${Number.isFinite(c.lastCheckpointIncluded) ? fmtNumber(c.lastCheckpointIncluded) : "—"}</div><div class="stat-sub">${c.oldestIncludedTs ? fmtTime(c.oldestIncludedTs) : "no rows"}</div></div>
+      </div>
+    </div>
+  `;
+  if (uiViewMode !== "advanced") {
+    return `
+      <details class="card u-mb16 coverage-panel">
+        <summary class="card-header coverage-panel-summary">
+          <div class="coverage-panel-summary-title">${escapeHtml(title)}</div>
+          <div class="coverage-panel-summary-meta">
+            <span class="badge" style="background:var(--surface2);color:${statusColor}">${status}</span>
+            <span class="u-fs12-dim">${escapeHtml(c.windowLabel || "—")} · ${fmtNumber(c.callsUsed || 0)}/${fmtNumber(c.maxCalls || 0)} calls</span>
+          </div>
+        </summary>
+        ${body}
+      </details>
+    `;
+  }
   return `
     <div class="card u-mb16">
       <div class="card-header">${escapeHtml(title)}</div>
-      <div class="card-body u-p12-16">
-        <div class="stats-grid" style="margin-bottom:0">
-          <div class="stat-box"><div class="stat-label">Window</div><div class="stat-value">${escapeHtml(c.windowLabel || "—")}</div><div class="stat-sub">${fmtNumber(c.windowHours || 0)}h target</div></div>
-          <div class="stat-box"><div class="stat-label">Status</div><div class="stat-value" style="color:${statusColor}">${status}</div><div class="stat-sub">${c.budgetReason ? escapeHtml(c.budgetReason) : "within budget"}</div></div>
-          <div class="stat-box"><div class="stat-label">Tx In Window</div><div class="stat-value">${fmtNumber(c.txInWindow || 0)}</div><div class="stat-sub">${fmtNumber(c.txFetched || 0)} scanned</div></div>
-          <div class="stat-box"><div class="stat-label">Checkpoints Scanned</div><div class="stat-value">${fmtNumber(c.checkpointsScanned || 0)}</div><div class="stat-sub">latest ${Number.isFinite(c.latestCheckpointSeen) ? fmtNumber(c.latestCheckpointSeen) : "—"}</div></div>
-          <div class="stat-box"><div class="stat-label">Package Resolution</div><div class="stat-value">${fmtNumber(c.resolvedPackages || 0)}</div><div class="stat-sub">${fmtNumber(c.unresolvedPackages || 0)} unresolved</div></div>
-          <div class="stat-box"><div class="stat-label">Budget Use</div><div class="stat-value">${fmtNumber(c.callsUsed || 0)}/${fmtNumber(c.maxCalls || 0)} calls</div><div class="stat-sub">${Math.round(c.elapsedMs || 0)}ms / ${fmtNumber(c.maxMs || 0)}ms</div></div>
-          <div class="stat-box"><div class="stat-label">Last Checkpoint Included</div><div class="stat-value">${Number.isFinite(c.lastCheckpointIncluded) ? fmtNumber(c.lastCheckpointIncluded) : "—"}</div><div class="stat-sub">${c.oldestIncludedTs ? fmtTime(c.oldestIncludedTs) : "no rows"}</div></div>
-        </div>
-      </div>
+      ${body}
     </div>
   `;
 }
