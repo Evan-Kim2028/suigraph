@@ -162,6 +162,32 @@ function killChild(proc) {
   try { proc.kill("SIGTERM"); } catch (_) {}
 }
 
+async function waitForChildExit(proc, timeoutMs = 2000) {
+  if (!proc || proc.exitCode != null || proc.signalCode != null) return;
+  const waitOnce = () => new Promise((resolvePromise) => {
+    const onExit = () => {
+      cleanup();
+      resolvePromise(true);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolvePromise(false);
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      proc.off("exit", onExit);
+      proc.off("close", onExit);
+    };
+    proc.once("exit", onExit);
+    proc.once("close", onExit);
+  });
+
+  const exited = await waitOnce();
+  if (exited || proc.exitCode != null || proc.signalCode != null) return;
+  try { proc.kill("SIGKILL"); } catch (_) {}
+  await waitOnce();
+}
+
 export async function withStaticSitePage({
   distRoot,
   chromeBin,
@@ -211,7 +237,7 @@ export async function withStaticSitePage({
   } finally {
     await client?.close().catch(() => {});
     killChild(chrome);
-    await new Promise((resolvePromise) => chrome ? chrome.once("exit", () => resolvePromise()) : resolvePromise());
+    await waitForChildExit(chrome);
     await new Promise((resolvePromise, rejectPromise) => server ? server.close((err) => err ? rejectPromise(err) : resolvePromise()) : resolvePromise());
     await fs.rm(profileDir, { recursive: true, force: true }).catch(() => {});
   }
