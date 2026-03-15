@@ -1,5 +1,5 @@
 function defiAccountingCloseEnough(actual, expected, tolerance = 0.05) {
-  if (!Number.isFinite(actual) || !Number.isFinite(expected)) return true;
+  if (!Number.isFinite(actual) || !Number.isFinite(expected)) return false;
   const diff = Math.abs(actual - expected);
   if (diff <= tolerance) return true;
   const scale = Math.max(1, Math.abs(actual), Math.abs(expected));

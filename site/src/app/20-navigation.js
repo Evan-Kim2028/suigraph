@@ -83,6 +83,7 @@ function parseRoute(route) {
   if (parts[0] === "defi-stablecoins") return { page: "defi-stablecoins" };
   if (parts[0] === "defi-lst") return { page: "defi-lst" };
   if (parts[0] === "defi-flows") return { page: "defi-flows" };
+  if (parts[0] === "defi-perps") return { page: "defi-perps" };
   if (parts[0] === "protocol") return { page: "protocol" };
   if (parts[0] === "packages") return { page: "packages" };
   if (parts[0] === "simulate") return { page: "simulate" };
@@ -196,7 +197,7 @@ async function routeTo(route) {
   startPagePerf(r.page);
   // Update active nav — handle flat links and dropdown items
   const networkPages = ["transfers","congestion","events","protocol","validators","coin"];
-  const defiPages = ["defi-overview","defi-rates","defi-dex","defi-stablecoins","defi-lst","defi-flows"];
+  const defiPages = ["defi-overview","defi-rates","defi-dex","defi-stablecoins","defi-lst","defi-perps"];
   const devtoolsPages = ["graphql","simulate"];
   document.querySelectorAll(".topbar nav > a").forEach(a => {
     a.classList.toggle("active", a.dataset.page === r.page);
@@ -249,6 +250,7 @@ async function routeTo(route) {
       case "defi-stablecoins": await renderDefiStablecoins(app); break;
       case "defi-lst": await renderDefiLst(app); break;
       case "defi-flows": await renderDefiFlows(app); break;
+      case "defi-perps": await renderDefiPerps(app); break;
       case "protocol": await renderProtocolConfig(app); break;
       case "packages": await renderPackages(app); break;
       case "simulate": await renderSimulator(app); break;
@@ -495,48 +497,228 @@ async function classifyHexSearchTarget(rawQuery, force = false) {
   });
 }
 
+// ── Search Preview ───────────────────────────────────────────────────
+let searchPreviewRoute = "";
+let searchPreviewAbort = null;
+
+function hideSearchPreview() {
+  const el = document.getElementById("searchPreview");
+  if (el) { el.style.display = "none"; el.innerHTML = ""; }
+  searchPreviewRoute = "";
+  if (searchPreviewAbort) { searchPreviewAbort.abort(); searchPreviewAbort = null; }
+}
+
+function showSearchPreviewLoading(query) {
+  const el = document.getElementById("searchPreview");
+  if (!el) return;
+  el.style.display = "block";
+  el.innerHTML = `<div class="search-preview-loading">
+    <div class="spinner"></div>
+    Looking up <span style="font-family:var(--mono);color:var(--text)">${escapeHtml(truncHash(query, 10))}</span>...
+  </div>`;
+}
+
+function renderSearchPreviewCard(type, title, metaParts, route) {
+  const dot = '<span class="sp-dot">&middot;</span>';
+  return `<div class="search-preview-type">${escapeHtml(type)}</div>
+    <div class="search-preview-title">${escapeHtml(title)}</div>
+    <div class="search-preview-meta">${metaParts.filter(Boolean).join(dot)}</div>
+    <div class="search-preview-hint">Press Enter or click to view &rarr;</div>`;
+}
+
+async function fetchSearchPreviewData(route, query) {
+  const el = document.getElementById("searchPreview");
+  if (!el) return;
+
+  if (route.startsWith("/tx/")) {
+    const digest = route.slice(4);
+    try {
+      const data = await fetchTxShell(digest, false);
+      const tx = data?.transaction;
+      if (!tx) { el.innerHTML = renderSearchPreviewCard("Transaction", digest, ["Not found"], route); return; }
+      const status = tx.effects?.status === "SUCCESS" ? "Success" : "Failed";
+      const statusColor = tx.effects?.status === "SUCCESS" ? "var(--green)" : "var(--red)";
+      const gs = tx.effects?.gasEffects?.gasSummary;
+      const gas = gs ? fmtSui(Number(gs.computationCost) + Number(gs.storageCost) - Number(gs.storageRebate)) : "";
+      const cmds = tx.kind?.commands?.nodes || [];
+      const cmdSummary = cmds.length ? cmds.map(c => {
+        if (c.__typename === "MoveCallCommand") {
+          const fn = c.function;
+          return fn ? `${fn.module?.name || "?"}::${fn.name}` : "MoveCall";
+        }
+        return c.__typename?.replace("Command", "") || "?";
+      }).slice(0, 3).join(", ") : "system";
+      const sender = tx.sender?.address ? truncHash(tx.sender.address) : "";
+      const time = tx.effects?.timestamp ? timeAgo(tx.effects.timestamp) : "";
+      el.innerHTML = renderSearchPreviewCard("Transaction", truncHash(digest, 16), [
+        `<span style="color:${statusColor}">${status}</span>`,
+        cmdSummary,
+        sender ? `from ${sender}` : "",
+        gas,
+        time,
+      ], route);
+    } catch { el.innerHTML = renderSearchPreviewCard("Transaction", digest, ["Preview unavailable"], route); }
+
+  } else if (route.startsWith("/address/")) {
+    const addr = decodeURIComponent(route.slice(9));
+    try {
+      const data = await fetchAddressShell(addr, false);
+      const a = data?.address;
+      if (!a) { el.innerHTML = renderSearchPreviewCard("Address", truncHash(addr, 16), ["Not found or empty"], route); return; }
+      const name = a.defaultNameRecord?.domain;
+      const objects = a.objects?.nodes || [];
+      const objCount = objects.length + (a.objects?.pageInfo?.hasNextPage ? "+" : "");
+      // Extract SUI balance from objects
+      const suiObjs = objects.filter(o => (o.contents?.type?.repr || "").includes("::sui::SUI") && (o.contents?.type?.repr || "").includes("Coin<"));
+      let suiBal = 0;
+      for (const o of suiObjs) {
+        const bal = Number(o.contents?.json?.balance || 0);
+        suiBal += bal;
+      }
+      const coinTypes = new Set();
+      for (const o of objects) {
+        const t = o.contents?.type?.repr || "";
+        if (t.includes("Coin<")) coinTypes.add(t);
+      }
+      el.innerHTML = renderSearchPreviewCard("Address", name ? `${name} (${truncHash(addr, 8)})` : truncHash(addr, 16), [
+        suiBal > 0 ? fmtSui(suiBal) : "",
+        coinTypes.size > 0 ? `${coinTypes.size} coin type${coinTypes.size > 1 ? "s" : ""}` : "",
+        `${objCount} object${objects.length !== 1 ? "s" : ""}`,
+      ], route);
+    } catch { el.innerHTML = renderSearchPreviewCard("Address", truncHash(addr, 16), ["Preview unavailable"], route); }
+
+  } else if (route.startsWith("/object/")) {
+    const id = route.slice(8);
+    try {
+      const data = await fetchObjectShell(id, false);
+      const obj = data?.object;
+      if (!obj) { el.innerHTML = renderSearchPreviewCard("Object", truncHash(id, 16), ["Not found"], route); return; }
+      const isPkg = !!obj.asMovePackage;
+      const typeRepr = obj.asMoveObject?.contents?.type?.repr || "";
+      const label = isPkg ? "Package" : "Object";
+      const modules = obj.asMovePackage?.modules;
+      const modCount = modules?.nodes?.length || 0;
+      const hasMore = modules?.pageInfo?.hasNextPage;
+      el.innerHTML = renderSearchPreviewCard(label, truncHash(id, 16), [
+        isPkg ? `${modCount}${hasMore ? "+" : ""} module${modCount !== 1 ? "s" : ""}` : shortType(typeRepr),
+        `v${obj.version || "?"}`,
+      ], route);
+    } catch { el.innerHTML = renderSearchPreviewCard("Object", truncHash(id, 16), ["Preview unavailable"], route); }
+
+  } else if (route.startsWith("/checkpoint/")) {
+    const seq = route.slice(12);
+    try {
+      const data = await fetchCheckpointDetailShell(seq, false);
+      const cp = data?.checkpoint;
+      if (!cp) { el.innerHTML = renderSearchPreviewCard("Checkpoint", seq, ["Not found"], route); return; }
+      const txCount = cp.transactions?.nodes?.length || 0;
+      const hasMore = cp.transactions?.pageInfo?.hasNextPage;
+      const time = cp.timestamp ? timeAgo(cp.timestamp) : "";
+      el.innerHTML = renderSearchPreviewCard("Checkpoint", fmtNumber(cp.sequenceNumber), [
+        `Epoch ${cp.epoch?.epochId || "?"}`,
+        `${txCount}${hasMore ? "+" : ""} transaction${txCount !== 1 ? "s" : ""}`,
+        time,
+      ], route);
+    } catch { el.innerHTML = renderSearchPreviewCard("Checkpoint", seq, ["Preview unavailable"], route); }
+
+  } else if (route.startsWith("/coin")) {
+    const coinType = new URLSearchParams(route.split("?")[1] || "").get("type") || "";
+    el.innerHTML = renderSearchPreviewCard("Coin Type", shortType(coinType) || coinType, [
+      "View supply, holders, and activity",
+    ], route);
+  }
+}
+
+function navigateFromSearchPreview() {
+  if (searchPreviewRoute) {
+    const route = searchPreviewRoute;
+    hideSearchPreview();
+    navigate(route);
+  }
+}
+
+document.getElementById("searchPreview").addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  navigateFromSearchPreview();
+});
+
+// Close preview on outside click or Escape
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search-wrap")) hideSearchPreview();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideSearchPreview();
+});
+
 document.getElementById("searchForm").addEventListener("submit", async (evt) => {
   evt.preventDefault();
   const input = document.getElementById("searchInput");
   const q = input.value.trim();
   if (!q) return;
-  input.blur();
 
-  // Detect type by format
+  // If preview is already showing for this query, navigate directly
+  if (searchPreviewRoute) {
+    navigateFromSearchPreview();
+    input.blur();
+    return;
+  }
+
+  input.blur();
+  if (searchPreviewAbort) searchPreviewAbort.abort();
+  searchPreviewAbort = new AbortController();
+
+  // Detect type by format and resolve route
+  let route = "";
   const coinTypeQuery = normalizeCoinTypeQueryInput(q);
   if (coinTypeQuery) {
-    navigate("/coin?type=" + encodeURIComponent(coinTypeQuery));
+    route = "/coin?type=" + encodeURIComponent(coinTypeQuery);
   } else if (q.startsWith("0x") && q.includes("::")) {
-    // Keep invalid/edge coin-type-like input on the coin page instead of
-    // sending it to /object and failing SuiAddress parsing.
-    navigate("/coin?type=" + encodeURIComponent(q));
+    route = "/coin?type=" + encodeURIComponent(q);
   } else if (/^\d+$/.test(q)) {
-    navigate("/checkpoint/" + q);
+    route = "/checkpoint/" + q;
   } else if (/^0x[0-9a-fA-F]{64}$/.test(q)) {
-    // Could be an address or an object (package). Query GQL to find out.
+    showSearchPreviewLoading(q);
     try {
       const target = await classifyHexSearchTarget(q, false);
-      navigate(target?.route || ("/address/" + q));
+      route = target?.route || ("/address/" + q);
     } catch {
-      navigate("/address/" + q);
+      route = "/address/" + q;
     }
   } else if (q.length >= 32 && q.length <= 50 && /^[A-Za-z0-9+/=]+$/.test(q)) {
-    navigate("/tx/" + q);
+    route = "/tx/" + q;
   } else if (q.startsWith("0x")) {
-    navigate("/object/" + q);
+    route = "/object/" + q;
   } else if (/\.sui$/i.test(q)) {
-    // SuiNS name lookup
+    showSearchPreviewLoading(q);
     try {
       const data = await gql(`query($name: String!) { nameRecord(name: $name) { target { address } } }`, { name: q });
       if (data?.nameRecord?.target?.address) {
-        navigate("/address/" + data.nameRecord.target.address);
+        route = "/address/" + data.nameRecord.target.address;
       } else {
-        alert("SuiNS name not found: " + q);
+        const el = document.getElementById("searchPreview");
+        if (el) {
+          el.style.display = "block";
+          el.innerHTML = renderSearchPreviewCard("SuiNS", q, ["Name not found"], "");
+        }
+        return;
       }
     } catch (err) {
-      alert("SuiNS lookup failed: " + err.message);
+      const el = document.getElementById("searchPreview");
+      if (el) {
+        el.style.display = "block";
+        el.innerHTML = renderSearchPreviewCard("SuiNS", q, ["Lookup failed: " + escapeHtml(err.message)], "");
+      }
+      return;
     }
   } else {
-    navigate("/tx/" + q);
+    route = "/tx/" + q;
   }
+
+  if (!route) return;
+  searchPreviewRoute = route;
+
+  // Show loading state, then fetch preview data
+  showSearchPreviewLoading(q);
+  await fetchSearchPreviewData(route, q);
 });

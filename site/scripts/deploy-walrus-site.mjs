@@ -127,6 +127,9 @@ if (dirtyDeployInputs.length) {
 
 run("npm", ["run", "build"]);
 run("npm", ["run", "validate"]);
+run("node", ["scripts/check-bundle-size.mjs"]);
+run("npm", ["run", "smoke:gql-queries"]);
+run("npm", ["run", "smoke:defi-math"]);
 run("npm", ["run", "check:route-perf"]);
 
 const dirtyAfterValidate = getDirtyDeployInputs(repoRoot);

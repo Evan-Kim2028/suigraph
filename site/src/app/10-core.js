@@ -259,6 +259,7 @@ const PAGE_PERF_BUDGETS = Object.freeze({
   "defi-stablecoins": { gqlCalls: 20, renderMs: 2500 },
   "defi-lst": { gqlCalls: 20, renderMs: 2500 },
   "defi-flows": { gqlCalls: 18, renderMs: 2200 },
+  "defi-perps": { gqlCalls: 12, renderMs: 2000 },
   protocol: { gqlCalls: 2, renderMs: 1200 },
   packages: { gqlCalls: 14, renderMs: 2200 },
   simulate: { gqlCalls: 3, renderMs: 1300 },
@@ -1798,6 +1799,9 @@ const FIXED32_SCALE = 4294967296; // 2^32
 function numOrZero(v) {
   const n = Number(v?.value ?? v ?? 0);
   return Number.isFinite(n) ? n : 0;
+}
+function rawToHuman(raw, decimals) {
+  return Number(raw) / Math.pow(10, Math.max(0, Math.floor(Number(decimals || 0))));
 }
 function clamp01(v) {
   if (!Number.isFinite(v)) return 0;

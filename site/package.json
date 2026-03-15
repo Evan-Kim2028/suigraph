@@ -20,6 +20,8 @@
     "measure:route": "node scripts/measure-route-delivery.mjs",
     "measure:walrus:cold": "node scripts/measure-walrus-cold-cache.mjs",
     "smoke:coin": "node scripts/smoke-coin-search.mjs",
+    "smoke:defi-math": "node scripts/smoke-defi-math.mjs",
+    "smoke:gql-queries": "node scripts/smoke-gql-queries.mjs",
     "smoke:tx": "node scripts/smoke-tx-route.mjs",
     "gql:surface": "node scripts/report-gql-surface.mjs",
     "perf:budgets": "node scripts/report-perf-budgets.mjs",
@@ -28,6 +30,7 @@
     "schema:check": "node scripts/report-schema-coverage.mjs --check",
     "validate": "npm run build:check && node scripts/check-syntax.mjs && node scripts/check-quality.mjs && node scripts/check-bundle-boundaries.mjs && node scripts/check-accounting-guards.mjs && npm run check:fixture-coverage && npm run schema:check",
     "check:accounting": "node scripts/check-accounting-guards.mjs",
+    "check:bundle-size": "node scripts/check-bundle-size.mjs",
     "smoke:address": "node scripts/smoke-address-defi.mjs --expect-filter-hides"
   },
   "devDependencies": {
