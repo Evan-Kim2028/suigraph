@@ -11,22 +11,13 @@ export function normalizeRouteAddress(raw) {
 }
 
 export async function openAddressDefiTab(client, timeoutMs) {
+  // DeFi section auto-loads in the unified scroll layout (no tab click needed).
+  // Wait for either DeFi content to appear or an error/empty state.
   await waitForCondition(
     client,
-    "!!document.querySelector('[data-action=\"addr-switch-tab\"][data-tab=\"defi\"]')",
+    "(() => { const el = document.getElementById('addr-section-body-defi'); if (!el) return false; const text = el.innerText || ''; return text.includes('Wallet Holdings') || text.includes('No DeFi positions found.') || text.includes('Failed to load DeFi') || text.includes('Error loading page:'); })()",
     timeoutMs,
-    "address tabs"
-  );
-  const clicked = await evaluate(
-    client,
-    "(() => { const el = document.querySelector('[data-action=\"addr-switch-tab\"][data-tab=\"defi\"]'); if (!el) return false; el.click(); return true; })()"
-  );
-  if (!clicked) throw new Error("Could not open DeFi tab");
-  await waitForCondition(
-    client,
-    "(() => { const text = document.body.innerText || ''; return text.includes('Wallet Holdings') || text.includes('No DeFi positions found.') || text.includes('Error loading page:'); })()",
-    timeoutMs,
-    "DeFi content"
+    "DeFi section content"
   );
 }
 
