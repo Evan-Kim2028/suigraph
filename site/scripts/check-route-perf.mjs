@@ -101,13 +101,13 @@ function routeSpecs(fixtures) {
         await waitForCondition(
           client,
           `(() => {
-            const txTab = document.querySelector('[data-action="addr-switch-tab"][data-tab="txs"]');
-            const defiTab = document.querySelector('[data-action="addr-switch-tab"][data-tab="defi"]');
-            const content = document.getElementById('addr-tab-content');
-            return !!txTab && !!defiTab && !!content;
+            const txSection = document.getElementById('addr-section-body-txs');
+            const defiSection = document.getElementById('addr-section-body-defi');
+            const objSection = document.getElementById('addr-section-body-objects');
+            return !!txSection && !!defiSection && !!objSection;
           })()`,
           timeoutMs,
-          "address shell tabs"
+          "address shell sections"
         );
         await waitForCondition(
           client,
