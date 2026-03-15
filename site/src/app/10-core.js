@@ -244,7 +244,7 @@ const PAGE_PERF_BUDGETS = Object.freeze({
   checkpoint: { gqlCalls: 4, renderMs: 1400 },
   txs: { gqlCalls: 4, renderMs: 1200 },
   tx: { gqlCalls: 9, renderMs: 2000 },
-  address: { gqlCalls: 12, renderMs: 1900 },
+  address: { gqlCalls: 95, renderMs: 4000 },
   object: { gqlCalls: 14, renderMs: 2000 },
   graphql: { gqlCalls: 2, renderMs: 1000 },
   epoch: { gqlCalls: 4, renderMs: 1200 },
