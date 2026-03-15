@@ -33,6 +33,15 @@ jobs:
       - name: Validate build outputs and syntax
         run: npm run validate
 
+      - name: Check bundle size
+        run: node scripts/check-bundle-size.mjs
+
+      - name: Smoke GQL query compatibility
+        run: npm run smoke:gql-queries
+
+      - name: Smoke DeFi math (decimal sanity)
+        run: npm run smoke:defi-math
+
       - name: Smoke address DeFi route
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}

@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>suigraph block explorer</title>
-  <link rel="stylesheet" href="./assets/styles.css?v=3e218098099b">
-  <meta name="suigraph-extra-src" content="./assets/app-extra.js?v=2b678f7bdf41">
-  <script src="./assets/app.js?v=1faf1e93ae8f" defer></script>
+  <link rel="stylesheet" href="./assets/styles.css?v=0b92b350fc91">
+  <meta name="suigraph-extra-src" content="./assets/app-extra.js?v=a57db7f9f297">
+  <script src="./assets/app.js?v=76761b240180" defer></script>
 </head>
 <body>
 
@@ -16,6 +16,7 @@
     <span class="search-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
     <input id="searchInput" type="search" placeholder="Address / Tx Digest / Checkpoint / Package / Coin Type" enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
     <button type="submit" class="search-btn" title="Search" aria-label="Search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16" y2="16"/></svg></button>
+    <div id="searchPreview" class="search-preview" style="display:none"></div>
   </form>
   <nav>
     <a href="#/" data-page="home">Overview</a>
@@ -34,11 +35,10 @@
       <button type="button" class="nav-trigger" data-action="nav-toggle-dropdown" aria-haspopup="true" aria-expanded="false" aria-label="DeFi menu">DeFi</button>
       <div class="dropdown-menu">
         <a href="#/defi-overview" data-page="defi-overview" data-action="nav-close-dropdowns">Overview</a>
-        <a href="#/defi-rates" data-page="defi-rates" data-action="nav-close-dropdowns">Lending Rates</a>
         <a href="#/defi-dex" data-page="defi-dex" data-action="nav-close-dropdowns">DEX</a>
+        <a href="#/defi-rates" data-page="defi-rates" data-action="nav-close-dropdowns">Lending</a>
+        <a href="#/defi-perps" data-page="defi-perps" data-action="nav-close-dropdowns">Perps &amp; Margin</a>
         <a href="#/defi-stablecoins" data-page="defi-stablecoins" data-action="nav-close-dropdowns">Stablecoins</a>
-        <a href="#/defi-flows" data-page="defi-flows" data-action="nav-close-dropdowns">Volume</a>
-
       </div>
     </div>
     <div class="nav-dropdown" data-group="devtools">

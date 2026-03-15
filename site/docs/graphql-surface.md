@@ -1,20 +1,21 @@
 # GraphQL Surface
 
-Generated: `2026-03-10T14:35:31.936Z`
+Generated: `2026-03-15T01:10:26.559Z`
 
 | Metric | Value |
 |---|---:|
-| Total `gql(...)` call sites | 97 |
-| Awaited `gql(...)` call sites | 91 |
-| Static template-literal query call sites | 92 |
+| Total `gql(...)` call sites | 102 |
+| Awaited `gql(...)` call sites | 96 |
+| Static template-literal query call sites | 97 |
 | Dynamic/non-literal query call sites | 5 |
-| Unique static query signatures | 87 |
+| Unique static query signatures | 90 |
 
 ## Operations
 
 | Signature | Static call sites | Preview |
 |---|---:|---|
-| `anonymous:b365a39e1d` | 4 | `{ ${aliases.join("\n")} }` |
+| `anonymous:b365a39e1d` | 5 | `{ ${aliases.join("\n")} }` |
+| `anonymous:4741b50030` | 2 | `{ object(address: "${SUILEND_MAIN_POOL_OBJECT}") { asMoveObject { contents { json } } } }` |
 | `anonymous:b1bb773cd5` | 2 | `{ epoch { epochId startTimestamp referenceGasPrice validatorSet { activeValidators(first: 50) { ` |
 | `anonymous:e186e83057` | 2 | `query($cp: UInt53!){ checkpoint(sequenceNumber: $cp) { sequenceNumber timestamp } }` |
 | `anonymous:01c04ae2ce` | 1 | `query($table: SuiAddress!, $bcs: Base64!) { address(address: $table) { dynamicField(name: { type` |
@@ -31,8 +32,8 @@ Generated: `2026-03-10T14:35:31.936Z`
 | `anonymous:14313088e2` | 1 | `{ ${fields} }` |
 | `anonymous:15082280fe` | 1 | `query($id: SuiAddress!, $after: String) { object(address: $id) { dynamicFields(first: 20, after:` |
 | `anonymous:15b781180e` | 1 | `query($id: UInt53!) { epoch(epochId: $id) { epochId startTimestamp endTimestamp referenceGasPric` |
+| `anonymous:1b1ef2280c` | 1 | `query($after: String) { address(address: "${NAVI_RESERVES_TABLE}") { dynamicFields(first: 50, af` |
 | `anonymous:22d7fb24ba` | 1 | `query($addr: SuiAddress!, $after: String) { address(address: $addr) { objects(first: 20, after: ` |
-| `anonymous:2321391609` | 1 | `query($type: String!, $after: String, $first: Int!) { objects(filter: { type: $type }, first: $f` |
 | `anonymous:25a19011e5` | 1 | `{ ${fields.join("\n")} }` |
 | `anonymous:2ca7d1d9f4` | 1 | `query($addr: SuiAddress!) { address(address: $addr) { address defaultNameRecord { domain } objec` |
 | `anonymous:2ed11ae35c` | 1 | `query($id: SuiAddress!) { firstTx: transactions(first: 1, filter: { affectedObject: $id }) { nod` |
@@ -45,7 +46,6 @@ Generated: `2026-03-10T14:35:31.936Z`
 | `anonymous:3baad530d8` | 1 | `{ address(address: "${ALPHA_POSITIONS_TABLE}") { ${posParts.join("\n")} } }` |
 | `anonymous:4383cddd82` | 1 | `query($keys: [String!]!, $first: Int!) { multiGetTransactionEffects(keys: $keys) { digest status` |
 | `anonymous:462e16f9c8` | 1 | `{ events(last: 50 ${filterArg}) { nodes { contents { type { repr } } sender { address } timestam` |
-| `anonymous:4741b50030` | 1 | `{ object(address: "${SUILEND_MAIN_POOL_OBJECT}") { asMoveObject { contents { json } } } }` |
 | `anonymous:4b34039d98` | 1 | `{ borrowDynamics: address(address: "${SCALLOP_BORROW_DYNAMICS_TABLE}") { dynamicFields(first: 50` |
 | `anonymous:4bf1cdf245` | 1 | `query($keys: [String!]!) { multiGetTransactionEffects(keys: $keys) { digest status timestamp che` |
 | `anonymous:4c5ddace6d` | 1 | `{ checkpoints(last: 10) { nodes { sequenceNumber timestamp networkTotalTransactions transactions` |
@@ -61,10 +61,10 @@ Generated: `2026-03-10T14:35:31.936Z`
 | `anonymous:71e590b537` | 1 | `{ serviceConfig { maxMultiGetSize queryTimeoutMs maxQueryDepth maxQueryNodes maxQueryPayloadSize` |
 | `anonymous:73fad52f34` | 1 | `{ transactions(last: 50, filter: { kind: PROGRAMMABLE_TX }) { nodes { digest sender { address } ` |
 | `anonymous:740ec7ae02` | 1 | `query($pkg: String!) { transactions(last: 50, filter: { function: $pkg }) { nodes { digest sende` |
+| `anonymous:75ae530e39` | 1 | `{ address(address: "${POOL_REGISTRY_TABLE}") { dynamicFields(first: 50) { nodes { name { json } ` |
 | `anonymous:78892e8f92` | 1 | `{ address(address: "${addr}") { objects(filter: { type: "${SCALLOP_PROTOCOL}::obligation::Obliga` |
 | `anonymous:7bee0dfe38` | 1 | `{ address(address: "${ALPHA_MARKETS_TABLE}") { dynamicFields(first: 50) { nodes { name { json } ` |
 | `anonymous:7ee6aa1f0f` | 1 | `query($name: String!) { nameRecord(name: $name) { target { address } } }` |
-| `anonymous:89eada1674` | 1 | `{ address(address: "${addr}") { balances(first: 50${afterClause}) { pageInfo { hasNextPage endCu` |
 | `anonymous:8a3c1e6888` | 1 | `{ ${parts.join("\n")} }` |
 | `anonymous:8e3af7bf61` | 1 | `query($pkg: SuiAddress!, $mod: String!) { object(address: $pkg) { asMovePackage { module(name: $` |
 | `anonymous:8e5f6a5c6d` | 1 | `{ address(address: "${POOL_REGISTRY_TABLE}") { dynamicFields(first: 10) { nodes { name { json } ` |
@@ -75,6 +75,7 @@ Generated: `2026-03-10T14:35:31.936Z`
 | `anonymous:9e82c254f9` | 1 | `query($addr: SuiAddress!, $before: String, $filter: TransactionFilter) { address(address: $addr)` |
 | `anonymous:a159212d20` | 1 | `query($bag: SuiAddress!) { address(address: $bag) { dynamicFields(first: 10) { nodes { name { ty` |
 | `anonymous:a3cb9c3603` | 1 | `query($id: SuiAddress!, $after: String) { object(address: $id) { asMovePackage { modules(first: ` |
+| `anonymous:a5e9c32983` | 1 | `query($after: String) { address(address: "${SCALLOP_BALANCE_SHEETS_TABLE}") { dynamicFields(firs` |
 | `anonymous:a91bdfa1eb` | 1 | `{ object(address: "${DEEPBOOK_SUI_USDC_POOL}") { objectVersionsBefore(last: ${DEEPBOOK_PRICE_LOO` |
 | `anonymous:abac38445d` | 1 | `{ address(address: "${NAVI_USER_INFO_TABLE}") { dynamicField(name: { type: "address", bcs: "${ad` |
 | `anonymous:b49df69846` | 1 | `query($keys: [ObjectKey!]!) { multiGetObjects(keys: $keys) { address asMoveObject { contents { j` |
@@ -87,10 +88,12 @@ Generated: `2026-03-10T14:35:31.936Z`
 | `anonymous:c9259a7fdf` | 1 | `query($tx: JSON!) { simulateTransaction(transaction: $tx, checksEnabled: ${!simSkipChecks}) { ef` |
 | `anonymous:caaea332b2` | 1 | `query($after: String) { checkpoints(last: 25, before: $after) { pageInfo { hasPreviousPage start` |
 | `anonymous:cb03647040` | 1 | `query($type: String!, $after: String) { objects(filter: { type: $type }, first: 50, after: $afte` |
+| `anonymous:d6751ed2cc` | 1 | `{ address(address: "${addrNorm}") { balances(first: ${ADDRESS_BALANCE_PAGE_SIZE}${afterClause}) ` |
 | `anonymous:d9d8064ed2` | 1 | `query($pkg: SuiAddress!) { object(address: $pkg) { asMovePackage { linkage { originalId upgraded` |
 | `anonymous:da8f6c349d` | 1 | `query($type: String!, $after: String) { objects(filter: { type: $type }, first: 50, after: $afte` |
 | `anonymous:db2fcce76b` | 1 | `{ chainIdentifier serviceConfig { maxMultiGetSize queryTimeoutMs maxQueryDepth maxQueryNodes max` |
 | `anonymous:dd5fab0325` | 1 | `query($digest: String!) { transaction(digest: $digest) { digest sender { address } gasInput { ga` |
+| `anonymous:de208d4425` | 1 | `query($type: String!, $after: String, $first: Int!) { objects(filter: { type: $type }, first: $f` |
 | `anonymous:df83f0a4d6` | 1 | `{ ${obAliases.join("\n")} }` |
 | `anonymous:e60dab97bc` | 1 | `query($id: SuiAddress!, $before: String) { objectVersions(address: $id, last: 20, before: $befor` |
 | `anonymous:f1dbd91c19` | 1 | `{ ${balParts.join("\n")} }` |

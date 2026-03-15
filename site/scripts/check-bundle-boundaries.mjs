@@ -18,6 +18,7 @@ const ALLOWED_BOOT_TO_EXTRA_CALLS = new Set([
   "renderDefiFlows",
   "renderDefiLst",
   "renderDefiOverview",
+  "renderDefiPerps",
   "renderDefiRates",
   "renderDefiStablecoins",
   "renderDocs",

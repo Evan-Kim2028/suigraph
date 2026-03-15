@@ -1,17 +1,17 @@
 # Baseline Metrics
 
-Generated: `2026-03-12T17:46:44.139Z`
+Generated: `2026-03-15T01:10:26.763Z`
 
 | Metric | Value |
 |---|---:|
 | Source file | `src/index.template.html + src/styles.css + src/app/*.js` |
-| Lines | 19844 |
-| Bytes | 927492 |
-| Inline style attributes | 493 |
+| Lines | 20881 |
+| Bytes | 972381 |
+| Inline style attributes | 481 |
 | `window.*` handler assignments | 0 |
-| `await gql(...)` call sites | 95 |
-| Total `gql(...)` call sites | 101 |
-| Router `case` labels | 24 |
+| `await gql(...)` call sites | 96 |
+| Total `gql(...)` call sites | 102 |
+| Router `case` labels | 25 |
 
 Notes:
 - These are static code metrics for maintainability tracking.

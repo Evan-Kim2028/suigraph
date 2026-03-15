@@ -2818,7 +2818,7 @@ async function ensurePrices(coinTypes) {
   if (!coinTypes || !coinTypes.length) return;
   // Ensure SUI price exists first (needed for SUI-quoted pool conversions)
   if (!defiPrices.SUI) {
-    try { const p = await fetchSuiPriceFromDeepBook(); if (p) { defiPrices.SUI = p; deepbookSuiPriceTs = Date.now(); } } catch (_) {}
+    try { const p = await fetchSuiPriceFromDeepBook(); if (p) { defiPrices.SUI = p; deepbookSuiPriceTs = Date.now(); } } catch (e) { console.warn("SUI price fetch failed (ensurePrices):", e?.message); }
   }
   // Only attempt pool discovery for known coin types — random memecoins
   // won't have meaningful DEX liquidity and their long type strings can
@@ -2896,7 +2896,7 @@ async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
   defiPricesInFlight = (async () => {
     // DeepBook SUI price must resolve first (needed for SUI-quoted pool conversions)
     const deepBookSuiPrice = needSui
-      ? await fetchSuiPriceFromDeepBook().catch(() => null)
+      ? await fetchSuiPriceFromDeepBook().catch((e) => { console.warn("SUI price fetch failed:", e?.message); return null; })
       : (defiPrices.SUI || null);
 
     if (deepBookSuiPrice && Number.isFinite(deepBookSuiPrice)) {
@@ -2907,7 +2907,7 @@ async function fetchDefiPrices(force = false, { skipOracle = false } = {}) {
 
     // Pool oracle: price all known tokens from on-chain CLMM pools
     if (needOracle && defiPrices.SUI) {
-      await fetchPoolOraclePrices().catch(() => null);
+      await fetchPoolOraclePrices().catch((e) => { console.warn("Pool oracle failed:", e?.message); });
     }
 
     syncPeggedPrices();
@@ -3285,9 +3285,9 @@ async function fetchNaviLendingRates() {
     const totalSupply = supplyShares * supplyIdx;
     const totalBorrow = borrowShares * borrowIdx;
     const util = totalSupply > 0 ? totalBorrow / totalSupply : 0;
-    const dec = getDecimals(token);
-    const supplyHuman = totalSupply / Math.pow(10, dec);
-    const borrowHuman = totalBorrow / Math.pow(10, dec);
+    // NAVI stores all share balances at 9-decimal (MIST) precision regardless of token
+    const supplyHuman = totalSupply / 1e9;
+    const borrowHuman = totalBorrow / 1e9;
     rows[token] = buildRateRow("NAVI", token, borrowBps, supplyBps, util, NAVI_RESERVES_TABLE, "Reserves Table", "", supplyHuman, borrowHuman);
   }
   return rows;
@@ -3318,8 +3318,8 @@ async function fetchSuilendLendingRates() {
     const supplyBps = borrowBps * util * (1 - clamp01(spreadBps / 10000));
     const coinType = reserve?.coin_type?.name;
     const { decimals: suilendDec } = resolveCoinType(coinType ? (coinType.startsWith("0x") ? coinType : "0x" + coinType) : "");
-    const supplyHuman = (available + borrowed) / Math.pow(10, suilendDec);
-    const borrowHuman = borrowed / Math.pow(10, suilendDec);
+    const supplyHuman = rawToHuman(available + borrowed, suilendDec);
+    const borrowHuman = rawToHuman(borrowed, suilendDec);
     rows[token] = buildRateRow("Suilend", token, borrowBps, supplyBps, util, SUILEND_MAIN_POOL_OBJECT, "Main Pool Object", "", supplyHuman, borrowHuman);
   }
   return rows;
@@ -3348,8 +3348,8 @@ async function fetchAlphaLendingRates() {
     const spreadBps = numOrZero(market?.config?.spread_fee_bps);
     const supplyBps = borrowBps * util * (1 - clamp01(spreadBps / 10000));
     const alphaDec = getDecimals(token);
-    const supplyHuman = (cash + borrowed) / Math.pow(10, alphaDec);
-    const borrowHuman = borrowed / Math.pow(10, alphaDec);
+    const supplyHuman = rawToHuman(cash + borrowed, alphaDec);
+    const borrowHuman = rawToHuman(borrowed, alphaDec);
     rows[token] = buildRateRow("Alpha", token, borrowBps, supplyBps, util, ALPHA_MARKETS_TABLE, "Markets Table", "", supplyHuman, borrowHuman);
   }
   return rows;
@@ -3402,8 +3402,8 @@ async function fetchScallopLendingRates() {
     const revenueFactor = clamp01(fixed32ToFloat(im?.revenue_factor?.value || im?.revenue_factor));
     const supplyBps = borrowBps * util * (1 - revenueFactor);
     const scallopDec = getDecimals(token);
-    const supplyHuman = (cash + debt) / Math.pow(10, scallopDec);
-    const borrowHuman = debt / Math.pow(10, scallopDec);
+    const supplyHuman = rawToHuman(cash + debt, scallopDec);
+    const borrowHuman = rawToHuman(debt, scallopDec);
     rows[token] = buildRateRow("Scallop", token, borrowBps, supplyBps, util, SCALLOP_MARKET_OBJECT, "Market Object", "", supplyHuman, borrowHuman);
   }
   return rows;
@@ -6556,14 +6556,15 @@ async function renderAddress(app, addr) {
   let txLoadError = "";
   let allObjects = a.objects?.nodes || [];
   let objPageInfo = a.objects?.pageInfo || {};
-  let activeTab = "txs";
   const name = a.defaultNameRecord?.domain;
 
-  // DeFi data is loaded only when the user opens the DeFi tab.
+  // DeFi data streams in automatically
   let defiLoaded = false;
   let defiHtml = "";
   let defiWalletSectionRenderer = null;
   let walletProtocolFilterOnly = false;
+  // Section collapse state — all open by default
+  const sectionCollapsed = { txs: false, defi: false, objects: false };
 
   function getAddressDefiAdapterContext() {
     if (objPageInfo?.hasNextPage) {
@@ -6636,7 +6637,7 @@ async function renderAddress(app, addr) {
     }
   }
 
-  const tabContent = {
+  const sectionContent = {
     txs: () => {
       const txRows = txListBuildRows(allTxs);
       const txBody = txLoading
@@ -6696,7 +6697,7 @@ async function renderAddress(app, addr) {
       ${objPageInfo.hasNextPage ? `<div class="pagination"><button id="load-more-objs">Load more objects</button></div>` : ""}`;
     },
     defi: () => {
-      if (!defiLoaded) return renderLoading();
+      if (!defiLoaded) return `<div style="padding:16px;color:var(--text-dim);font-size:13px;display:flex;align-items:center;gap:8px"><div class="spinner" style="width:14px;height:14px;border-width:2px"></div>Loading DeFi positions across 15+ protocols...</div>`;
       return defiHtml || renderEmpty("No DeFi positions found.");
     },
   };
@@ -6972,7 +6973,7 @@ async function renderAddress(app, addr) {
         sub: errors.length ? `no positions · ${errors.length} failed` : "no positions",
         warn: errors.length > 0,
       });
-      if (isActiveAddressRoute() && activeTab === "defi") renderTabs("defi");
+      if (isActiveAddressRoute()) renderSection("defi");
       return;
     }
 
@@ -7379,37 +7380,22 @@ async function renderAddress(app, addr) {
       sub: failedProtocols.length ? `${failedProtocols.length} failed protocol${failedProtocols.length === 1 ? "" : "s"}` : "loaded",
       warn: failedProtocols.length > 0,
     });
-    if (isActiveAddressRoute() && activeTab === "defi") renderTabs("defi");
+    if (isActiveAddressRoute()) renderSection("defi");
   }
 
-  function renderTabs(active) {
-    activeTab = active;
-    const tabs = ["defi", "txs", "objects"];
-    const labels = { defi: "DeFi Portfolio", txs: "Transactions", objects: "Owned Objects" };
-    const counts = { defi: "", txs: allTxs.length + (txPageInfo.hasPreviousPage ? "+" : ""), objects: allObjects.length + (objPageInfo.hasNextPage ? "+" : "") };
-    document.getElementById("addr-tabs").innerHTML = tabs.map(t =>
-      `<div class="inner-tab ${t === active ? 'active' : ''}"
-        data-action="addr-switch-tab" data-tab="${t}">${labels[t]}${counts[t] ? " (" + counts[t] + ")" : ""}</div>`
-    ).join("");
-    document.getElementById("addr-tab-content").innerHTML = tabContent[active]();
+  function renderSection(key) {
+    const el = document.getElementById("addr-section-body-" + key);
+    if (!el) return;
+    el.innerHTML = sectionContent[key]();
+    bindSectionControls(key);
+  }
 
-    // Lazy-load DeFi data when tab is clicked
-    if (active === "defi" && !defiLoaded) {
-      loadDefi().catch(e => {
-        defiHtml = renderEmpty("Failed to load DeFi data: " + escapeHtml(e.message));
-        defiLoaded = true;
-        setPagePerfDetailRow("addr-defi-tab", {
-          label: "Addr DeFi tab",
-          value: "error",
-          sub: e?.message || "failed to load",
-          warn: true,
-        });
-        if (isActiveAddressRoute() && activeTab === "defi") renderTabs("defi");
-      });
-    }
+  function renderAllSections() {
+    for (const key of ["txs", "defi", "objects"]) renderSection(key);
+  }
 
-    // Bind load-more buttons
-    if (active === "txs") {
+  function bindSectionControls(key) {
+    if (key === "txs") {
       const presetEl = document.getElementById("addr-tx-date-preset");
       if (presetEl) {
         presetEl.onchange = async () => {
@@ -7429,14 +7415,14 @@ async function renderAddress(app, addr) {
           }
           txFilterState = next;
           txLoading = true;
-          renderTabs("txs");
+          renderSection("txs");
           await loadAddressTransactions(null, false);
           txLoading = false;
-          renderTabs("txs");
+          renderSection("txs");
         };
       }
     }
-    if (active === "objects") {
+    if (key === "objects") {
       const btn = document.getElementById("load-more-objs");
       if (btn) btn.onclick = async () => {
         btn.textContent = "Loading..."; btn.disabled = true;
@@ -7448,10 +7434,36 @@ async function renderAddress(app, addr) {
         }`, { addr: addrNorm, after: objPageInfo.endCursor });
         allObjects = [...allObjects, ...(more.address.objects.nodes || [])];
         objPageInfo = more.address.objects.pageInfo;
-        renderTabs("objects");
+        renderSection("objects");
       };
     }
   }
+
+  function toggleSection(key) {
+    sectionCollapsed[key] = !sectionCollapsed[key];
+    const body = document.getElementById("addr-section-body-" + key);
+    const chevron = document.getElementById("addr-chevron-" + key);
+    if (body) body.classList.toggle("collapsed", sectionCollapsed[key]);
+    if (chevron) chevron.classList.toggle("open", !sectionCollapsed[key]);
+  }
+
+  function sectionHeaderHtml(key, label, rightHtml) {
+    const open = !sectionCollapsed[key];
+    return `<div class="addr-section-header" data-action="addr-toggle-section" data-section="${key}">
+      <div class="addr-section-title">${label}<span class="addr-section-chevron${open ? " open" : ""}" id="addr-chevron-${key}">&rsaquo;</span></div>
+      <div class="addr-section-right">${rightHtml || ""}</div>
+    </div>`;
+  }
+
+  // Compute quick balance summary for header
+  const suiObjects = allObjects.filter(o => (o.contents?.type?.repr || "").includes("::sui::SUI") && (o.contents?.type?.repr || "").includes("Coin<"));
+  let suiBalance = 0;
+  for (const o of suiObjects) suiBalance += Number(o.contents?.json?.balance || 0);
+  const coinTypesSet = new Set();
+  for (const o of allObjects) { const t = o.contents?.type?.repr || ""; if (t.includes("Coin<")) coinTypesSet.add(t); }
+  const balSummaryParts = [];
+  if (suiBalance > 0) balSummaryParts.push(fmtSui(suiBalance));
+  if (coinTypesSet.size > 1) balSummaryParts.push(`${coinTypesSet.size} coin types`);
 
   app.innerHTML = `
     <div class="page-title">
@@ -7469,11 +7481,23 @@ async function renderAddress(app, addr) {
           <div class="detail-key">SuiNS Name</div>
           <div class="detail-val normal-font">${name}</div>
         </div>` : ""}
+        ${balSummaryParts.length ? `<div class="detail-row">
+          <div class="detail-key">Balance</div>
+          <div class="detail-val">${balSummaryParts.join(' &middot; ')}</div>
+        </div>` : ""}
       </div>
     </div>
-    <div class="card">
-      <div id="addr-tabs" class="inner-tabs"></div>
-      <div id="addr-tab-content" class="card-body"></div>
+    <div class="card addr-section">
+      ${sectionHeaderHtml("txs", "Transactions", `<span class="count">${allTxs.length}${txPageInfo.hasPreviousPage ? "+" : ""}</span>`)}
+      <div id="addr-section-body-txs" class="addr-section-body card-body${sectionCollapsed.txs ? " collapsed" : ""}"></div>
+    </div>
+    <div class="card addr-section">
+      ${sectionHeaderHtml("defi", "DeFi Portfolio", "")}
+      <div id="addr-section-body-defi" class="addr-section-body card-body${sectionCollapsed.defi ? " collapsed" : ""}"></div>
+    </div>
+    <div class="card addr-section">
+      ${sectionHeaderHtml("objects", "Owned Objects", `<span class="count">${allObjects.length}${objPageInfo.hasNextPage ? "+" : ""}</span>`)}
+      <div id="addr-section-body-objects" class="addr-section-body card-body${sectionCollapsed.objects ? " collapsed" : ""}"></div>
     </div>
   `;
   if (app._addressClickHandler) app.removeEventListener("click", app._addressClickHandler);
@@ -7482,11 +7506,12 @@ async function renderAddress(app, addr) {
     if (!trigger || !app.contains(trigger)) return;
     const action = trigger.getAttribute("data-action");
     if (!action) return;
-    ev.preventDefault();
-    if (action === "addr-switch-tab") {
-      renderTabs(trigger.getAttribute("data-tab") || "txs");
+    if (action === "addr-toggle-section") {
+      ev.preventDefault();
+      toggleSection(trigger.getAttribute("data-section"));
       return;
     }
+    ev.preventDefault();
     if (action === "addr-wallet-protocol-filter") {
       if (trigger.hasAttribute("disabled")) return;
       walletProtocolFilterOnly = !walletProtocolFilterOnly;
@@ -7502,19 +7527,19 @@ async function renderAddress(app, addr) {
         toDate: document.getElementById("addr-tx-date-to")?.value || "",
       });
       txLoading = true;
-      renderTabs("txs");
+      renderSection("txs");
       await loadAddressTransactions(null, false);
       txLoading = false;
-      renderTabs("txs");
+      renderSection("txs");
       return;
     }
     if (action === "addr-load-more-txs") {
       if (txLoading || !txPageInfo.hasPreviousPage || !txPageInfo.startCursor) return;
       txLoading = true;
-      renderTabs("txs");
+      renderSection("txs");
       await loadAddressTransactions(txPageInfo.startCursor, true);
       txLoading = false;
-      renderTabs("txs");
+      renderSection("txs");
       return;
     }
     if (action === "addr-tx-export-csv") {
@@ -7528,19 +7553,30 @@ async function renderAddress(app, addr) {
     }
   };
   app.addEventListener("click", app._addressClickHandler);
+
+  // Render all sections immediately
   txLoading = true;
-  renderTabs("txs");
+  renderAllSections();
+
   const txInitStartedAt = performance.now();
   setPagePerfDetailRow("addr-tx-init", { label: "Addr tx init", value: "loading" });
-  if (typeof requestIdleCallback === "function") {
-    requestIdleCallback(() => {
-      if (isActiveAddressRoute()) void ensureExtraRoutesLoaded().catch(() => {});
-    }, { timeout: 1200 });
-  } else {
-    setTimeout(() => {
-      if (isActiveAddressRoute()) void ensureExtraRoutesLoaded().catch(() => {});
-    }, 180);
-  }
+
+  // Auto-load DeFi (no longer behind a tab click)
+  void ensureExtraRoutesLoaded().then(() => {
+    if (isActiveAddressRoute() && !defiLoaded) {
+      loadDefi().catch(e => {
+        defiHtml = renderEmpty("Failed to load DeFi data: " + escapeHtml(e.message));
+        defiLoaded = true;
+        setPagePerfDetailRow("addr-defi-tab", {
+          label: "Addr DeFi tab",
+          value: "error",
+          sub: e?.message || "failed to load",
+          warn: true,
+        });
+        if (isActiveAddressRoute()) renderSection("defi");
+      });
+    }
+  }).catch(() => {});
   void (async () => {
     await loadAddressTransactions(null, false);
     txLoading = false;
@@ -7552,7 +7588,7 @@ async function renderAddress(app, addr) {
         : `${fmtNumber(allTxs.length)} row${allTxs.length === 1 ? "" : "s"}${txPageInfo.hasPreviousPage ? "+" : ""}`,
       warn: !!txLoadError,
     });
-    if (isActiveAddressRoute()) renderTabs(activeTab);
+    if (isActiveAddressRoute()) renderSection("txs");
   })();
 }
 
@@ -13675,9 +13711,9 @@ async function renderDefiRates(app) {
   const localRouteToken = routeRenderToken;
   const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
   const routeParams = splitRouteAndParams(getRoute()).params;
-  let token = routeParams.get("asset") || "SUI";
-  let sortKey = ["borrow", "supply", "util", "spread", "protocol", "tvl", "borrowed"].includes(routeParams.get("sort")) ? routeParams.get("sort") : "borrow";
-  let statusFilter = ["all", "live", "unavailable"].includes(routeParams.get("status")) ? routeParams.get("status") : "all";
+  let token = routeParams.get("asset") || "ALL";
+  let sortKey = ["borrow", "supply", "util", "spread", "protocol", "tvl", "borrowed", "asset"].includes(routeParams.get("sort")) ? routeParams.get("sort") : "supply";
+  let statusFilter = ["all", "live", "unavailable"].includes(routeParams.get("status")) ? routeParams.get("status") : "live";
   let showAllTokens = routeParams.get("all") === "1";
   let loadErr = "";
   let data = peekTimedCache(lendingRatesCache, LENDING_RATES_TTL_MS) || null;
@@ -13687,9 +13723,9 @@ async function renderDefiRates(app) {
 
   function persistDefiRateState() {
     setRouteParams({
-      asset: token !== "SUI" ? token : null,
-      sort: sortKey !== "borrow" ? sortKey : null,
-      status: statusFilter !== "all" ? statusFilter : null,
+      asset: token !== "ALL" ? token : null,
+      sort: sortKey !== "supply" ? sortKey : null,
+      status: statusFilter !== "live" ? statusFilter : null,
       all: showAllTokens ? "1" : null,
     });
   }
@@ -13702,6 +13738,7 @@ async function renderDefiRates(app) {
   const fmtUtil = (u) => Number.isFinite(u) ? `${(u * 100).toFixed(1)}%` : "—";
 
   function syncDefiRateToken() {
+    if (token === "ALL") return;
     const available = Object.keys(data?.byToken || {}).filter(t => showAllTokens || isCoreToken(t));
     if (!available.length) return;
     if (available.includes(token)) return;
@@ -13735,6 +13772,18 @@ async function renderDefiRates(app) {
     if (rerender && isActiveRoute()) app.innerHTML = renderContent();
   }
 
+  function collectAllRows() {
+    if (token !== "ALL") return data?.byToken?.[token] || [];
+    const all = [];
+    for (const [, rows] of Object.entries(data?.byToken || {})) {
+      for (const r of rows) {
+        if (!showAllTokens && !isCoreToken(r.token)) continue;
+        all.push(r);
+      }
+    }
+    return all;
+  }
+
   function sortedRows(allRows) {
     let rows = [...allRows];
     if (statusFilter !== "all") {
@@ -13744,6 +13793,7 @@ async function renderDefiRates(app) {
     else if (sortKey === "util") rows.sort((a, b) => (b.utilization || -Infinity) - (a.utilization || -Infinity));
     else if (sortKey === "spread") rows.sort((a, b) => ((b.borrowBps || 0) - (b.supplyBps || 0)) - ((a.borrowBps || 0) - (a.supplyBps || 0)));
     else if (sortKey === "protocol") rows.sort((a, b) => String(a.protocol || "").localeCompare(String(b.protocol || "")));
+    else if (sortKey === "asset") rows.sort((a, b) => String(a.token || "").localeCompare(String(b.token || "")));
     else if (sortKey === "tvl") {
       const usd = new Map(rows.map(r => [r, (r.totalSupplyHuman || 0) * (defiPrices[r.token] || 0)]));
       rows.sort((a, b) => usd.get(b) - usd.get(a));
@@ -13765,30 +13815,33 @@ async function renderDefiRates(app) {
       `;
     }
     if (loadErr) return `<div class="page-title">Lending Markets</div>${renderEmpty(escapeHtml(loadErr))}`;
-    const allRows = data?.byToken?.[token] || [];
+    const isAllMode = token === "ALL";
+    const allRows = collectAllRows();
     const rows = sortedRows(allRows);
     const live = allRows.filter(r => Number.isFinite(r.borrowBps) && Number.isFinite(r.supplyBps));
     const avgBorrow = live.length ? live.reduce((s, r) => s + r.borrowBps, 0) / live.length : null;
     const avgSupply = live.length ? live.reduce((s, r) => s + r.supplyBps, 0) / live.length : null;
-    const price = defiPrices[token] || 0;
-    const totalSupplyUsd = live.reduce((s, r) => s + (r.totalSupplyHuman || 0) * price, 0);
-    const totalBorrowUsd = live.reduce((s, r) => s + (r.totalBorrowHuman || 0) * price, 0);
+    const totalSupplyUsd = live.reduce((s, r) => s + (r.totalSupplyHuman || 0) * (defiPrices[r.token] || 0), 0);
+    const totalBorrowUsd = live.reduce((s, r) => s + (r.totalBorrowHuman || 0) * (defiPrices[r.token] || 0), 0);
+    const topSupply = live.length ? [...live].sort((a, b) => (b.supplyBps || 0) - (a.supplyBps || 0))[0] : null;
     const topBorrow = live.length ? [...live].sort((a, b) => (b.borrowBps || 0) - (a.borrowBps || 0))[0] : null;
     const topUtil = live.length ? [...live].sort((a, b) => (b.utilization || 0) - (a.utilization || 0))[0] : null;
     const unavailable = allRows.length - live.length;
+    const tokenLabel = isAllMode ? "all assets" : token;
     const signals = [
-      topBorrow ? `${topBorrow.protocol} has the top ${token} borrow APR (${fmtApr(topBorrow.borrowBps)}).` : `No live ${token} borrow APR is available.`,
-      topUtil ? `${topUtil.protocol} has highest ${token} utilization (${fmtUtil(topUtil.utilization)}).` : `No live ${token} utilization is available.`,
-      allRows.length ? `${live.length}/${allRows.length} ${token} markets are live; ${unavailable} unavailable.` : `No ${token} markets returned.`,
+      topSupply ? `${topSupply.protocol} ${topSupply.token} has the top supply APR (${fmtApr(topSupply.supplyBps)}).` : `No live supply APR available.`,
+      topBorrow ? `${topBorrow.protocol} ${topBorrow.token} has the top borrow APR (${fmtApr(topBorrow.borrowBps)}).` : `No live borrow APR available.`,
+      allRows.length ? `${live.length}/${allRows.length} ${tokenLabel} markets are live; ${unavailable} unavailable.` : `No markets returned.`,
     ];
     const scope = renderDefiScopeBar({
-      sampleLabel: `${token} lending state across ${fmtNumber(allRows.length)} protocols`,
+      sampleLabel: `${isAllMode ? "All" : token} lending state across ${fmtNumber(isAllMode ? Object.keys(data?.byToken || {}).length : allRows.length)} ${isAllMode ? "assets" : "protocols"}`,
       fetchedAt: data?.fetchedAt,
       ttlMs: LENDING_RATES_TTL_MS,
       refreshAction: "defi-rates-refresh",
       leftControls: `
         <span class="u-fs12-dim">Asset</span>
         <select data-action="defi-rates-token" class="ui-control">
+          <option value="ALL" ${token === "ALL" ? "selected" : ""}>All Markets</option>
           ${Object.keys(data?.byToken || {}).filter(t => showAllTokens || isCoreToken(t)).map(t =>
             `<option value="${escapeAttr(t)}" ${t === token ? "selected" : ""}>${escapeHtml(t)}</option>`
           ).join("")}
@@ -13798,13 +13851,14 @@ async function renderDefiRates(app) {
         </label>
         <span class="u-fs12-dim">Sort</span>
         <select data-action="defi-rates-sort" class="ui-control">
-          <option value="borrow" ${sortKey === "borrow" ? "selected" : ""}>Borrow APR</option>
           <option value="supply" ${sortKey === "supply" ? "selected" : ""}>Supply APR</option>
-          <option value="util" ${sortKey === "util" ? "selected" : ""}>Utilization</option>
+          <option value="borrow" ${sortKey === "borrow" ? "selected" : ""}>Borrow APR</option>
           <option value="tvl" ${sortKey === "tvl" ? "selected" : ""}>Total Supply</option>
           <option value="borrowed" ${sortKey === "borrowed" ? "selected" : ""}>Total Borrow</option>
+          <option value="util" ${sortKey === "util" ? "selected" : ""}>Utilization</option>
           <option value="spread" ${sortKey === "spread" ? "selected" : ""}>Spread</option>
           <option value="protocol" ${sortKey === "protocol" ? "selected" : ""}>Protocol</option>
+          ${isAllMode ? `<option value="asset" ${sortKey === "asset" ? "selected" : ""}>Asset</option>` : ""}
         </select>
         <span class="u-fs12-dim">Status</span>
         <select data-action="defi-rates-status" class="ui-control">
@@ -13827,44 +13881,44 @@ async function renderDefiRates(app) {
 
       <div class="stats-grid">
         <div class="stat-box">
-          <div class="stat-label">Protocols</div>
-          <div class="stat-value">${allRows.length}</div>
-          <div class="stat-sub">${live.length} live, ${Math.max(0, unavailable)} unavailable</div>
+          <div class="stat-label">Live Markets</div>
+          <div class="stat-value">${live.length}</div>
+          <div class="stat-sub">${allRows.length} total, ${Math.max(0, unavailable)} unavailable</div>
         </div>
         <div class="stat-box">
-          <div class="stat-label">Avg Borrow APR</div>
-          <div class="stat-value u-c-yellow">${avgBorrow != null ? fmtApr(avgBorrow) : "—"}</div>
-          <div class="stat-sub">${token}</div>
+          <div class="stat-label">Top Supply APR</div>
+          <div class="stat-value u-c-green">${topSupply ? fmtApr(topSupply.supplyBps) : "—"}</div>
+          <div class="stat-sub">${topSupply ? `${topSupply.protocol} ${topSupply.token}` : "—"}</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Top Borrow APR</div>
+          <div class="stat-value u-c-yellow">${topBorrow ? fmtApr(topBorrow.borrowBps) : "—"}</div>
+          <div class="stat-sub">${topBorrow ? `${topBorrow.protocol} ${topBorrow.token}` : "—"}</div>
         </div>
         <div class="stat-box">
           <div class="stat-label">Avg Supply APR</div>
           <div class="stat-value u-c-green">${avgSupply != null ? fmtApr(avgSupply) : "—"}</div>
-          <div class="stat-sub">${token}</div>
+          <div class="stat-sub">${tokenLabel}</div>
         </div>
         <div class="stat-box">
-          <div class="stat-label">Top Borrow APR</div>
-          <div class="stat-value">${topBorrow ? fmtApr(topBorrow.borrowBps) : "—"}</div>
-          <div class="stat-sub">${topBorrow ? topBorrow.protocol : "—"}</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-label">Top Utilization</div>
-          <div class="stat-value">${topUtil ? fmtUtil(topUtil.utilization) : "—"}</div>
-          <div class="stat-sub">${topUtil ? topUtil.protocol : "—"}</div>
+          <div class="stat-label">Avg Borrow APR</div>
+          <div class="stat-value u-c-yellow">${avgBorrow != null ? fmtApr(avgBorrow) : "—"}</div>
+          <div class="stat-sub">${tokenLabel}</div>
         </div>
         <div class="stat-box">
           <div class="stat-label">Total Supply</div>
           <div class="stat-value u-c-green">${totalSupplyUsd > 0 ? fmtUsdFromFloat(totalSupplyUsd) : "—"}</div>
-          <div class="stat-sub">${token} across ${live.length} protocols</div>
+          <div class="stat-sub">${tokenLabel} across ${live.length} markets</div>
         </div>
         <div class="stat-box">
           <div class="stat-label">Total Borrow</div>
           <div class="stat-value u-c-yellow">${totalBorrowUsd > 0 ? fmtUsdFromFloat(totalBorrowUsd) : "—"}</div>
-          <div class="stat-sub">${token} across ${live.length} protocols</div>
+          <div class="stat-sub">${tokenLabel} across ${live.length} markets</div>
         </div>
         <div class="stat-box">
-          <div class="stat-label">Unavailable Rows</div>
-          <div class="stat-value">${Math.max(0, unavailable)}</div>
-          <div class="stat-sub">${token} data quality gap</div>
+          <div class="stat-label">Top Utilization</div>
+          <div class="stat-value">${topUtil ? fmtUtil(topUtil.utilization) : "—"}</div>
+          <div class="stat-sub">${topUtil ? `${topUtil.protocol} ${topUtil.token}` : "—"}</div>
         </div>
       </div>
 
@@ -13872,10 +13926,10 @@ async function renderDefiRates(app) {
       ${methodCard}
 
       <div class="card">
-        <div class="card-header">Cross-Protocol Lending Snapshot</div>
+        <div class="card-header">${isAllMode ? "All Lending Markets" : `${token} Cross-Protocol Snapshot`}</div>
         <div class="card-body">
           <table class="mobile-stack-table">
-            <thead><tr><th>Protocol</th><th>Conf.</th><th class="u-ta-right">Supply APR</th><th class="u-ta-right">Borrow APR</th><th class="u-ta-right">Utilization</th><th class="u-ta-right">Total Supply</th><th class="u-ta-right">Total Borrow</th><th class="u-ta-right">Spread</th><th>Source</th><th>Status</th></tr></thead>
+            <thead><tr>${isAllMode ? "<th>Asset</th>" : ""}<th>Protocol</th><th class="u-ta-right">Supply APR</th><th class="u-ta-right">Borrow APR</th><th class="u-ta-right">Utilization</th><th class="u-ta-right">Total Supply</th><th class="u-ta-right">Total Borrow</th><th class="u-ta-right">Spread</th><th>Status</th></tr></thead>
             <tbody>
               ${rows.map(r => {
                 const utilColor = !Number.isFinite(r.utilization) ? "var(--text-dim)"
@@ -13886,23 +13940,20 @@ async function renderDefiRates(app) {
                 const status = r.error
                   ? `<span class="badge badge-fail" title="${escapeAttr(r.error)}">Unavailable</span>`
                   : '<span class="badge badge-success">Live</span>';
-                const source = r.sourceId
-                  ? `${hashLink(r.sourceId, '/object/' + r.sourceId)}<div class="u-fs11-dim">${escapeHtml(r.sourceLabel || "")}</div>`
-                  : '<span class="u-c-dim">—</span>';
-                const supplyUsd = r.totalSupplyHuman * (defiPrices[r.token] || 0);
-                const borrowUsd = r.totalBorrowHuman * (defiPrices[r.token] || 0);
-                const fmtSupplyUsd = r.error || !supplyUsd ? "—" : fmtUsdFromFloat(supplyUsd);
-                const fmtBorrowUsd = r.error || !borrowUsd ? "—" : fmtUsdFromFloat(borrowUsd);
+                const tokenPrice = defiPrices[r.token] || 0;
+                const supplyUsd = r.totalSupplyHuman * tokenPrice;
+                const borrowUsd = r.totalBorrowHuman * tokenPrice;
+                const fmtSupplyUsd = r.error ? "—" : (supplyUsd > 0 ? fmtUsdFromFloat(supplyUsd) : (r.totalSupplyHuman > 0 ? fmtCompact(r.totalSupplyHuman) + " " + r.token : "—"));
+                const fmtBorrowUsd = r.error ? "—" : (borrowUsd > 0 ? fmtUsdFromFloat(borrowUsd) : (r.totalBorrowHuman > 0 ? fmtCompact(r.totalBorrowHuman) + " " + r.token : "—"));
                 return `<tr>
+                  ${isAllMode ? mobileTd("Asset", `<span class="u-fw-600">${escapeHtml(r.token)}</span>`) : ""}
                   ${mobileTd("Protocol", escapeHtml(r.protocol), 'class="u-fw-600"')}
-                  ${mobileTd("Confidence", defiConfidenceBadge(r.error ? "low" : "high"))}
                   ${mobileTd("Supply APR", fmtApr(r.supplyBps), 'style="text-align:right;font-family:var(--mono);color:var(--green)"')}
                   ${mobileTd("Borrow APR", fmtApr(r.borrowBps), 'style="text-align:right;font-family:var(--mono);color:var(--yellow)"')}
                   ${mobileTd("Utilization", fmtUtil(r.utilization), `style="text-align:right;font-family:var(--mono);color:${utilColor}"`)}
                   ${mobileTd("Total Supply", fmtSupplyUsd, 'class="u-ta-right-mono"')}
                   ${mobileTd("Total Borrow", fmtBorrowUsd, 'class="u-ta-right-mono"')}
                   ${mobileTd("Spread", fmtApr(spreadBps), 'class="u-ta-right-mono"')}
-                  ${mobileTd("Source", source)}
                   ${mobileTd("Status", status)}
                 </tr>`;
               }).join("")}
@@ -13914,12 +13965,12 @@ async function renderDefiRates(app) {
   }
 
   const setDefiToken = (nextToken) => {
-    token = (data?.byToken?.[nextToken]) ? nextToken : "SUI";
+    token = nextToken === "ALL" ? "ALL" : ((data?.byToken?.[nextToken]) ? nextToken : "SUI");
     persistDefiRateState();
     app.innerHTML = renderContent();
   };
   const setDefiRateSort = (nextSort) => {
-    sortKey = ["borrow", "supply", "util", "spread", "protocol", "tvl", "borrowed"].includes(nextSort) ? nextSort : "borrow";
+    sortKey = ["borrow", "supply", "util", "spread", "protocol", "tvl", "borrowed", "asset"].includes(nextSort) ? nextSort : "supply";
     persistDefiRateState();
     app.innerHTML = renderContent();
   };
@@ -13972,6 +14023,232 @@ async function renderDefiRates(app) {
     if (!isActiveRoute()) return;
     loadDefiRatesData(false).catch(() => null);
   }, 0);
+}
+
+// ── Perps & Margin ──────────────────────────────────────────────────
+const DEFI_PERPS_TTL_MS = 60_000;
+let defiPerpsCache = { data: null, ts: 0 };
+
+// Map AM market labels to price keys for USD conversion
+function afBaseSymbol(label) {
+  const m = String(label || "").match(/^(\w+)\//);
+  return m ? m[1] : "";
+}
+
+function afBasePrice(label) {
+  const sym = afBaseSymbol(label);
+  if (!sym) return 0;
+  if (sym === "BTC" || sym === "XBTC") return defiPrices.xBTC || defiPrices.BTC || defiPrices.WBTC || 0;
+  if (sym === "ETH") return defiPrices.ETH || defiPrices.WETH || 0;
+  if (sym === "SUI") return defiPrices.SUI || 0;
+  if (sym === "XAUT") return defiPrices.XAUM || 0;
+  if (sym === "XAG") return 33; // silver, no on-chain oracle
+  return defiPrices[sym] || 0;
+}
+
+function dbPairFromType(typeRepr) {
+  const parts = String(typeRepr || "").split(",");
+  if (parts.length < 2) return { base: "?", quote: "?" };
+  const base = parts[0].split("::").pop()?.replace(">", "").trim() || "?";
+  const quote = parts[1].split("::").pop()?.replace(">", "").trim() || "?";
+  return { base, quote };
+}
+
+async function fetchPerpsMarketStats(force = false) {
+  const now = Date.now();
+  if (!force && defiPerpsCache.data && (now - defiPerpsCache.ts) < DEFI_PERPS_TTL_MS) {
+    notePerfCache(true);
+    return defiPerpsCache.data;
+  }
+  notePerfCache(false);
+
+  // Fetch all Aftermath clearing houses
+  const chDiscovery = await fetchAftermathClearingHouses(force);
+  const chIds = chDiscovery.rows.map(r => r.id);
+  const chObjects = await multiGetObjectsTypeJsonByAddress(chIds);
+
+  const afMarkets = [];
+  for (const row of chDiscovery.rows) {
+    const obj = chObjects[row.id];
+    const json = obj?.asMoveObject?.contents?.json;
+    if (!json) continue;
+    const ms = json.market_state || {};
+    const cp = json.market_params?.core_params || {};
+    const fp = json.market_params?.fees_params || {};
+
+    // OI is in base asset units (IFixed 18-dec). Fees are in USDC (IFixed 18-dec).
+    const oiBase = scaledBigIntToApprox(parseIFixedRaw(ms.open_interest), 18, 4);
+    const feesUsdc = scaledBigIntToApprox(parseIFixedRaw(ms.fees_accrued), 18, 2);
+    const premiumTwap = scaledBigIntToApprox(parseIFixedRaw(ms.premium_twap), 18, 8);
+
+    const takerFeeBps = Number(fp.taker_fee || 0) / 1e15 * 10;
+    const makerFeeBps = Number(fp.maker_fee || 0) / 1e15 * 10;
+    const marginInitial = Number(cp.margin_ratio_initial || 0) / 1e18;
+    const maxLeverage = marginInitial > 0 ? 1 / marginInitial : 0;
+
+    afMarkets.push({
+      id: row.id,
+      label: row.label,
+      oiBase,
+      feesUsdc,
+      premiumTwap,
+      takerFeeBps,
+      makerFeeBps,
+      maxLeverage,
+      paused: !!json.paused,
+    });
+  }
+
+  // Discover DeepBook margin pools from registry
+  const dbPools = [];
+  try {
+    const regData = await gql(`{
+      address(address: "${POOL_REGISTRY_TABLE}") {
+        dynamicFields(first: 50) {
+          nodes { name { json } value { ... on MoveValue { json } } }
+        }
+      }
+    }`);
+    const poolIds = (regData?.address?.dynamicFields?.nodes || []).map(n => n?.name?.json).filter(Boolean);
+    if (poolIds.length) {
+      const poolObjects = await multiGetObjectsTypeJsonByAddress(poolIds);
+      for (const pid of poolIds) {
+        const obj = poolObjects[pid];
+        const typeRepr = obj?.asMoveObject?.contents?.type?.repr || "";
+        const pair = dbPairFromType(typeRepr);
+        dbPools.push({ id: pid, base: pair.base, quote: pair.quote });
+      }
+    }
+  } catch (_) { /* non-fatal */ }
+
+  const result = {
+    afMarkets,
+    dbPools,
+    fetchedAt: new Date().toISOString(),
+    partial: chDiscovery.partial,
+    warnings: chDiscovery.warnings,
+  };
+  defiPerpsCache = { data: result, ts: Date.now() };
+  return result;
+}
+
+async function renderDefiPerps(app) {
+  const localRouteToken = routeRenderToken;
+  const isActiveRoute = () => isActiveRouteApp(app, localRouteToken);
+
+  app.innerHTML = `
+    <div class="page-title">Perps &amp; Margin <span class="type-tag">On-Chain</span></div>
+    <div class="card"><div class="card-body">${renderLoading()}</div></div>
+  `;
+
+  let data = null;
+  let loadErr = "";
+  try {
+    await fetchDefiPrices(false);
+    data = await fetchPerpsMarketStats(false);
+  } catch (e) {
+    loadErr = e?.message || "Failed to load perps data.";
+  }
+  if (!isActiveRoute()) return;
+
+  if (loadErr || !data) {
+    app.innerHTML = `<div class="page-title">Perps &amp; Margin</div>${renderEmpty(escapeHtml(loadErr || "No data"))}`;
+    return;
+  }
+
+  const afMarkets = data.afMarkets || [];
+  const liveMarkets = afMarkets.filter(m => !m.paused);
+  const totalFeesUsdc = afMarkets.reduce((s, m) => s + m.feesUsdc, 0);
+  let totalOiUsd = 0;
+  for (const m of afMarkets) {
+    const price = afBasePrice(m.label);
+    totalOiUsd += m.oiBase * price;
+  }
+  const dbPools = data.dbPools || [];
+
+  app.innerHTML = `
+    <div class="page-title">Perps &amp; Margin <span class="type-tag">On-Chain</span></div>
+
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="stat-label">AM Perp Markets</div>
+        <div class="stat-value">${liveMarkets.length}</div>
+        <div class="stat-sub">${afMarkets.length} total${afMarkets.length - liveMarkets.length > 0 ? `, ${afMarkets.length - liveMarkets.length} paused` : ""}</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Total OI (USD)</div>
+        <div class="stat-value">${totalOiUsd > 0 ? fmtUsdFromFloat(totalOiUsd) : "—"}</div>
+        <div class="stat-sub">Aftermath perps</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Lifetime Fees</div>
+        <div class="stat-value">${totalFeesUsdc > 0 ? fmtUsdFromFloat(totalFeesUsdc) : "—"}</div>
+        <div class="stat-sub">USDC accrued</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">DB Margin Pools</div>
+        <div class="stat-value">${dbPools.length}</div>
+        <div class="stat-sub">DeepBook v3</div>
+      </div>
+    </div>
+
+    <div class="card u-mb16">
+      <div class="card-header">Aftermath Perpetuals</div>
+      <div class="card-body">
+        <table class="mobile-stack-table">
+          <thead><tr><th>Market</th><th class="u-ta-right">OI (base)</th><th class="u-ta-right">OI (USD)</th><th class="u-ta-right">Funding Signal</th><th class="u-ta-right">Fees (USDC)</th><th class="u-ta-right">Max Lev.</th><th class="u-ta-right">Taker</th><th class="u-ta-right">Maker</th><th>Status</th></tr></thead>
+          <tbody>
+            ${afMarkets.map(m => {
+              const status = m.paused
+                ? '<span class="badge badge-fail">Paused</span>'
+                : '<span class="badge badge-success">Live</span>';
+              const baseSym = afBaseSymbol(m.label);
+              const price = afBasePrice(m.label);
+              const oiUsd = m.oiBase * price;
+              const oiBaseStr = m.oiBase > 0
+                ? (m.oiBase >= 1000 ? fmtCompact(m.oiBase) : m.oiBase.toFixed(m.oiBase < 1 ? 4 : 2)) + " " + baseSym
+                : "—";
+              const oiUsdStr = oiUsd > 0 ? fmtUsdFromFloat(oiUsd) : (price <= 0 ? "no price" : "—");
+              const fundingColor = m.premiumTwap > 0 ? "var(--green)" : m.premiumTwap < 0 ? "var(--red)" : "var(--text-dim)";
+              const fundingStr = m.premiumTwap !== 0 ? (m.premiumTwap > 0 ? "+" : "") + m.premiumTwap.toFixed(6) : "0";
+              return `<tr>
+                ${mobileTd("Market", `<a class="hash-link u-fw-600" href="#/object/${m.id}">${escapeHtml(m.label)}</a>`)}
+                ${mobileTd("OI (base)", oiBaseStr, 'class="u-ta-right-mono"')}
+                ${mobileTd("OI (USD)", oiUsdStr, 'class="u-ta-right-mono"')}
+                ${mobileTd("Funding Signal", fundingStr, `style="text-align:right;font-family:var(--mono);color:${fundingColor}"`)}
+                ${mobileTd("Fees (USDC)", m.feesUsdc > 0 ? fmtUsdFromFloat(m.feesUsdc) : "—", 'class="u-ta-right-mono"')}
+                ${mobileTd("Max Lev.", m.maxLeverage > 0 ? m.maxLeverage.toFixed(0) + "x" : "—", 'class="u-ta-right-mono"')}
+                ${mobileTd("Taker", m.takerFeeBps.toFixed(1) + " bps", 'class="u-ta-right-mono"')}
+                ${mobileTd("Maker", m.makerFeeBps.toFixed(1) + " bps", 'class="u-ta-right-mono"')}
+                ${mobileTd("Status", status)}
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">DeepBook v3 — Margin Pools</div>
+      <div class="card-body">
+        <table class="mobile-stack-table">
+          <thead><tr><th>Pool</th><th>Pair</th><th class="u-ta-right">Taker Fee</th><th class="u-ta-right">Maker Fee</th><th>Status</th></tr></thead>
+          <tbody>
+            ${dbPools.map(p => `<tr>
+              ${mobileTd("Pool", hashLink(p.id, "/object/" + p.id))}
+              ${mobileTd("Pair", `<span class="u-fw-600">${escapeHtml(p.base)} / ${escapeHtml(p.quote)}</span>`)}
+              ${mobileTd("Taker Fee", "10.0 bps (5.0 staked)", 'class="u-ta-right-mono"')}
+              ${mobileTd("Maker Fee", "5.0 bps (2.5 staked)", 'class="u-ta-right-mono"')}
+              ${mobileTd("Status", '<span class="badge badge-success">Live</span>')}
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    ${data.warnings?.length ? `<div class="u-fs12-dim u-mt12">${data.warnings.map(w => escapeHtml(w)).join("<br>")}</div>` : ""}
+    <div class="u-fs12-dim u-mt12">Last updated ${timeAgo(data.fetchedAt)}</div>
+  `;
 }
 
 // ── Protocol Config ───────────────────────────────────────────────────
